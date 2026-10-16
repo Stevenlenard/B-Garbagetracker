@@ -17,10 +17,22 @@ import '../services/service_area_service.dart';
 import 'fleet_snapshot.dart';
 
 /// Screens the bot can open for the user. Each dashboard maps these to its own tabs.
-enum BotAction { signIn, createAccount, downloadApp, track, collectionStatus, complaints, fileComplaint, routeHistory, settings, routePlan, users, analytics, routeAssignments }
+enum BotAction { signIn, createAccount, downloadApp, home, track, collectionStatus, complaints, fileComplaint, routeHistory, settings, routePlan, users, analytics, routeAssignments }
 
 /// guest = the public landing page (not signed in).
 enum BotRole { guest, resident, driver, admin }
+
+/// The screens each role's page can really open. A reply never offers a button for a screen the
+/// user's page does not have (the button would otherwise land on an unrelated tab).
+const Map<BotRole, Set<BotAction>> botSupportedActions = <BotRole, Set<BotAction>>{
+  BotRole.guest: <BotAction>{BotAction.signIn, BotAction.createAccount, BotAction.downloadApp, BotAction.track, BotAction.collectionStatus},
+  BotRole.resident: <BotAction>{BotAction.home, BotAction.track, BotAction.collectionStatus, BotAction.complaints, BotAction.fileComplaint, BotAction.routeHistory, BotAction.settings},
+  BotRole.driver: <BotAction>{BotAction.home, BotAction.track, BotAction.routePlan, BotAction.routeHistory, BotAction.settings},
+  BotRole.admin: <BotAction>{
+    BotAction.home, BotAction.track, BotAction.collectionStatus, BotAction.complaints, BotAction.routeHistory, BotAction.settings,
+    BotAction.users, BotAction.analytics, BotAction.routeAssignments,
+  },
+};
 
 /// Registered fleet counts from `get_public_stats.php` (counts only, no personal data).
 class PublicStats {
@@ -81,12 +93,18 @@ class BotReply {
   final BotAction? _action;
   final String? _actionLabel;
 
-  const BotReply(this.kind, this.text, {this.entry, this.suggestions = const <String>[], BotAction? action, String? actionLabel})
+  const BotReply(this.kind, this.text, {this.entry, this.suggestions = const <String>[], BotAction? action, String? actionLabel, this.noAction = false})
       : _action = action,
         _actionLabel = actionLabel;
 
-  BotAction? get action => _action ?? entry?.action;
-  String? get actionLabel => _actionLabel ?? entry?.actionLabel;
+  /// [noAction]: the answer is shown without a button (e.g. a resident how-to shown to an admin).
+  final bool noAction;
+
+  BotAction? get action => noAction ? null : (_action ?? entry?.action);
+  String? get actionLabel => action == null ? null : (_actionLabel ?? entry?.actionLabel);
+
+  BotReply copyWith({String? text, bool? noAction}) => BotReply(kind, text ?? this.text,
+      entry: entry, suggestions: suggestions, action: _action, actionLabel: _actionLabel, noAction: noAction ?? this.noAction);
 }
 
 class FaqBot {
@@ -124,12 +142,29 @@ class FaqBot {
     return ' ${words.join(' ')} ';
   }
 
+  /// Light English stemming so "managing", "managed" and "manage" match ("resolving" ->
+  /// "resolv"). Only used for keyword matching; both sides are stemmed the same way.
+  static String stem(String w) {
+    if (w.length <= 3) return w;
+    String s = w;
+    if (s.length > 5 && s.endsWith('ing')) {
+      s = s.substring(0, s.length - 3);
+    } else if (s.length > 4 && s.endsWith('ed')) {
+      s = s.substring(0, s.length - 2);
+    }
+    if (s.length > 3 && s.endsWith('e')) s = s.substring(0, s.length - 1);
+    return s;
+  }
+
+  static String _stemmed(String normalized) => ' ${normalized.trim().split(' ').where((String w) => w.isNotEmpty).map(stem).join(' ')} ';
+
   static int score(FaqEntry e, String normalized) {
     final List<String> words = normalized.trim().split(' ');
+    final String stemmed = _stemmed(normalized);
     int total = 0;
     e.keywords.forEach((String k, int w) {
       final String key = normalize(k);
-      if (normalized.contains(key)) {
+      if (normalized.contains(key) || stemmed.contains(_stemmed(key))) {
         total += w;
       } else {
         // One typo allowed in longer single words ("notifcation", "complain").
@@ -165,7 +200,49 @@ class FaqBot {
     return edits + (a.length - i) + (b.length - j) <= 1;
   }
 
+  /// [previous]: the user's previous message. A short follow-up that is not understood on its own
+  /// ("paano?", "how about drivers?", "eh yung sa resolved?") is read together with it.
   BotReply reply(
+    String message, {
+    FleetSnapshot? fleet,
+    PublicStats? stats,
+    Map<String, CollectionSchedule>? schedules,
+    String? purok,
+    String? previous,
+  }) {
+    final BotReply first = _reply(message, fleet: fleet, stats: stats, schedules: schedules, purok: purok);
+    if (first.kind == BotReplyKind.fallback && previous != null && previous.trim().isNotEmpty && _isShort(message)) {
+      final BotReply again = _reply('$previous $message', fleet: fleet, stats: stats, schedules: schedules, purok: purok);
+      if (again.kind == BotReplyKind.answer || again.kind == BotReplyKind.live) return _guard(again);
+    }
+    return _guard(first);
+  }
+
+  /// Admin answers for topics that residents and drivers also ask about in their own words.
+  static const Set<String> adminMirrorTopics = <String>{
+    'admin_complaints', 'admin_driver_reports', 'admin_track', 'admin_notifications', 'admin_collection_status', 'admin_eta', 'admin_dashboard', 'admin_reports_export',
+  };
+
+  static bool _isShort(String message) => normalize(message).trim().split(' ').length <= 7;
+
+  /// Drops a button that this role's page cannot open.
+  BotReply _guard(BotReply r) {
+    final BotAction? a = r.action;
+    if (a != null && !botSupportedActions[role]!.contains(a)) return r.copyWith(noAction: true);
+    return r;
+  }
+
+  static String _audience(FaqEntry e) => e.roles.contains(BotRole.resident)
+      ? 'residents'
+      : e.roles.contains(BotRole.driver)
+          ? 'drivers'
+          : 'visitors of the public page';
+
+  /// Administrators may read another role's how-to (useful when helping a resident or driver);
+  /// it is labelled and has no button, because the button would open a different admin page.
+  BotReply _assist(FaqEntry e) => BotReply(BotReplyKind.answer, 'For ${_audience(e)}: ${e.answer}', entry: e, noAction: true);
+
+  BotReply _reply(
     String message, {
     FleetSnapshot? fleet,
     PublicStats? stats,
@@ -185,11 +262,14 @@ class FaqBot {
     final BotReply? live = _live(text, fleet);
     if (live != null) return live;
 
-    // Exact question (from a tapped chip). The user's own entries first: guests and residents
-    // share some question texts with different answers.
+    final bool isAdmin = role == BotRole.admin;
+
+    // Exact question (from a tapped chip). The user's own entries first: roles share some
+    // question texts with different answers.
     for (final FaqEntry e in <FaqEntry>[...available, ...entries]) {
       if (normalize(e.question) == text) {
-        return e.roles.contains(role) ? BotReply(BotReplyKind.answer, e.answer, entry: e) : _restricted(e);
+        if (e.roles.contains(role)) return BotReply(BotReplyKind.answer, e.answer, entry: e);
+        return isAdmin ? _assist(e) : _restricted(e);
       }
     }
 
@@ -209,19 +289,32 @@ class FaqBot {
           best = e;
           bestScore = s;
         }
+      } else if (isAdmin) {
+        // Another role's how-to: only when clearly better than the admin's own answers.
+        if (s - 2 > bestScore) {
+          best = e;
+          bestScore = s - 2;
+        }
       } else if (s > blockedScore) {
         bestBlocked = e;
         blockedScore = s;
       }
     }
 
-    // On a tie with an admin-only topic, decline: better than answering the wrong question.
-    if (bestBlocked != null && blockedScore >= threshold && (blockedScore > bestScore || (blockedScore == bestScore && bestBlocked.adminOnly))) {
-      return _restricted(bestBlocked);
+    // Decline only for a real administrator tool (approve users, backups, analytics...) that matches
+    // at least as well as the user's own answers. Topics every role has in its own words (trucks,
+    // complaints, notifications, trips) never block the user's own answer; another role's feature
+    // is declined only when nothing of the user's own fits.
+    if (bestBlocked != null && blockedScore >= threshold) {
+      final bool adminTool = bestBlocked.adminOnly && !adminMirrorTopics.contains(bestBlocked.id);
+      // Visitors: account features clearly asked about get the "sign in first" reply.
+      final bool visitorAccountFeature = role == BotRole.guest && !bestBlocked.adminOnly && blockedScore > bestScore;
+      if (bestScore < threshold || (adminTool && blockedScore >= bestScore) || visitorAccountFeature) return _restricted(bestBlocked);
     }
     if (best != null && bestScore >= threshold) {
+      if (!best.roles.contains(role)) return _assist(best);
       // "Where is the truck?" also gets the live situation.
-      final String extra = (best.id == 'where_truck' || best.id == 'guest_where_truck') ? _fleetSummary(fleet) : '';
+      final String extra = const <String>{'where_truck', 'guest_where_truck', 'admin_track'}.contains(best.id) ? _fleetSummary(fleet) : '';
       return BotReply(BotReplyKind.answer, extra.isEmpty ? best.answer : '$extra\n\n${best.answer}', entry: best);
     }
     if (talk != null) return talk;
@@ -231,7 +324,7 @@ class FaqBot {
     return BotReply(
       BotReplyKind.fallback,
       maybe.isEmpty
-          ? "Sorry, I don't have an answer for that yet. I can only help with how to use this app. Try one of these, or use Contact Support in Settings."
+          ? "Sorry, I don't have an answer for that. I only know about using this app (trucks, alerts, complaints, accounts${isAdmin ? ', and the admin tools' : ''}). Try one of these, or use Contact Support in Account Settings."
           : 'I am not sure I understood. Did you mean one of these?',
       suggestions: maybe.isEmpty ? starters : maybe,
     );
@@ -252,7 +345,7 @@ class FaqBot {
   BotReply? _schedule(String t, Map<String, CollectionSchedule>? schedules, String? purok) {
     if (!_asksSchedule(t)) return null;
     // "How do I set / change the schedule?" is a how-to question (admin FAQ), not a lookup.
-    if (<String>[' set ', ' edit ', ' change ', ' update ', ' how do i ', ' paano '].any(t.contains)) return null;
+    if (<String>[' set ', ' edit ', ' change ', ' update ', ' how do i ', ' paano ', ' progress '].any(t.contains)) return null;
     // A purok named in the question wins over the user's own purok.
     String? asked;
     for (final String n in ServiceAreaService.documentedAreaNames) {
@@ -407,6 +500,16 @@ class FaqBot {
         suggestions: starters,
       );
     }
+    if (!blocked.adminOnly) {
+      // Another role's feature (not an administrator topic).
+      return BotReply(
+        BotReplyKind.restricted,
+        role == BotRole.driver
+            ? 'That is a resident feature (for example filing complaints or purok alerts), so it is not on a driver account. For a truck problem, use Report Issue in Account Settings.'
+            : 'That is part of the driver app, so it is not on a resident account. I can help you with tracking trucks, alerts, complaints and your account.',
+        suggestions: starters,
+      );
+    }
     return BotReply(
         BotReplyKind.restricted,
         role == BotRole.driver
@@ -441,11 +544,13 @@ class FaqBot {
 const Set<BotRole> _all = <BotRole>{BotRole.resident, BotRole.driver, BotRole.admin};
 const Set<BotRole> _everyone = <BotRole>{BotRole.guest, BotRole.resident, BotRole.driver, BotRole.admin};
 const Set<BotRole> _guest = <BotRole>{BotRole.guest};
-const Set<BotRole> _resident = <BotRole>{BotRole.resident, BotRole.admin};
-const Set<BotRole> _driver = <BotRole>{BotRole.driver, BotRole.admin};
+const Set<BotRole> _resident = <BotRole>{BotRole.resident};
+const Set<BotRole> _driver = <BotRole>{BotRole.driver};
 const Set<BotRole> _admin = <BotRole>{BotRole.admin};
 
-/// Admins may see resident/driver answers too (useful when assisting users).
+/// Each role gets answers written for its own screens. Administrators can still read a resident or
+/// driver how-to (labelled "For residents:" / "For drivers:", without a button) when no admin
+/// answer fits.
 const List<FaqEntry> faqKnowledgeBase = <FaqEntry>[
   // ---- Public landing page (not signed in) ----------------------------------------------------
   FaqEntry(
@@ -862,7 +967,7 @@ const List<FaqEntry> faqKnowledgeBase = <FaqEntry>[
     question: 'How do I change my purok or address?',
     answer: 'Go to Account Settings and tap Edit on your profile to update your purok. Your alerts and Route History use this purok.',
     roles: _resident,
-    keywords: <String, int>{'purok': 2, 'purok ko': 2, 'palitan': 1, 'address': 3, 'change purok': 4, 'lipat': 3, 'tirahan': 3, 'area': 1, 'location ko': 3, 'move': 2},
+    keywords: <String, int>{'purok': 2, 'purok ko': 2, 'palitan': 1, 'address': 3, 'change purok': 4, 'change my purok': 5, 'my purok': 2, 'lipat': 3, 'tirahan': 3, 'area': 1, 'location ko': 3, 'move': 2},
     action: BotAction.settings,
     actionLabel: 'Open Account Settings',
   ),
@@ -871,14 +976,19 @@ const List<FaqEntry> faqKnowledgeBase = <FaqEntry>[
   FaqEntry(
     id: 'driver_start',
     question: 'How do I start a collection trip?',
-    answer: 'Your collection trip starts when you log in on your assigned truck, and your GPS is shared while the app is open. Keep location turned on and the app running during collection.',
+    answer: 'On Dashboard Home, tap NEW TRIP in the Vehicle Console. The trip begins as soon as your phone gets its first real GPS fix, and your truck then appears on the live maps. Keep location on and the app open while collecting. Signing in alone does not start a trip.',
     roles: _driver,
-    keywords: <String, int>{'start': 3, 'begin': 3, 'simula': 3, 'umpisa': 3, 'trip': 2, 'collection': 1, 'shift': 2},
+    keywords: <String, int>{'start': 3, 'begin': 3, 'simula': 3, 'umpisa': 3, 'trip': 2, 'collection': 1, 'shift': 2, 'new trip': 5, 'resume': 3},
+    action: BotAction.home,
+    actionLabel: 'Open Dashboard Home',
   ),
   FaqEntry(
     id: 'driver_status_buttons',
     question: 'What do PAUSE, FULL and COMPLETED do?',
-    answer: 'Use PAUSE only when you must stop collecting for a while. Use FULL when the truck reaches capacity; this ends the collection. Tap COMPLETED after you have unloaded the garbage.',
+    answer: 'They are in the Vehicle Console on Dashboard Home:\n'
+        '• PAUSE: stop collecting for a while (status IDLE); tap RESUME to continue.\n'
+        '• FULL: the truck reached capacity; this ends collecting for the trip.\n'
+        '• COMPLETED: tap after unloading; the trip is closed and saved to Route History.',
     roles: _driver,
     keywords: <String, int>{'pause': 3, 'full': 3, 'completed': 3, 'complete': 2, 'puno': 3, 'tapos': 2, 'end trip': 3, 'stop': 2, 'button': 1},
   ),
@@ -994,9 +1104,30 @@ const List<FaqEntry> faqKnowledgeBase = <FaqEntry>[
   FaqEntry(
     id: 'admin_complaints',
     question: 'How do I handle resident complaints?',
-    answer: 'Open Complaint Management. Filter by type, status or date, open a complaint, then update its status (Pending, Under Review, Resolved). The resident is notified of the change.',
+    answer: 'Open Complaint Management (called Complaint Center on phones):\n'
+        '• Active lists Pending and In Progress complaints; Resolved Archive keeps finished ones.\n'
+        '• Residents shows resident complaints; Drivers shows truck problems reported by drivers.\n'
+        '• Search by complaint number or name, and filter by category, location, status and date.\n'
+        '• Tap View Details, then Mark In Progress or Mark Resolved (a resolution note is required).\n'
+        'The resident gets a notification each time the status changes.',
     roles: _admin,
-    keywords: <String, int>{'complaint management': 5, 'handle complaints': 5, 'update complaint': 5, 'resolve complaint': 5, 'all complaints': 4, 'manage complaints': 5},
+    keywords: <String, int>{
+      'complaint': 3, 'reklamo': 3, 'sumbong': 2, 'complaint management': 6, 'complaint center': 6, 'handle complaints': 6, 'update complaint': 6,
+      'resolve complaint': 6, 'all complaints': 5, 'manage complaints': 6, 'manage': 1, 'handle': 1, 'resolve': 2, 'mark resolved': 6,
+      'mark in progress': 6, 'resolution note': 6, 'view complaint': 5, 'see complaint': 5, 'check complaint': 5, 'resident complaint': 5,
+      'new complaint': 4, 'complaint status': 4, 'pending complaint': 5, 'unresolved': 4, 'paano ayusin ang reklamo': 6,
+    },
+    action: BotAction.complaints,
+    actionLabel: 'Open Complaint Management',
+  ),
+  FaqEntry(
+    id: 'admin_driver_reports',
+    question: 'Where do I see truck problems reported by drivers?',
+    answer: 'Open Complaint Management and switch to Drivers. Each truck problem a driver sent through Report Issue is listed there; open it to mark it In Progress or Resolved. New reports also appear in your notifications.',
+    roles: _admin,
+    keywords: <String, int>{'driver report': 6, 'driver issue': 6, 'truck issue': 6, 'truck problem': 6, 'vehicle problem': 6, 'report issue': 5, 'sira': 3, 'breakdown': 4, 'reported by driver': 6, 'driver complaint': 6},
+    action: BotAction.complaints,
+    actionLabel: 'Open Complaint Management',
   ),
   FaqEntry(
     id: 'admin_backup',
@@ -1042,5 +1173,106 @@ const List<FaqEntry> faqKnowledgeBase = <FaqEntry>[
     keywords: <String, int>{'permissions': 4, 'system settings': 4, 'admin access': 5, 'admin account': 5, 'other users password': 5, 'user passwords': 5, 'api key': 5, 'credentials': 5},
     action: BotAction.settings,
     actionLabel: 'Open System Settings',
+  ),
+  FaqEntry(
+    id: 'admin_track',
+    question: 'Where can I see the trucks live?',
+    answer: 'Open Fleet GIS Tracking (Track on phones). It shows every truck that is online on the live map with its status ring, and Active Fleet Status lists each truck with its driver and speed. Use the Map / Satellite switch for the map style. The dashboard also has a small Live Fleet Monitoring map.',
+    roles: _admin,
+    keywords: <String, int>{'where': 2, 'truck': 1, 'where is the truck': 5, 'nasaan': 3, 'live map': 5, 'fleet': 3, 'fleet gis': 6, 'track': 3, 'tracking': 3, 'gps': 2, 'mapa': 2, 'map': 2, 'location': 2, 'monitor': 3},
+    action: BotAction.track,
+    actionLabel: 'Open Fleet GIS Tracking',
+  ),
+  FaqEntry(
+    id: 'admin_notifications',
+    question: 'What notifications do administrators get?',
+    answer: 'You are notified about new complaints, new account registrations waiting for approval, truck problems reported by drivers, and trucks arriving in the puroks. Open the bell on the dashboard to read them; swipe one away or use Clear all (that only hides them for your account).',
+    roles: _admin,
+    keywords: <String, int>{'notification': 4, 'alert': 3, 'what notification': 5, 'bell': 3, 'abiso': 3, 'notify': 3},
+  ),
+  FaqEntry(
+    id: 'admin_collection_status',
+    question: 'How do I see which puroks were visited or are overdue?',
+    answer: 'Open Collection Route Optimization. Each purok shows its last verified truck visit (green recent, red due or overdue, gray no record), and you can compare recorded trip paths. A verified visit needs a real trip that stayed inside the purok; it does not prove every household was served.',
+    roles: _admin,
+    keywords: <String, int>{'collection status': 5, 'overdue': 4, 'visited': 3, 'not visited': 5, 'route optimization': 6, 'coverage': 3, 'which purok': 4, 'skipped': 3, 'nadaanan': 4, 'optimization': 4},
+    action: BotAction.collectionStatus,
+    actionLabel: 'Open Collection Route Optimization',
+  ),
+  FaqEntry(
+    id: 'admin_service_areas',
+    question: 'How do I add or edit puroks and service areas?',
+    answer: "Go to System Settings, Service Area & Route Management, Manage Service Areas. There you can review each area's coordinates, type and whether it is a collection stop. Reset Balintawak Defaults restores the original barangay areas.",
+    roles: _admin,
+    keywords: <String, int>{'service area': 6, 'add purok': 6, 'new purok': 6, 'add area': 6, 'new area': 5, 'edit purok': 6, 'delete purok': 6, 'purok': 2, 'purok boundary': 6, 'geofence': 6, 'coordinates': 4, 'manage areas': 6, 'collection stop': 5, 'truck stop': 5},
+    action: BotAction.settings,
+    actionLabel: 'Open System Settings',
+  ),
+  FaqEntry(
+    id: 'admin_dashboard',
+    question: 'What do the numbers on the admin dashboard mean?',
+    answer: '• Online Drivers: drivers signed in right now\n'
+        '• Pending Issues: complaints not yet resolved\n'
+        '• Route Coverage: share of collection areas with a verified visit\n'
+        '• Total Residents: registered resident accounts\n'
+        'Recent Activity lists the latest system events.',
+    roles: _admin,
+    keywords: <String, int>{'dashboard': 4, 'online drivers': 5, 'pending issues': 6, 'route coverage': 6, 'total residents': 6, 'recent activity': 6, 'numbers': 2, 'overview': 3},
+    action: BotAction.home,
+    actionLabel: 'Open Dashboard Overview',
+  ),
+  FaqEntry(
+    id: 'admin_eta',
+    question: 'How accurate are the ETAs?',
+    answer: "The ETA is the distance divided by the truck's current or recent average speed, so it is an estimate. System Analytics shows ETA performance: how close past ETAs were to the real arrival times.",
+    roles: _admin,
+    keywords: <String, int>{'eta': 5, 'estimated time': 5, 'eta performance': 6, 'accuracy': 4, 'accurate': 4, 'arrival': 3},
+    action: BotAction.analytics,
+    actionLabel: 'Open System Analytics',
+  ),
+  FaqEntry(
+    id: 'admin_reports_export',
+    question: 'How do I download a report?',
+    answer: 'In System Analytics tap EXPORT, choose the report and PDF or Excel, then tap Download Report. For a full data export use System Settings, Data Management, Export System Data.',
+    roles: _admin,
+    keywords: <String, int>{'download report': 6, 'export report': 6, 'report': 2, 'pdf': 4, 'excel': 4, 'xlsx': 4, 'print': 3, 'ulat': 3},
+    action: BotAction.analytics,
+    actionLabel: 'Open System Analytics',
+  ),
+  FaqEntry(
+    id: 'driver_manual_alert',
+    question: 'How do I alert residents that I am arriving?',
+    answer: 'On Dashboard Home, tap Manual Alert in the quick actions and choose the area; residents of that purok get a notification. Usually you do not need it: during a trip your GPS sends the approach and arrival alerts automatically.',
+    roles: _driver,
+    keywords: <String, int>{'manual alert': 6, 'alert resident': 6, 'notify resident': 6, 'send alert': 5, 'abisuhan': 5, 'announce': 4, 'arriving': 3},
+    action: BotAction.home,
+    actionLabel: 'Open Dashboard Home',
+  ),
+  FaqEntry(
+    id: 'driver_simulation',
+    question: 'What is Simulation mode?',
+    answer: 'Simulation (in the quick actions) moves a demo truck along a route without real GPS, for training or demonstrations. Simulated trips are kept separately and never count as real collection visits. Tap Real GPS to switch back.',
+    roles: _driver,
+    keywords: <String, int>{'simulation': 6, 'simulate': 5, 'demo': 4, 'real gps': 5, 'practice': 3, 'test trip': 4},
+    action: BotAction.home,
+    actionLabel: 'Open Dashboard Home',
+  ),
+  FaqEntry(
+    id: 'driver_progress',
+    question: 'How do I see my collection progress this week?',
+    answer: 'Tap Progress in the quick actions on Dashboard Home. It lists this week\'s areas and which ones you have already visited.',
+    roles: _driver,
+    keywords: <String, int>{'progress': 5, 'weekly': 3, 'this week': 4, 'checklist': 4, 'visited areas': 5, 'done areas': 4},
+    action: BotAction.home,
+    actionLabel: 'Open Dashboard Home',
+  ),
+  FaqEntry(
+    id: 'driver_map',
+    question: 'Where is the map for drivers?',
+    answer: 'Open Map Tracking. It shows your truck, the other trucks that are online, and the collection areas. Route Optimization shows the areas in your assignment.',
+    roles: _driver,
+    keywords: <String, int>{'map': 3, 'map tracking': 6, 'live map': 5, 'where am i': 4, 'my truck': 3, 'other trucks': 4, 'mapa': 3},
+    action: BotAction.track,
+    actionLabel: 'Open Map Tracking',
   ),
 ];

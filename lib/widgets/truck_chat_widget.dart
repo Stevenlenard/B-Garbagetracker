@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -13,6 +14,8 @@ import '../services/service_area_service.dart';
 import '../screens/collection_route_optimization_screen.dart' show FirebaseCollectionDataSource;
 import '../utils/collection_visits.dart';
 import 'package:firebase_database/firebase_database.dart';
+import 'package:intl/intl.dart';
+import '../utils/session_manager.dart';
 
 /// Floating "Truck Buddy" help button + chat panel. Must be placed directly in a Stack: it returns
 /// a Positioned.fill (empty areas let taps through) so it never affects the size of that Stack.
@@ -48,9 +51,12 @@ class TruckChatLauncher extends StatefulWidget {
     this.loadStats,
   });
 
-  /// Forgets remembered button spots (tests start from the default spot).
+  /// Forgets remembered button spots and conversations (tests start fresh).
   @visibleForTesting
-  static void debugResetSpots() => _TruckChatLauncherState._savedSpot.clear();
+  static void debugResetSpots() {
+    _TruckChatLauncherState._savedSpot.clear();
+    _ChatHistory.resetMemory();
+  }
 
   @override
   State<TruckChatLauncher> createState() => _TruckChatLauncherState();
@@ -63,8 +69,88 @@ class _ChatMessage {
   final String? actionLabel;
   final List<String> suggestions;
   final bool restricted;
+  final DateTime at;
 
-  const _ChatMessage({required this.fromUser, required this.text, this.action, this.actionLabel, this.suggestions = const <String>[], this.restricted = false});
+  _ChatMessage({required this.fromUser, required this.text, this.action, this.actionLabel, this.suggestions = const <String>[], this.restricted = false, DateTime? at})
+      : at = at ?? DateTime.now();
+
+  Map<String, Object?> toJson() => <String, Object?>{
+        'u': fromUser,
+        't': text,
+        if (action != null) 'a': action!.name,
+        if (actionLabel != null) 'l': actionLabel,
+        if (suggestions.isNotEmpty) 's': suggestions,
+        if (restricted) 'r': true,
+        'at': at.millisecondsSinceEpoch,
+      };
+
+  static _ChatMessage? fromJson(Object? j) {
+    if (j is! Map) return null;
+    final String? text = j['t'] as String?;
+    if (text == null) return null;
+    BotAction? action;
+    for (final BotAction a in BotAction.values) {
+      if (a.name == j['a']) action = a;
+    }
+    return _ChatMessage(
+      fromUser: j['u'] == true,
+      text: text,
+      action: action,
+      actionLabel: j['l'] as String?,
+      suggestions: (j['s'] is List) ? (j['s'] as List).map((Object? e) => '$e').toList() : const <String>[],
+      restricted: j['r'] == true,
+      at: j['at'] is int ? DateTime.fromMillisecondsSinceEpoch(j['at'] as int) : null,
+    );
+  }
+}
+
+/// One conversation per account (role + user), kept while the app runs and saved on the device
+/// for signed-in users, so the chat shows the earlier discussion like a messaging app: after
+/// closing the panel, switching pages or reopening the app.
+class _ChatHistory {
+  _ChatHistory._();
+
+  static const int maxMessages = 80;
+  static final Map<String, List<_ChatMessage>> _memory = <String, List<_ChatMessage>>{};
+
+  static String prefsKey(String conversation) => 'truck_buddy_chat_$conversation';
+
+  static Future<List<_ChatMessage>> load(String conversation, {required bool persist}) async {
+    final List<_ChatMessage>? inMemory = _memory[conversation];
+    if (inMemory != null) return inMemory;
+    final List<_ChatMessage> list = <_ChatMessage>[];
+    if (persist) {
+      try {
+        final String? raw = (await SharedPreferences.getInstance()).getString(prefsKey(conversation));
+        if (raw != null) {
+          for (final Object? j in (jsonDecode(raw) as List)) {
+            final _ChatMessage? m = _ChatMessage.fromJson(j);
+            if (m != null) list.add(m);
+          }
+        }
+      } catch (_) {/* unreadable or unavailable storage: start a new conversation */}
+    }
+    return _memory[conversation] = list;
+  }
+
+  static Future<void> save(String conversation, List<_ChatMessage> messages, {required bool persist}) async {
+    if (messages.length > maxMessages) messages.removeRange(0, messages.length - maxMessages);
+    _memory[conversation] = messages;
+    if (!persist) return;
+    try {
+      await (await SharedPreferences.getInstance()).setString(prefsKey(conversation), jsonEncode(messages.map((_ChatMessage m) => m.toJson()).toList()));
+    } catch (_) {}
+  }
+
+  static Future<void> clear(String conversation) async {
+    _memory.remove(conversation);
+    try {
+      await (await SharedPreferences.getInstance()).remove(prefsKey(conversation));
+    } catch (_) {}
+  }
+
+  @visibleForTesting
+  static void resetMemory() => _memory.clear();
 }
 
 class _TruckChatLauncherState extends State<TruckChatLauncher> with SingleTickerProviderStateMixin {
@@ -72,7 +158,15 @@ class _TruckChatLauncherState extends State<TruckChatLauncher> with SingleTicker
   static const Color _ink = Color(0xFF1A2B3C);
 
   late FaqBot _bot;
-  final List<_ChatMessage> _messages = <_ChatMessage>[];
+  List<_ChatMessage> _messages = <_ChatMessage>[];
+
+  /// Conversation key: role + signed-in user ("guest" on the public page). Guests are kept in
+  /// memory only (public computers).
+  String? _conversation;
+  bool get _persist => _bot.role != BotRole.guest;
+
+  /// Shows the jump-to-latest button while the user reads older messages.
+  bool _atBottom = true;
   final TextEditingController _input = TextEditingController();
   final ScrollController _scroll = ScrollController();
   final FocusNode _focus = FocusNode();
@@ -161,6 +255,8 @@ class _TruckChatLauncherState extends State<TruckChatLauncher> with SingleTicker
     _bot = FaqBot(botRoleFrom(widget.role));
     _spot = _savedSpot[_bot.role];
     _greet();
+    _loadConversation();
+    _scroll.addListener(_onScroll);
     if (_spot == null) _loadSpot();
     try {
       _fleetSub = (widget.fleet ?? LiveFleet.watch()).listen((FleetSnapshot f) => _fleet = f, onError: (Object _) {});
@@ -227,11 +323,53 @@ class _TruckChatLauncherState extends State<TruckChatLauncher> with SingleTicker
     super.didUpdateWidget(old);
     if (botRoleFrom(old.role) != botRoleFrom(widget.role)) {
       _bot = FaqBot(botRoleFrom(widget.role));
-      _messages.clear();
+      _messages = <_ChatMessage>[];
+      _conversation = null;
       _greet();
+      _loadConversation();
       _spot = _savedSpot[_bot.role];
       if (_spot == null) _loadSpot();
     }
+  }
+
+  /// Restores this account's earlier conversation (or starts one with the greeting).
+  Future<void> _loadConversation() async {
+    final BotRole role = _bot.role;
+    String key = 'guest';
+    if (role != BotRole.guest) {
+      try {
+        final user = await SessionManager.getUser();
+        key = '${role.name}_${user?.userId ?? 0}';
+      } catch (_) {
+        key = '${role.name}_0';
+      }
+    }
+    final List<_ChatMessage> saved = await _ChatHistory.load(key, persist: role != BotRole.guest);
+    if (!mounted || _bot.role != role) return;
+    setState(() {
+      // Messages typed before the history finished loading are kept after it.
+      final List<_ChatMessage> typed = _messages.where((_ChatMessage m) => m.fromUser || _messages.indexOf(m) > 0).toList();
+      if (saved.isEmpty) {
+        saved.addAll(_messages);
+      } else {
+        saved.addAll(typed);
+      }
+      _messages = saved;
+      _conversation = key;
+    });
+    _save();
+    _jumpToLatest();
+  }
+
+  void _save() {
+    final String? key = _conversation;
+    if (key != null) _ChatHistory.save(key, _messages, persist: _persist);
+  }
+
+  void _onScroll() {
+    if (!_scroll.hasClients) return;
+    final bool atBottom = _scroll.position.pixels >= _scroll.position.maxScrollExtent - 48;
+    if (atBottom != _atBottom) setState(() => _atBottom = atBottom);
   }
 
   void _greet() {
@@ -248,6 +386,7 @@ class _TruckChatLauncherState extends State<TruckChatLauncher> with SingleTicker
     _scheduleSub?.cancel();
     _bounce.dispose();
     _input.dispose();
+    _scroll.removeListener(_onScroll);
     _scroll.dispose();
     _focus.dispose();
     super.dispose();
@@ -258,14 +397,23 @@ class _TruckChatLauncherState extends State<TruckChatLauncher> with SingleTicker
     if (text.isEmpty || _typing) return;
     _input.clear();
     _focus.requestFocus(); // Enter would otherwise leave the box unfocused
+    // The question before this one, so short follow-ups ("paano?", "eh sa drivers?") are understood.
+    String? previous;
+    for (final _ChatMessage m in _messages.reversed) {
+      if (m.fromUser) {
+        previous = m.text;
+        break;
+      }
+    }
     setState(() {
       _messages.add(_ChatMessage(fromUser: true, text: text));
       _typing = true;
     });
+    _save();
     _scrollDown();
     Future<void>.delayed(const Duration(milliseconds: 450), () {
       if (!mounted) return;
-      final BotReply r = _bot.reply(text, fleet: _fleet, stats: _stats, schedules: _schedules, purok: widget.purok);
+      final BotReply r = _bot.reply(text, fleet: _fleet, stats: _stats, schedules: _schedules, purok: widget.purok, previous: previous);
       setState(() {
         _typing = false;
         _messages.add(_ChatMessage(
@@ -277,7 +425,20 @@ class _TruckChatLauncherState extends State<TruckChatLauncher> with SingleTicker
           restricted: r.kind == BotReplyKind.restricted,
         ));
       });
+      _save();
       _scrollDown();
+    });
+  }
+
+  /// Opens the chat at the newest message (after the list has been laid out).
+  void _jumpToLatest() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_scroll.hasClients) return;
+      _scroll.jumpTo(_scroll.position.maxScrollExtent);
+      // Long histories finish measuring a frame later.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_scroll.hasClients) _scroll.jumpTo(_scroll.position.maxScrollExtent);
+      });
     });
   }
 
@@ -285,12 +446,20 @@ class _TruckChatLauncherState extends State<TruckChatLauncher> with SingleTicker
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scroll.hasClients) _scroll.animateTo(_scroll.position.maxScrollExtent, duration: const Duration(milliseconds: 250), curve: Curves.easeOut);
     });
+    if (!_atBottom) setState(() => _atBottom = true);
   }
 
-  void _restart() => setState(() {
-        _messages.clear();
-        _greet();
-      });
+  /// "Start over": the saved conversation is deleted too.
+  void _restart() {
+    final String? key = _conversation;
+    if (key != null) _ChatHistory.clear(key);
+    setState(() {
+      _messages = <_ChatMessage>[];
+      _greet();
+      _atBottom = true;
+    });
+    _save();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -367,7 +536,8 @@ class _TruckChatLauncherState extends State<TruckChatLauncher> with SingleTicker
               setState(() => _open = !_open);
               if (_open) {
                 _refreshStats();
-                _scrollDown();
+                _atBottom = true;
+                _jumpToLatest();
                 Future<void>.delayed(const Duration(milliseconds: 250), () {
                   if (mounted && _open) _focus.requestFocus();
                 });
@@ -426,12 +596,43 @@ class _TruckChatLauncherState extends State<TruckChatLauncher> with SingleTicker
           Expanded(
             child: Container(
               color: const Color(0xFFF6F8FA),
-              child: ListView.builder(
-                controller: _scroll,
-                padding: const EdgeInsets.fromLTRB(14, 14, 14, 8),
-                itemCount: _messages.length + (_typing ? 1 : 0),
-                itemBuilder: (BuildContext context, int i) => i == _messages.length ? _buildTyping() : _buildMessage(_messages[i], i == _messages.length - 1),
-              ),
+              child: Stack(children: [
+                Positioned.fill(
+                  child: Scrollbar(
+                    controller: _scroll,
+                    child: ListView.builder(
+                      controller: _scroll,
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      padding: const EdgeInsets.fromLTRB(14, 14, 14, 8),
+                      itemCount: _messages.length + (_typing ? 1 : 0),
+                      itemBuilder: (BuildContext context, int i) {
+                        if (i == _messages.length) return _buildTyping();
+                        final _ChatMessage m = _messages[i];
+                        final bool newDay = i == 0 || !_sameDay(_messages[i - 1].at, m.at);
+                        return Column(crossAxisAlignment: CrossAxisAlignment.stretch, mainAxisSize: MainAxisSize.min, children: [
+                          if (newDay) _buildDaySeparator(m.at),
+                          _buildMessage(m, i == _messages.length - 1),
+                        ]);
+                      },
+                    ),
+                  ),
+                ),
+                if (!_atBottom)
+                  Positioned(
+                    right: 12,
+                    bottom: 10,
+                    child: Material(
+                      color: Colors.white,
+                      shape: const CircleBorder(side: BorderSide(color: Color(0xFFB2DFDB))),
+                      elevation: 3,
+                      child: InkWell(
+                        customBorder: const CircleBorder(),
+                        onTap: _scrollDown,
+                        child: const Padding(padding: EdgeInsets.all(8), child: Icon(Icons.keyboard_arrow_down_rounded, color: _teal, size: 22)),
+                      ),
+                    ),
+                  ),
+              ]),
             ),
           ),
           _buildInput(),
@@ -469,6 +670,27 @@ class _TruckChatLauncherState extends State<TruckChatLauncher> with SingleTicker
         IconButton(onPressed: _restart, tooltip: 'Start over', icon: const Icon(Icons.refresh_rounded, color: Colors.white, size: 20)),
         IconButton(onPressed: () => setState(() => _open = false), tooltip: 'Close', icon: const Icon(Icons.close_rounded, color: Colors.white, size: 20)),
       ]),
+    );
+  }
+
+  static bool _sameDay(DateTime a, DateTime b) => a.year == b.year && a.month == b.month && a.day == b.day;
+
+  Widget _buildDaySeparator(DateTime at) {
+    final DateTime now = DateTime.now();
+    final String label = _sameDay(at, now)
+        ? 'Today'
+        : _sameDay(at, now.subtract(const Duration(days: 1)))
+            ? 'Yesterday'
+            : DateFormat('MMM d, yyyy').format(at);
+    return Padding(
+      padding: const EdgeInsets.only(top: 4, bottom: 12),
+      child: Center(
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+          decoration: BoxDecoration(color: const Color(0xFFE6EBF0), borderRadius: BorderRadius.circular(10)),
+          child: Text(label, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: Color(0xFF5B6B7B))),
+        ),
+      ),
     );
   }
 
@@ -521,6 +743,10 @@ class _TruckChatLauncherState extends State<TruckChatLauncher> with SingleTicker
       padding: const EdgeInsets.only(bottom: 10),
       child: Column(crossAxisAlignment: m.fromUser ? CrossAxisAlignment.end : CrossAxisAlignment.start, children: [
         bubble,
+        Padding(
+          padding: const EdgeInsets.only(top: 3, left: 4, right: 4),
+          child: Text(DateFormat('h:mm a').format(m.at), style: const TextStyle(fontSize: 10.5, color: Color(0xFF8A99A8), fontWeight: FontWeight.w600)),
+        ),
         if (isLast && !m.fromUser && m.suggestions.isNotEmpty)
           Padding(
             padding: const EdgeInsets.only(top: 8),

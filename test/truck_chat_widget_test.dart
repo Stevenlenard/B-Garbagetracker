@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:garbage_tracking_app/chatbot/faq_bot.dart';
 import 'package:garbage_tracking_app/chatbot/fleet_snapshot.dart';
 import 'package:garbage_tracking_app/widgets/truck_chat_widget.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   setUp(TruckChatLauncher.debugResetSpots);
@@ -100,5 +101,30 @@ void main() {
       }),
       2,
     );
+  });
+
+  testWidgets('the conversation is kept: a new chat window shows the earlier messages', (WidgetTester t) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    await pump(t, 'admin');
+    await ask(t, 'how can i manage complaints');
+    expect(find.textContaining('Complaint Management (called Complaint Center on phones)'), findsOneWidget);
+    // Leave the page (the launcher is disposed), then come back: the discussion is still there.
+    await t.pumpWidget(const MaterialApp(home: Scaffold(body: SizedBox())));
+    await pump(t, 'admin');
+    await t.pump(const Duration(milliseconds: 100));
+    // The chat opens at the newest message; scrolling up shows the earlier discussion.
+    await t.drag(find.byType(ListView), const Offset(0, 2000));
+    await t.pump(const Duration(milliseconds: 600));
+    expect(find.text('how can i manage complaints'), findsOneWidget);
+    expect(find.text('Today'), findsOneWidget);
+    // A short follow-up uses the previous question.
+    await ask(t, 'paano?');
+    expect(find.textContaining('Complaint Management (called Complaint Center on phones)'), findsWidgets);
+    expect(find.textContaining('not sure I understood'), findsNothing);
+    expect(find.textContaining("don't have an answer"), findsNothing);
+    // Start over clears it.
+    await t.tap(find.byTooltip('Start over'));
+    await t.pump();
+    expect(find.text('how can i manage complaints'), findsNothing);
   });
 }

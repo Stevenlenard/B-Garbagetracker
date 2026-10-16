@@ -587,10 +587,12 @@ void main() {
       testWidgets('$name: new names, counters, tabs and paginated cards without overflow', (WidgetTester tester) async {
         await pumpCenter(tester, size);
         expect(find.text('Complaint Center'), findsOneWidget);
-        expect(find.text('Manage, track, and resolve resident and driver complaints'), findsOneWidget);
+        // The subtitle is shown on wide screens only (calmer phone header).
+        expect(find.text('Manage, track, and resolve resident and driver complaints'), size.width >= 600 ? findsOneWidget : findsNothing);
         expect(find.text('Resolve Radar'), findsNothing);
         expect(find.byKey(const ValueKey<String>('counter-pending')), findsOneWidget);
-        expect(find.textContaining('RESOLVED ARCHIVE'), findsOneWidget);
+        expect(find.byKey(const ValueKey<String>('scope-resolved')), findsOneWidget);
+        expect(find.byKey(const ValueKey<String>('filter-open')), findsOneWidget);
         expect(find.text('Showing 1–15 of 19 active resident complaints'), findsOneWidget);
         expect(find.text('View Details'), findsWidgets);
         expect(tester.takeException(), isNull);
@@ -666,7 +668,30 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Showing 1–1 of 1 active driver reports'), findsOneWidget);
       expect(find.textContaining('Juan'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey<String>('filter-open')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey<String>('filter-category')), findsOneWidget);
       expect(find.byKey(const ValueKey<String>('filter-location')), findsNothing, reason: 'driver reports have no purok');
+    });
+
+    testWidgets('narrow: filters live in one sheet and show as removable chips', (WidgetTester tester) async {
+      final (ComplaintCenterController c, _, _) = await pumpCenter(tester, const Size(360, 780));
+      await tester.tap(find.byKey(const ValueKey<String>('filter-open')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.descendant(of: find.byKey(const ValueKey<String>('filter-category')), matching: find.text('Spilled Waste')));
+      await tester.pumpAndSettle();
+      expect(c.query.category, 'Spilled Waste');
+      await tester.ensureVisible(find.byType(FilledButton).last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byType(FilledButton).last);
+      await tester.pumpAndSettle();
+      expect(find.text('Filters · 1'), findsOneWidget);
+      expect(find.byIcon(Icons.category_rounded), findsOneWidget); // the removable chip
+      await tester.tap(find.descendant(of: find.ancestor(of: find.byIcon(Icons.category_rounded), matching: find.byType(Row)).first, matching: find.byIcon(Icons.close_rounded)));
+      await tester.pumpAndSettle();
+      expect(c.query.category, isNull);
+      expect(find.text('Filters'), findsOneWidget);
+      expect(tester.takeException(), isNull);
     });
 
     testWidgets('a server error shows Retry instead of an empty list', (WidgetTester tester) async {

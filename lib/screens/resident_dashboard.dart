@@ -699,6 +699,8 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
   void _handleBotAction(BotAction action) {
     setState(() {
       switch (action) {
+        case BotAction.home:
+          _selectedIndex = 0;
         case BotAction.track:
           _selectedIndex = 1;
           _showRoutePlan = false;

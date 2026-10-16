@@ -18,6 +18,7 @@ import '../utils/path_comparison.dart';
 import '../utils/truck_identity.dart';
 import '../widgets/map_style_toggle.dart';
 import '../widgets/mapbox_gate.dart';
+import '../utils/map_home.dart';
 
 /// Records the screen works on. Everything is read-only.
 class CollectionData {
@@ -668,7 +669,10 @@ class _CollectionRouteOptimizationScreenState extends State<CollectionRouteOptim
           key: const ValueKey<String>('collection-route-optimization-map'),
           viewport: CameraViewportState(center: Point(coordinates: Position(121.1620, 13.9565)), zoom: 14.2),
           onMapCreated: _onMapCreated,
-          onStyleLoadedListener: (_) => _updateMap(),
+          onStyleLoadedListener: (_) {
+            MapHome.ensure(_map);
+            _updateMap();
+          },
         ),
       );
 

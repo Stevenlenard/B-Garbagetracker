@@ -28,6 +28,7 @@ import 'package:pointer_interceptor/pointer_interceptor.dart';
 import '../utils/collection_visits.dart';
 import '../utils/route_areas.dart';
 import 'collection_route_optimization_screen.dart' show FirebaseCollectionDataSource;
+import '../utils/map_home.dart';
 
 class RouteHistoryScreen extends StatefulWidget {
   final bool isEmbedded;
@@ -718,6 +719,7 @@ class _RouteHistoryScreenState extends State<RouteHistoryScreen> with TickerProv
   /// The style finishes loading after the map is created (always on the Web) and is replaced on
   /// every Map/Satellite switch: (re)draw the selected trip each time.
   void _onStyleLoaded(StyleLoadedEventData _) {
+    MapHome.ensure(_mapboxMap, zoom: 13.8);
     if (_analyzedTrip != null) _updateMapForTrip(_analyzedTrip!);
   }
 

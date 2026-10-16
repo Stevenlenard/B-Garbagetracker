@@ -6,7 +6,6 @@ import 'package:intl/intl.dart';
 
 import '../services/complaint_center_service.dart';
 import '../services/service_area_service.dart';
-import '../utils/app_theme.dart';
 import '../utils/complaint_flow.dart';
 import '../utils/custom_notification.dart';
 import '../widgets/app_date_range_picker.dart';
@@ -131,14 +130,29 @@ class _ComplaintsScreenState extends State<ComplaintsScreen> {
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.stretch,
                               children: <Widget>[
-                                _buildCounters(narrow),
-                                const SizedBox(height: 14),
-                                _buildScopeTabs(narrow),
+                                if (narrow) ...<Widget>[
+                                  _buildSourceToggle(),
+                                  const SizedBox(height: 14),
+                                ] else
+                                  Padding(
+                                    padding: const EdgeInsets.only(bottom: 14),
+                                    child: Row(children: <Widget>[
+                                      SizedBox(width: 300, child: _buildSourceToggle()),
+                                      const SizedBox(width: 16),
+                                      Expanded(child: _buildSearchRow()),
+                                    ]),
+                                  ),
+                                _buildScopeTabs(),
+                                if (_c.query.scope == ComplaintScope.active) ...<Widget>[
+                                  const SizedBox(height: 12),
+                                  _buildStatusChips(),
+                                ],
+                                if (narrow) ...<Widget>[
+                                  const SizedBox(height: 12),
+                                  _buildSearchRow(),
+                                ],
+                                _buildActiveFilterChips(),
                                 const SizedBox(height: 12),
-                                _buildSourceAndSearch(narrow),
-                                const SizedBox(height: 10),
-                                _buildFilters(),
-                                const SizedBox(height: 10),
                                 _buildResultSummary(),
                               ],
                             ),
@@ -172,7 +186,7 @@ class _ComplaintsScreenState extends State<ComplaintsScreen> {
   Widget _buildHeader() {
     final bool isMobile = MediaQuery.of(context).size.width < 900;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       decoration: BoxDecoration(
         color: Colors.white,
         boxShadow: <BoxShadow>[BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 10, offset: const Offset(0, 4))],
@@ -213,17 +227,21 @@ class _ComplaintsScreenState extends State<ComplaintsScreen> {
             ),
           ),
           const SizedBox(width: 14),
-          const Expanded(
+          Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
               children: <Widget>[
-                Text('Complaint Center',
+                const Text('Complaint Center',
                     style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: _ink, letterSpacing: -0.3)),
-                SizedBox(height: 2),
-                Text('Manage, track, and resolve resident and driver complaints',
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(fontSize: 12.5, color: _muted, fontWeight: FontWeight.w500)),
+                // Phones: the title alone keeps the header calm.
+                if (MediaQuery.of(context).size.width >= 600) ...<Widget>[
+                  const SizedBox(height: 2),
+                  const Text('Manage, track, and resolve resident and driver complaints',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(fontSize: 12.5, color: _muted, fontWeight: FontWeight.w500)),
+                ],
               ],
             ),
           ),
@@ -238,101 +256,41 @@ class _ComplaintsScreenState extends State<ComplaintsScreen> {
     );
   }
 
-  // ------------------------------------------------------------------ counters + tabs
+  // ------------------------------------------------------------------ controls (source, scope, status, search)
 
-  Widget _buildCounters(bool narrow) {
-    final ComplaintCounts n = _c.counts;
-    final bool ready = _c.countsKnown; // unknown counts are "–", never a confirmed 0
-    Widget card(String key, String label, int value, IconData icon, Color fg, Color bg, VoidCallback onTap) {
-      return Expanded(
-        child: Material(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(18),
-          child: InkWell(
-            key: ValueKey<String>('counter-$key'),
-            borderRadius: BorderRadius.circular(18),
-            onTap: onTap,
-            child: Container(
-              padding: EdgeInsets.symmetric(horizontal: narrow ? 10 : 16, vertical: narrow ? 10 : 12),
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(18),
-                border: Border.all(color: const Color(0xFFEFF2F5)),
-              ),
-              child: Row(
-                children: <Widget>[
-                  Container(
-                    padding: const EdgeInsets.all(7),
-                    decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(10)),
-                    child: Icon(icon, color: fg, size: narrow ? 16 : 18),
-                  ),
-                  SizedBox(width: narrow ? 8 : 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisSize: MainAxisSize.min,
-                      children: <Widget>[
-                        Text(ready ? '$value' : '–',
-                            style: TextStyle(fontSize: narrow ? 18 : 22, fontWeight: FontWeight.w900, color: _ink, height: 1.1)),
-                        Text(label,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(fontSize: narrow ? 10.5 : 12, fontWeight: FontWeight.w700, color: _muted)),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      );
-    }
-
-    return Row(
-      children: <Widget>[
-        card('pending', 'Pending', n.pending, Icons.hourglass_empty_rounded, const Color(0xFFB45309), const Color(0xFFFEF3C7), () {
-          _c.showActive(status: ComplaintStatus.pending);
-        }),
-        SizedBox(width: narrow ? 8 : 12),
-        card('in-progress', 'In Progress', n.inProgress, Icons.autorenew_rounded, const Color(0xFF0369A1), const Color(0xFFE0F2FE), () {
-          _c.showActive(status: ComplaintStatus.inProgress);
-        }),
-        SizedBox(width: narrow ? 8 : 12),
-        card('resolved', 'Resolved', n.resolved, Icons.verified_rounded, const Color(0xFF15803D), const Color(0xFFDCFCE7),
-            () => _c.setScope(ComplaintScope.resolved)),
-      ],
-    );
-  }
-
-  Widget _buildScopeTabs(bool narrow) {
-    final ComplaintCounts n = _c.counts;
-    final bool ready = _c.countsKnown;
-    Widget tab(ComplaintScope scope, String label, int count) {
-      final bool selected = _c.query.scope == scope;
+  /// Residents | Drivers: one calm segmented control.
+  Widget _buildSourceToggle() {
+    Widget segment(ComplaintSource s) {
+      final bool selected = _c.query.source == s;
+      final bool resident = s == ComplaintSource.resident;
       return Expanded(
         child: Semantics(
           selected: selected,
           button: true,
           child: InkWell(
-            key: ValueKey<String>('scope-${scope.name}'),
-            borderRadius: BorderRadius.circular(10),
-            onTap: selected ? null : () => _c.setScope(scope),
+            key: ValueKey<String>('source-${s.name}'),
+            borderRadius: BorderRadius.circular(11),
+            onTap: selected
+                ? null
+                : () {
+                    _searchDebounce?.cancel();
+                    _search.clear();
+                    _c.setSource(s);
+                  },
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 180),
-              alignment: Alignment.center,
-              padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 6),
-              decoration: BoxDecoration(color: selected ? _teal : Colors.transparent, borderRadius: BorderRadius.circular(10)),
-              child: Text(
-                ready ? '$label ($count)' : label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontWeight: FontWeight.w800,
-                  fontSize: narrow ? 12 : 13,
-                  letterSpacing: 0.3,
-                  color: selected ? Colors.white : const Color(0xFF475569),
-                ),
+              padding: const EdgeInsets.symmetric(vertical: 9),
+              decoration: BoxDecoration(
+                color: selected ? Colors.white : Colors.transparent,
+                borderRadius: BorderRadius.circular(11),
+                boxShadow: selected ? <BoxShadow>[BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 8, offset: const Offset(0, 2))] : null,
               ),
+              child: Row(mainAxisAlignment: MainAxisAlignment.center, children: <Widget>[
+                Icon(resident ? Icons.home_rounded : Icons.local_shipping_rounded, size: 17, color: selected ? _teal : _muted),
+                const SizedBox(width: 7),
+                Text(resident ? 'Residents' : 'Drivers',
+                    style: TextStyle(fontWeight: FontWeight.w800, fontSize: 13, color: selected ? _ink : _muted)),
+              ]),
             ),
           ),
         ),
@@ -341,225 +299,310 @@ class _ComplaintsScreenState extends State<ComplaintsScreen> {
 
     return Container(
       padding: const EdgeInsets.all(4),
-      decoration: BoxDecoration(color: _surface, borderRadius: BorderRadius.circular(14)),
-      child: Row(
-        children: <Widget>[
-          tab(ComplaintScope.active, narrow ? 'ACTIVE' : 'ACTIVE COMPLAINTS', n.pending + n.inProgress),
-          tab(ComplaintScope.resolved, narrow ? 'RESOLVED ARCHIVE' : 'RESOLVED ARCHIVE', n.resolved),
-        ],
-      ),
+      decoration: BoxDecoration(color: const Color(0xFFE9EEF3), borderRadius: BorderRadius.circular(14)),
+      child: Row(children: <Widget>[segment(ComplaintSource.resident), segment(ComplaintSource.driver)]),
     );
   }
 
-  Widget _buildSourceAndSearch(bool narrow) {
-    final Widget sources = Wrap(
-      spacing: 8,
-      children: <Widget>[
-        for (final ComplaintSource s in ComplaintSource.values)
-          ChoiceChip(
-            key: ValueKey<String>('source-${s.name}'),
-            label: Text(s == ComplaintSource.resident ? 'Residents' : 'Drivers'),
-            avatar: Icon(s == ComplaintSource.resident ? Icons.home_rounded : Icons.local_shipping_rounded,
-                size: 16, color: _c.query.source == s ? Colors.white : _teal),
-            selected: _c.query.source == s,
-            showCheckmark: false,
-            selectedColor: _teal,
-            backgroundColor: Colors.white,
-            side: BorderSide(color: _c.query.source == s ? _teal : const Color(0xFFE2E8F0)),
-            labelStyle: TextStyle(
-                fontWeight: FontWeight.w800, fontSize: 12.5, color: _c.query.source == s ? Colors.white : const Color(0xFF334155)),
-            onSelected: (bool on) {
-              if (!on || _c.query.source == s) return;
-              _searchDebounce?.cancel();
-              _search.clear();
-              _c.setSource(s);
-            },
-          ),
-      ],
-    );
-    final Widget search = SizedBox(
-      height: 44,
-      child: TextField(
-        key: const ValueKey<String>('complaint-search'),
-        controller: _search,
-        onChanged: _onSearchChanged,
-        onSubmitted: (String v) {
-          _searchDebounce?.cancel();
-          _c.setSearch(v);
-        },
-        textInputAction: TextInputAction.search,
-        style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14, color: Color(0xFF1A1A1A)),
-        decoration: InputDecoration(
-          hintText: _c.query.source == ComplaintSource.resident ? 'Search complaint # or resident name' : 'Search driver, truck or report #',
-          hintStyle: const TextStyle(color: Color(0xFF9CA3AF), fontSize: 13),
-          prefixIcon: const Icon(Icons.search_rounded, color: Color(0xFF00897B), size: 20),
-          suffixIcon: _search.text.isEmpty
-              ? null
-              : IconButton(
-                  tooltip: 'Clear search',
-                  icon: const Icon(Icons.close_rounded, size: 18),
-                  onPressed: () {
-                    _searchDebounce?.cancel();
-                    _search.clear();
-                    _c.setSearch('');
-                  },
-                ),
-          filled: true,
-          fillColor: Colors.white,
-          contentPadding: const EdgeInsets.symmetric(vertical: 10),
-          enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: Color(0xFFE2E8F0))),
-          focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: _teal, width: 1.5)),
-        ),
-      ),
-    );
-    if (narrow) {
-      return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: <Widget>[sources, const SizedBox(height: 10), search]);
-    }
-    return Row(children: <Widget>[sources, const SizedBox(width: 16), Expanded(child: search)]);
-  }
-
-  // ------------------------------------------------------------------ filters
-
-  Widget _buildFilters() {
-    final ComplaintQuery q = _c.query;
-    final bool resident = q.source == ComplaintSource.resident;
-    final List<String> categories = resident ? _residentCategories : _driverCategories;
-    final String dateWord = q.scope == ComplaintScope.resolved ? 'Resolved' : 'Submitted';
-    String dateLabel = 'Any date';
-    if (q.from != null && q.to != null) {
-      final DateFormat f = DateFormat('MMM d');
-      dateLabel = DateUtils.isSameDay(q.from, q.to) ?DateFormat('MMM d, yyyy').format(q.from!) : '${f.format(q.from!)} – ${DateFormat('MMM d, yyyy').format(q.to!)}';
-    }
-    return Wrap(
-      spacing: 8,
-      runSpacing: 8,
-      crossAxisAlignment: WrapCrossAlignment.center,
-      children: <Widget>[
-        _menuFilter<String>(
-          key: 'filter-category',
-          icon: Icons.category_rounded,
-          label: q.category ?? 'All categories',
-          active: q.category != null,
-          options: <String?>[null, ...categories],
-          optionLabel: (String? v) => v ?? 'All categories',
-          selected: q.category,
-          onSelected: _c.setCategory,
-        ),
-        if (resident)
-          _menuFilter<String>(
-            key: 'filter-location',
-            icon: Icons.location_on_rounded,
-            label: q.location ?? 'All locations',
-            active: q.location != null,
-            options: <String?>[null, ...ServiceAreaService.documentedAreaNames],
-            optionLabel: (String? v) => v ?? 'All locations',
-            selected: q.location,
-            onSelected: _c.setLocation,
-          ),
-        if (q.scope == ComplaintScope.active)
-          _menuFilter<ComplaintStatus>(
-            key: 'filter-status',
-            icon: Icons.flag_rounded,
-            label: q.status == null ? 'Pending & In Progress' : ComplaintFlow.label(q.status!),
-            active: q.status != null,
-            options: const <ComplaintStatus?>[null, ComplaintStatus.pending, ComplaintStatus.inProgress],
-            optionLabel: (ComplaintStatus? v) => v == null ? 'Pending & In Progress' : ComplaintFlow.label(v),
-            selected: q.status,
-            onSelected: _c.setStatus,
-          ),
-        _chipButton(
-          key: 'filter-date',
-          icon: Icons.calendar_today_rounded,
-          label: '$dateWord: $dateLabel',
-          active: q.from != null,
-          onTap: _pickDateRange,
-        ),
-        if (q.hasFilters)
-          TextButton.icon(
-            key: const ValueKey<String>('filter-clear'),
-            onPressed: () {
-              _searchDebounce?.cancel();
-              _search.clear();
-              _c.clearFilters();
-            },
-            icon: const Icon(Icons.filter_alt_off_rounded, size: 18),
-            label: const Text('Clear filters', style: TextStyle(fontWeight: FontWeight.w800)),
-            style: TextButton.styleFrom(foregroundColor: const Color(0xFFB91C1C)),
-          ),
-      ],
-    );
-  }
-
-  Widget _chipButton({required String key, required IconData icon, required String label, required bool active, VoidCallback? onTap}) {
-    return Material(
-      color: active ? const Color(0xFFE6F4F1) : Colors.white,
-      borderRadius: BorderRadius.circular(12),
-      child: InkWell(
-        key: ValueKey<String>(key),
-        borderRadius: BorderRadius.circular(12),
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: active ? _teal.withValues(alpha: 0.5) : const Color(0xFFE2E8F0)),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: <Widget>[
-              Icon(icon, size: 16, color: _teal),
-              const SizedBox(width: 6),
-              Flexible(
-                child: Text(label,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 12.5, color: _ink)),
+  /// Active | Resolved, with their counts (unknown counts are "–", never a confirmed 0).
+  Widget _buildScopeTabs() {
+    final ComplaintCounts n = _c.counts;
+    final bool ready = _c.countsKnown;
+    Widget tab(ComplaintScope scope, String label, int count, String countKey) {
+      final bool selected = _c.query.scope == scope;
+      return Expanded(
+        child: Semantics(
+          selected: selected,
+          button: true,
+          child: InkWell(
+            key: ValueKey<String>('scope-${scope.name}'),
+            onTap: selected ? null : () => _c.setScope(scope),
+            child: Container(
+              padding: const EdgeInsets.only(top: 6, bottom: 9),
+              decoration: BoxDecoration(
+                border: Border(bottom: BorderSide(color: selected ? _teal : const Color(0xFFE2E8F0), width: selected ? 3 : 1)),
               ),
-              const SizedBox(width: 2),
-              const Icon(Icons.arrow_drop_down_rounded, size: 18, color: _muted),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _menuFilter<T>({
-    required String key,
-    required IconData icon,
-    required String label,
-    required bool active,
-    required List<T?> options,
-    required String Function(T?) optionLabel,
-    required T? selected,
-    required Future<void> Function(T?) onSelected,
-  }) {
-    return PopupMenuButton<int>(
-      key: ValueKey<String>(key),
-      tooltip: label,
-      onSelected: (int i) => onSelected(options[i]),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-      color: Colors.white,
-      itemBuilder: (BuildContext context) => <PopupMenuEntry<int>>[
-        for (int i = 0; i < options.length; i++)
-          PopupMenuItem<int>(
-            value: i,
-            child: Row(
-              children: <Widget>[
-                Icon(options[i] == selected ? Icons.check_circle_rounded : Icons.circle_outlined,
-                    size: 16, color: options[i] == selected ? _teal : Colors.grey.shade400),
-                const SizedBox(width: 10),
-                Flexible(
-                  child: Text(optionLabel(options[i]),
-                      style: TextStyle(
-                          fontWeight: options[i] == selected ? FontWeight.w800 : FontWeight.w600,
-                          color: options[i] == selected ? _teal : const Color(0xFF1E293B),
-                          fontSize: 13)),
+              child: Row(mainAxisAlignment: MainAxisAlignment.center, children: <Widget>[
+                Text(label, style: TextStyle(fontWeight: FontWeight.w800, fontSize: 14, color: selected ? _ink : _muted)),
+                const SizedBox(width: 8),
+                Container(
+                  key: ValueKey<String>(countKey),
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  decoration: BoxDecoration(color: selected ? _teal : const Color(0xFFE2E8F0), borderRadius: BorderRadius.circular(10)),
+                  child: Text(ready ? '$count' : '–',
+                      style: TextStyle(fontSize: 12, fontWeight: FontWeight.w900, color: selected ? Colors.white : const Color(0xFF475569))),
                 ),
-              ],
+              ]),
             ),
           ),
-      ],
-      child: IgnorePointer(child: _chipButton(key: '$key-chip', icon: icon, label: label, active: active, onTap: () {})),
+        ),
+      );
+    }
+
+    return Row(children: <Widget>[
+      tab(ComplaintScope.active, 'Active', n.pending + n.inProgress, 'counter-active'),
+      tab(ComplaintScope.resolved, 'Resolved', n.resolved, 'counter-resolved'),
+    ]);
+  }
+
+  /// Active complaints: All / Pending / In progress, each with its count.
+  Widget _buildStatusChips() {
+    final ComplaintCounts n = _c.counts;
+    final bool ready = _c.countsKnown;
+    final ComplaintStatus? current = _c.query.status;
+    Widget chip(String key, String label, int? count, Color dot, bool selected, VoidCallback onTap) {
+      return Padding(
+        padding: const EdgeInsets.only(right: 8),
+        child: Material(
+          color: selected ? const Color(0xFFE6F4F1) : Colors.white,
+          borderRadius: BorderRadius.circular(20),
+          child: InkWell(
+            key: ValueKey<String>(key),
+            borderRadius: BorderRadius.circular(20),
+            onTap: onTap,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(color: selected ? _teal.withValues(alpha: 0.55) : const Color(0xFFE2E8F0)),
+              ),
+              child: Row(mainAxisSize: MainAxisSize.min, children: <Widget>[
+                Container(width: 8, height: 8, decoration: BoxDecoration(color: dot, shape: BoxShape.circle)),
+                const SizedBox(width: 7),
+                Text(label, style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12.5, color: selected ? _tealDark : const Color(0xFF334155))),
+                if (count != null || !ready) ...<Widget>[
+                  const SizedBox(width: 6),
+                  Text(ready ? '${count ?? 0}' : '–', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 12.5, color: selected ? _tealDark : _ink)),
+                ],
+              ]),
+            ),
+          ),
+        ),
+      );
+    }
+
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(children: <Widget>[
+        chip('status-all', 'All', null, _teal, current == null, () => _c.setStatus(null)),
+        chip('counter-pending', 'Pending', n.pending, const Color(0xFFF59E0B), current == ComplaintStatus.pending,
+            () => _c.showActive(status: ComplaintStatus.pending)),
+        chip('counter-in-progress', 'In progress', n.inProgress, const Color(0xFF0EA5E9), current == ComplaintStatus.inProgress,
+            () => _c.showActive(status: ComplaintStatus.inProgress)),
+      ]),
+    );
+  }
+
+  int get _activeFilterCount {
+    final ComplaintQuery q = _c.query;
+    return (q.category != null ? 1 : 0) + (q.location != null ? 1 : 0) + (q.from != null ? 1 : 0);
+  }
+
+  String _dateLabel(ComplaintQuery q) {
+    if (q.from == null || q.to == null) return 'Any date';
+    final DateFormat f = DateFormat('MMM d');
+    return DateUtils.isSameDay(q.from, q.to) ? DateFormat('MMM d, yyyy').format(q.from!) : '${f.format(q.from!)} – ${DateFormat('MMM d, yyyy').format(q.to!)}';
+  }
+
+  /// Search box + one Filters button (category, location and date live in a sheet).
+  Widget _buildSearchRow() {
+    final int filters = _activeFilterCount;
+    return Row(children: <Widget>[
+      Expanded(
+        child: SizedBox(
+          height: 46,
+          child: TextField(
+            key: const ValueKey<String>('complaint-search'),
+            controller: _search,
+            onChanged: _onSearchChanged,
+            onSubmitted: (String v) {
+              _searchDebounce?.cancel();
+              _c.setSearch(v);
+            },
+            textInputAction: TextInputAction.search,
+            style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14, color: Color(0xFF1A1A1A)),
+            decoration: InputDecoration(
+              hintText: _c.query.source == ComplaintSource.resident ? 'Search # or resident name' : 'Search driver, truck or #',
+              hintStyle: const TextStyle(color: Color(0xFF9CA3AF), fontSize: 13.5),
+              prefixIcon: const Icon(Icons.search_rounded, color: Color(0xFF94A3B8), size: 20),
+              suffixIcon: _search.text.isEmpty
+                  ? null
+                  : IconButton(
+                      tooltip: 'Clear search',
+                      icon: const Icon(Icons.close_rounded, size: 18),
+                      onPressed: () {
+                        _searchDebounce?.cancel();
+                        _search.clear();
+                        _c.setSearch('');
+                      },
+                    ),
+              filled: true,
+              fillColor: Colors.white,
+              contentPadding: const EdgeInsets.symmetric(vertical: 10),
+              enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(14), borderSide: const BorderSide(color: Color(0xFFE2E8F0))),
+              focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(14), borderSide: const BorderSide(color: _teal, width: 1.5)),
+            ),
+          ),
+        ),
+      ),
+      const SizedBox(width: 10),
+      Material(
+        color: filters > 0 ? const Color(0xFFE6F4F1) : Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        child: InkWell(
+          key: const ValueKey<String>('filter-open'),
+          borderRadius: BorderRadius.circular(14),
+          onTap: _openFilterSheet,
+          child: Container(
+            height: 46,
+            padding: const EdgeInsets.symmetric(horizontal: 14),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: filters > 0 ? _teal.withValues(alpha: 0.55) : const Color(0xFFE2E8F0)),
+            ),
+            child: Row(children: <Widget>[
+              const Icon(Icons.tune_rounded, size: 19, color: _teal),
+              const SizedBox(width: 6),
+              Text(filters > 0 ? 'Filters · $filters' : 'Filters', style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 13, color: _ink)),
+            ]),
+          ),
+        ),
+      ),
+    ]);
+  }
+
+  /// The filters in use, each removable with one tap.
+  Widget _buildActiveFilterChips() {
+    final ComplaintQuery q = _c.query;
+    final List<Widget> chips = <Widget>[
+      if (q.category != null) _removableChip(Icons.category_rounded, q.category!, () => _c.setCategory(null)),
+      if (q.location != null) _removableChip(Icons.location_on_rounded, q.location!, () => _c.setLocation(null)),
+      if (q.from != null) _removableChip(Icons.calendar_today_rounded, _dateLabel(q), () => _c.setDateRange(null, null)),
+    ];
+    if (chips.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(top: 10),
+      child: Wrap(spacing: 8, runSpacing: 8, children: chips),
+    );
+  }
+
+  Widget _removableChip(IconData icon, String label, VoidCallback onRemove) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(10, 5, 4, 5),
+      decoration: BoxDecoration(color: const Color(0xFFE6F4F1), borderRadius: BorderRadius.circular(18)),
+      child: Row(mainAxisSize: MainAxisSize.min, children: <Widget>[
+        Icon(icon, size: 14, color: _tealDark),
+        const SizedBox(width: 5),
+        ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 200),
+          child: Text(label, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 12, color: _tealDark)),
+        ),
+        InkWell(
+          customBorder: const CircleBorder(),
+          onTap: onRemove,
+          child: const Padding(padding: EdgeInsets.all(3), child: Icon(Icons.close_rounded, size: 15, color: _tealDark)),
+        ),
+      ]),
+    );
+  }
+
+  Future<void> _openFilterSheet() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
+      builder: (BuildContext ctx) => ListenableBuilder(
+        listenable: _c,
+        builder: (BuildContext ctx, _) {
+          final ComplaintQuery q = _c.query;
+          final bool resident = q.source == ComplaintSource.resident;
+          final List<String> categories = resident ? _residentCategories : _driverCategories;
+          Widget section(String key, String title, List<Widget> chips) => Padding(
+                key: ValueKey<String>(key),
+                padding: const EdgeInsets.only(bottom: 18),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
+                  Text(title, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 13, color: _muted, letterSpacing: 0.3)),
+                  const SizedBox(height: 10),
+                  Wrap(spacing: 8, runSpacing: 8, children: chips),
+                ]),
+              );
+          Widget option(String label, bool selected, VoidCallback onTap) => ChoiceChip(
+                label: Text(label),
+                selected: selected,
+                showCheckmark: false,
+                onSelected: (_) => onTap(),
+                selectedColor: _teal,
+                backgroundColor: const Color(0xFFF8FAFC),
+                side: BorderSide(color: selected ? _teal : const Color(0xFFE2E8F0)),
+                labelStyle: TextStyle(fontWeight: FontWeight.w700, fontSize: 12.5, color: selected ? Colors.white : const Color(0xFF334155)),
+              );
+          return ConstrainedBox(
+            constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.85),
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.fromLTRB(22, 14, 22, 22),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, mainAxisSize: MainAxisSize.min, children: <Widget>[
+                Center(child: Container(width: 40, height: 4, decoration: BoxDecoration(color: const Color(0xFFE2E8F0), borderRadius: BorderRadius.circular(2)))),
+                const SizedBox(height: 16),
+                Row(children: <Widget>[
+                  const Expanded(child: Text('Filters', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900, color: _ink))),
+                  if (q.category != null || q.location != null || q.from != null)
+                    TextButton(
+                      key: const ValueKey<String>('filter-clear'),
+                      onPressed: () {
+                        _searchDebounce?.cancel();
+                        _search.clear();
+                        _c.clearFilters();
+                      },
+                      child: const Text('Clear all', style: TextStyle(fontWeight: FontWeight.w800, color: Color(0xFFB91C1C))),
+                    ),
+                ]),
+                const SizedBox(height: 14),
+                section('filter-category', 'CATEGORY', <Widget>[
+                  option('All', q.category == null, () => _c.setCategory(null)),
+                  for (final String cat in categories) option(cat, q.category == cat, () => _c.setCategory(cat)),
+                ]),
+                if (resident)
+                  section('filter-location', 'LOCATION', <Widget>[
+                    option('All', q.location == null, () => _c.setLocation(null)),
+                    for (final String area in ServiceAreaService.documentedAreaNames) option(area, q.location == area, () => _c.setLocation(area)),
+                  ]),
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 22),
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
+                    Text(q.scope == ComplaintScope.resolved ? 'RESOLVED ON' : 'SUBMITTED ON',
+                        style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 13, color: _muted, letterSpacing: 0.3)),
+                    const SizedBox(height: 10),
+                    OutlinedButton.icon(
+                      key: const ValueKey<String>('filter-date'),
+                      onPressed: _pickDateRange,
+                      icon: const Icon(Icons.calendar_today_rounded, size: 17),
+                      label: Text(_dateLabel(q)),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: _tealDark,
+                        side: BorderSide(color: q.from != null ? _teal : const Color(0xFFE2E8F0)),
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                        textStyle: const TextStyle(fontWeight: FontWeight.w700),
+                      ),
+                    ),
+                  ]),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: _teal,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                  ),
+                  child: Text('Show ${_c.page?.total ?? ''} results'.replaceAll('  ', ' '), style: const TextStyle(fontWeight: FontWeight.w800)),
+                ),
+              ]),
+            ),
+          );
+        },
+      ),
     );
   }
 
@@ -596,7 +639,7 @@ class _ComplaintsScreenState extends State<ComplaintsScreen> {
                 ? (_c.error != null && !_c.loading ? 'Could not load $what $who' : 'Loading $what $who…')
                 : (p.total == 0 ? 'No $what $who' : 'Showing ${p.firstIndex}–${p.lastIndex} of ${p.total} $what $who'),
             key: const ValueKey<String>('result-summary'),
-            style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: _muted),
+            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Color(0xFF94A3B8)),
           ),
         ),
         if (_c.loading && p != null) const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: _teal)),
@@ -847,120 +890,80 @@ class _ComplaintCard extends StatelessWidget {
   final ComplaintRecord record;
   final VoidCallback onOpen;
 
+  static Color statusColor(ComplaintStatus s) => switch (s) {
+        ComplaintStatus.pending => const Color(0xFFF59E0B),
+        ComplaintStatus.inProgress => const Color(0xFF0EA5E9),
+        ComplaintStatus.resolved => const Color(0xFF22C55E),
+      };
+
   @override
   Widget build(BuildContext context) {
     final bool resident = record.source == ComplaintSource.resident;
     final String? place = resident ? record.locationLabel : (record.truckId != null ? 'Truck ${record.truckId}' : null);
+    final String who = <String>[record.reporterName, if (place != null && place.trim().isNotEmpty) place].join(' · ');
+    final DateTime? when = record.isResolved && record.resolvedAt != null ? record.resolvedAt : record.submittedAt;
+    final String whenText = when == null ? '' : DateFormat('MMM d · h:mm a').format(when);
     return Container(
       key: ValueKey<String>('complaint-card-${record.source.name}-${record.id}'),
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(24),
-        boxShadow: AppTheme.balancedPulidongShadow,
-        border: Border.all(color: Colors.grey.shade50, width: 1.5),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: const Color(0xFFEDF1F5)),
+        boxShadow: <BoxShadow>[BoxShadow(color: const Color(0xFF0F172A).withValues(alpha: 0.04), blurRadius: 14, offset: const Offset(0, 4))],
       ),
       child: Material(
         color: Colors.transparent,
-        borderRadius: BorderRadius.circular(24),
+        borderRadius: BorderRadius.circular(18),
+        clipBehavior: Clip.antiAlias,
         child: InkWell(
           onTap: onOpen,
-          borderRadius: BorderRadius.circular(24),
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: <Widget>[
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: <Widget>[
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 7),
-                      decoration: BoxDecoration(color: const Color(0xFFE0F2F1), borderRadius: BorderRadius.circular(10)),
-                      child: Text(record.displayId,
-                          style: const TextStyle(color: _tealDark, fontWeight: FontWeight.w900, fontSize: 12.5)),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: <Widget>[
-                          Text(record.category,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 15.5, color: Color(0xFF1A1A1A))),
-                          const SizedBox(height: 3),
-                          Row(
-                            children: <Widget>[
-                              Icon(resident ? Icons.person_rounded : Icons.badge_rounded, size: 14, color: _muted),
-                              const SizedBox(width: 4),
-                              Expanded(
-                                child: Text.rich(
-                                  TextSpan(children: <InlineSpan>[
-                                    TextSpan(text: record.reporterName),
-                                    TextSpan(
-                                      text: ' · ${record.roleLabel}',
-                                      style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w800, color: _muted),
-                                    ),
-                                  ]),
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(color: Color(0xFF475569), fontSize: 13, fontWeight: FontWeight.w600),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    _StatusBadge(record.status),
-                  ],
-                ),
-                if (place != null) ...<Widget>[
-                  const SizedBox(height: 8),
-                  Row(
-                    children: <Widget>[
-                      Icon(resident ? Icons.location_on_rounded : Icons.local_shipping_rounded, size: 14, color: const Color(0xFF00897B)),
-                      const SizedBox(width: 4),
+          child: IntrinsicHeight(
+            child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: <Widget>[
+              Container(width: 4, color: statusColor(record.status)),
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(14, 14, 14, 12),
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: <Widget>[
+                    Row(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
                       Expanded(
-                        child: Text(place,
+                        child: Text(record.category,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(color: _tealDark, fontSize: 12, fontWeight: FontWeight.w600)),
+                            style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15, color: _ink, letterSpacing: -0.2)),
                       ),
-                    ],
-                  ),
-                ],
-                if (record.description.trim().isNotEmpty) ...<Widget>[
-                  const SizedBox(height: 6),
-                  Text(record.description,
-                      maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(color: _muted, fontSize: 13)),
-                ],
-                const SizedBox(height: 12),
-                const Divider(height: 1, color: Color(0xFFF1F4F8)),
-                const SizedBox(height: 10),
-                Row(
-                  children: <Widget>[
-                    const Icon(Icons.access_time_rounded, size: 14, color: Color(0xFF94A3B8)),
-                    const SizedBox(width: 5),
-                    Expanded(
-                      child: Text(
-                        record.isResolved && record.resolvedAt != null
-                            ? 'Resolved ${_fmtDate(record.resolvedAt)}'
-                            : 'Submitted ${_fmtDate(record.submittedAt)}',
+                      const SizedBox(width: 8),
+                      _StatusBadge(record.status),
+                    ]),
+                    const SizedBox(height: 4),
+                    Text(who,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(fontSize: 12, color: Color(0xFF94A3B8), fontWeight: FontWeight.w500),
-                      ),
-                    ),
-                    Text(record.isResolved ? 'View Resolution' : 'View Details',
-                        style: const TextStyle(color: _teal, fontWeight: FontWeight.w700, fontSize: 13)),
-                    const Icon(Icons.chevron_right_rounded, size: 16, color: _teal),
-                  ],
+                        style: const TextStyle(color: Color(0xFF475569), fontSize: 12.5, fontWeight: FontWeight.w600)),
+                    if (record.description.trim().isNotEmpty) ...<Widget>[
+                      const SizedBox(height: 6),
+                      Text(record.description.trim(),
+                          maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: _muted, fontSize: 13)),
+                    ],
+                    const SizedBox(height: 10),
+                    Row(children: <Widget>[
+                      Text(record.displayId, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: _tealDark)),
+                      if (whenText.isNotEmpty)
+                        Expanded(
+                          child: Text('  ·  ${record.isResolved ? 'Resolved' : ''} $whenText'.replaceAll('·   ', '· '),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(fontSize: 12, color: Color(0xFF94A3B8), fontWeight: FontWeight.w600)),
+                        )
+                      else
+                        const Spacer(),
+                      Text(record.isResolved ? 'View Resolution' : 'View Details',
+                          style: const TextStyle(color: _teal, fontWeight: FontWeight.w700, fontSize: 12.5)),
+                      const Icon(Icons.chevron_right_rounded, size: 16, color: _teal),
+                    ]),
+                  ]),
                 ),
-              ],
-            ),
+              ),
+            ]),
           ),
         ),
       ),

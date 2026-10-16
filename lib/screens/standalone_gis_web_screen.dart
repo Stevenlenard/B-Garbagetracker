@@ -21,6 +21,7 @@ import '../services/truck_locations_feed.dart';
 import '../utils/marker_labels.dart';
 import '../utils/truck_identity.dart';
 import '../widgets/mapbox_gate.dart';
+import '../utils/map_home.dart';
 
 /// Standalone Web GIS Page for Resident Garbage Truck Tracking
 ///
@@ -493,9 +494,11 @@ class _StandaloneGisWebScreenState extends State<StandaloneGisWebScreen> with Ti
   // --- MAPBOX MAP CREATION & MARKER RENDERING ---
   void _onMapCreated(MapboxMap map) {
     _mapboxMap = map;
+    MapHome.ensure(map);
   }
 
   void _onStyleLoaded(dynamic data) async {
+    MapHome.ensure(_mapboxMap);
     if (_mapboxMap == null) return;
     try {
       await _mapboxMap!.location.updateSettings(LocationComponentSettings(enabled: false, pulsingEnabled: false));

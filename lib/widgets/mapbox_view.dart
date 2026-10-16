@@ -16,6 +16,7 @@ import '../services/truck_locations_feed.dart';
 import 'map_style_toggle.dart';
 import 'mapbox_gate.dart';
 import '../utils/map_colors.dart';
+import '../utils/map_home.dart';
 
 class MapboxView extends StatefulWidget {
   final String mode; 
@@ -243,10 +244,12 @@ class _MapboxViewState extends State<MapboxView> {
           },
           onMapCreated: (map) async {
             _map = map;
+            MapHome.ensure(map);
             await _enableMapGestures();
           },
           onStyleLoadedListener: (data) async {
              if (_map == null) return;
+             MapHome.ensure(_map);
              try {
                await _map!.location.updateSettings(LocationComponentSettings(enabled: false, pulsingEnabled: false));
              } catch (_) {}

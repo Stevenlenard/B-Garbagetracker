@@ -28,6 +28,7 @@ import '../utils/marker_labels.dart';
 import '../widgets/map_style_toggle.dart';
 import '../widgets/mapbox_gate.dart';
 import '../utils/map_colors.dart';
+import '../utils/map_home.dart';
 
 class ResidentTrackTruckScreen extends StatefulWidget {
   final bool isEmbedded;
@@ -755,8 +756,12 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
     mapboxMap?.setCamera(CameraOptions(center: Point(coordinates: Position(lng, lat)), zoom: zoom));
   }
 
-  void _onMapCreated(MapboxMap map) { mapboxMap = map; }
+  void _onMapCreated(MapboxMap map) {
+    mapboxMap = map;
+    MapHome.ensure(map);
+  }
   void _onStyleLoaded(dynamic data) async {
+    MapHome.ensure(mapboxMap);
     mapboxMap?.location.updateSettings(LocationComponentSettings(enabled: false, pulsingEnabled: false));
 
     // Relocate compass to top left, below the HUD (UNITS/GPS) bar

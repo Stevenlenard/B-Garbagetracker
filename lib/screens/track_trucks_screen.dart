@@ -33,6 +33,7 @@ import '../widgets/map_style_toggle.dart';
 import '../widgets/mapbox_gate.dart';
 import '../widgets/app_date_range_picker.dart';
 import '../utils/map_colors.dart';
+import '../utils/map_home.dart';
 
 class TrackTrucksScreen extends StatefulWidget {
   final bool isEmbedded;
@@ -1370,6 +1371,7 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> with TickerProvid
 
   void _onMapCreated(MapboxMap map) {
     mapboxMap = map;
+    MapHome.ensure(map, zoom: _getResponsiveZoom(context));
     _isMapActive = true;
     _mapLoadTimeout?.cancel();
     _mapLoadTimeout = Timer(const Duration(seconds: 25), () {
@@ -1383,6 +1385,7 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> with TickerProvid
   }
 
   void _onStyleLoaded(StyleLoadedEventData event) {
+    MapHome.ensure(mapboxMap, zoom: _getResponsiveZoom(context));
     debugPrint("[MAPBOX] Style loaded.");
     _mapLoadTimeout?.cancel();
     if (mounted && (!_mapStyleLoaded || _mapLoadError != null)) {

@@ -731,6 +731,7 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
   /// Screens the Truck Buddy help bot can open.
   void _handleBotAction(BotAction action) {
     final int? target = switch (action) {
+      BotAction.home => AdminDestinations.dashboard,
       BotAction.track => AdminDestinations.liveMap,
       BotAction.analytics => AdminDestinations.analytics,
       BotAction.complaints || BotAction.fileComplaint => AdminDestinations.incidents,

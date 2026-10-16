@@ -19,6 +19,7 @@ import '../utils/fleet_snapshot.dart';
 import '../services/service_area_service.dart';
 import '../widgets/map_style_toggle.dart';
 import '../widgets/mapbox_gate.dart';
+import '../utils/map_home.dart';
 
 class DriverTrackTruckScreen extends StatefulWidget {
   final bool isEmbedded;
@@ -607,9 +608,13 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> with Ti
     )); 
   }
 
-  void _onMapCreated(MapboxMap map) { mapboxMap = map; }
+  void _onMapCreated(MapboxMap map) {
+    mapboxMap = map;
+    MapHome.ensure(map);
+  }
 
   void _onStyleLoaded(dynamic data) async {
+    MapHome.ensure(mapboxMap);
     _driverSourceCreated = false;
     _routeSourceCreated = false;
     _specialMarkersCreated = false;
