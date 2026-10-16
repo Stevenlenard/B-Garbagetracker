@@ -1,3 +1,4 @@
+import '../widgets/logout_choice_dialog.dart';
 import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui';
@@ -24,6 +25,8 @@ import '../widgets/hover_action_button.dart';
 import '../widgets/fade_slide_entrance.dart';
 import '../widgets/legal_agreement_dialog.dart';
 import '../widgets/data_management_modal.dart';
+import 'data_management_screen.dart';
+import 'collection_schedule_screen.dart';
 import '../widgets/custom_snackbar.dart';
 
 class AdminSettingsScreen extends StatefulWidget {
@@ -416,8 +419,6 @@ class _AdminSettingsScreenState extends State<AdminSettingsScreen> with TickerPr
                                       const SizedBox(height: 32),
                                       
                                       _buildLogoutButton(),
-                                      const SizedBox(height: 12),
-                                      _buildDeleteAccountButton(),
                                       const SizedBox(height: 40),
                                     ],
                                   ),
@@ -1009,6 +1010,16 @@ class _AdminSettingsScreenState extends State<AdminSettingsScreen> with TickerPr
                   if (confirm) _handleExportData();
                 },
               ),
+              const SizedBox(height: 12),
+              _buildDataActionTile(
+                title: "Open Database Center",
+                subtitle: "Backups, archives and record cleanup",
+                icon: Icons.storage_rounded,
+                color: const Color(0xFF00796B),
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(builder: (_) => const DataManagementScreen()),
+                ),
+              ),
             ],
           ),
         ),
@@ -1066,6 +1077,14 @@ class _AdminSettingsScreenState extends State<AdminSettingsScreen> with TickerPr
           padding: const EdgeInsets.fromLTRB(24, 12, 24, 20),
           child: Column(
             children: [
+              _buildDataActionTile(
+                title: "Collection Schedule",
+                subtitle: "Usual collection days & time per purok (resident reminders)",
+                icon: Icons.event_repeat_rounded,
+                color: const Color(0xFF1565C0),
+                onTap: () => Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => const CollectionScheduleScreen())),
+              ),
+              const SizedBox(height: 12),
               _buildDataActionTile(
                 title: "Manage Service Areas",
                 subtitle: "Review coordinates, area types & collection stops",
@@ -1824,24 +1843,6 @@ class _AdminSettingsScreenState extends State<AdminSettingsScreen> with TickerPr
     return HoverActionButton(text: "Logout", onTap: () => _showLogoutDialog(context));
   }
 
-  Widget _buildDeleteAccountButton() {
-    return HoverActionButton(text: "Deactivate Admin Access", isDestructive: true, onTap: () => _confirmDeleteAdmin());
-  }
-
-  void _confirmDeleteAdmin() async {
-    final bool confirmed = await _showConfirmActionDialog(
-      title: "Deactivate Account?", 
-      message: "You will lose administrative access to the system.", 
-      confirmText: "Deactivate", 
-      isDestructive: true,
-      icon: Icons.no_accounts_rounded,
-      iconColor: Colors.red,
-    );
-    if (confirmed) {
-      CustomNotification.showTopNotification(context, "Contact System SuperAdmin for deactivation.");
-    }
-  }
-
   Future<void> _downloadFile(String? url) async {
     if (url == null || url.isEmpty) return;
     
@@ -2549,26 +2550,18 @@ class _AdminSettingsScreenState extends State<AdminSettingsScreen> with TickerPr
     ]);
   }
 
-  void _showLogoutDialog(BuildContext context) {
-    _showConfirmActionDialog(
-      title: "Logout?", 
-      message: "Are you sure you want to end your current session?", 
-      confirmText: "LOGOUT", 
-      isDestructive: false,
-      icon: Icons.logout_rounded,
-      iconColor: const Color(0xFF00796B),
-    ).then((confirmed) async {
-      if (confirmed == true) {
-        await SystemLogger.logEvent("LOGOUT", "Admin session ended");
-        NotificationService.stopListening();
-        await SessionManager.logout();
-        if (mounted) {
-          CustomNotification.showTopNotification(context, "Logout successful", false);
-          Navigator.pushNamedAndRemoveUntil(context, '/login', (route) => false);
-        }
-      }
-    });
+  Future<void> _showLogoutDialog(BuildContext context) async {
+    final LogoutChoice choice = await showLogoutChoiceDialog(context);
+    if (choice == LogoutChoice.cancel || !mounted) return;
+    await SystemLogger.logEvent("LOGOUT", "Admin session ended");
+    NotificationService.stopListening();
+    await SessionManager.logout(forgetLogin: choice == LogoutChoice.forget, keepSignedIn: choice == LogoutChoice.remember || choice == LogoutChoice.switchAccount);
+    if (mounted) {
+      CustomNotification.showTopNotification(context, "Logout successful", false);
+      Navigator.pushNamedAndRemoveUntil(context, '/login', (route) => false);
+    }
   }
+
 
   Future<bool> _showConfirmActionDialog({
     required String title, 

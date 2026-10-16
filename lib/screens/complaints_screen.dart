@@ -1,1368 +1,962 @@
-import 'dart:math' as math;
 import 'dart:async';
-import 'package:flutter/material.dart';
-import 'package:firebase_database/firebase_database.dart';
-import 'package:intl/intl.dart';
-import '../api/api_service.dart';
-import '../utils/app_theme.dart';
-import '../utils/responsive.dart';
-import '../widgets/hover_action_button.dart';
-import '../utils/custom_notification.dart';
-import '../widgets/custom_snackbar.dart';
-import '../services/service_area_service.dart';
 
+import 'package:firebase_database/firebase_database.dart';
+import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
+
+import '../services/complaint_center_service.dart';
+import '../services/service_area_service.dart';
+import '../utils/app_theme.dart';
+import '../utils/complaint_flow.dart';
+import '../utils/custom_notification.dart';
+import '../widgets/app_date_range_picker.dart';
+
+const Color _teal = Color(0xFF007A63);
+const Color _tealDark = Color(0xFF00796B);
+const Color _ink = Color(0xFF0F172A);
+const Color _muted = Color(0xFF64748B);
+const Color _surface = Color(0xFFF1F5F9);
+
+/// Admin Complaint Center: Active Complaints / Resolved Archive, each for Residents and Drivers.
+/// Every list, counter and status comes from the authoritative store (MySQL through the PHP API
+/// for resident complaints, Firebase `truck_issues` for driver reports); nothing is patched locally.
 class ComplaintsScreen extends StatefulWidget {
+  const ComplaintsScreen({
+    super.key,
+    this.isEmbedded = false,
+    this.onBack,
+    this.controller,
+    this.listenForNewComplaints = true,
+  });
+
   final bool isEmbedded;
   final VoidCallback? onBack;
-  const ComplaintsScreen({super.key, this.isEmbedded = false, this.onBack});
+
+  /// For tests; the screen creates its own otherwise.
+  final ComplaintCenterController? controller;
+
+  /// Re-reads the list when a new resident complaint notification arrives (Firebase).
+  final bool listenForNewComplaints;
 
   @override
   State<ComplaintsScreen> createState() => _ComplaintsScreenState();
 }
 
-class _ComplaintsScreenState extends State<ComplaintsScreen> with TickerProviderStateMixin {
-  late TabController _tabController;
-  final FirebaseDatabase _database = FirebaseDatabase.instance;
-  final ApiService _apiService = ApiService();
-  final ScrollController _scrollController = ScrollController();
-  bool _showHeaderShadow = true;
-  bool _isRefreshing = false;
-  bool _showRefreshSpinner = false;
-  double _manualPullDepth = 0.0;
-  late AnimationController _refreshRotationController;
-  List<dynamic> _residentComplaints = [];
-  List<dynamic> _driverIssues = [];
-  bool _isLoadingResident = true;
-  bool _isLoadingDriver = true;
-  StreamSubscription? _driverIssuesSubscription;
+class _ComplaintsScreenState extends State<ComplaintsScreen> {
+  late final ComplaintCenterController _c;
+  late final bool _ownsController;
+  final TextEditingController _search = TextEditingController();
+  Timer? _searchDebounce;
+  StreamSubscription<DatabaseEvent>? _newComplaintSub;
+  bool _baselineSeen = false;
 
-  // Filtering State
-  final TextEditingController _residentSearchController = TextEditingController();
-  final TextEditingController _driverSearchController = TextEditingController();
-  String _residentStatusFilter = "All Status";
-  String _residentCategoryFilter = "All Categories";
-  String _residentLocationFilter = "All Locations";
-  DateTime? _residentDateFilter;
-  String _driverStatusFilter = "All Status";
-  String _driverCategoryFilter = "All Categories";
-  DateTime? _driverDateFilter;
-
-  final List<String> _residentCategories = ["All Categories", "Uncollected Garbage", "Spilled Waste", "Driver Behavior", "Schedule Issue", "Other"];
-  final List<String> _locationOptions = ["All Locations", ...ServiceAreaService.documentedAreaNames];
-  final List<String> _driverCategories = ["All Categories", "Engine", "Tires", "Brakes", "GPS", "Electrical", "Fuel", "Transmission", "Hydraulic System", "Body Damage", "Other"];
-  final List<String> _statusOptions = ["All Status", "Pending", "In Progress", "Resolved"];
-
-  String _canonicalizeAreaName(String? raw) => ServiceAreaService.canonicalizeAreaName(raw) ?? raw ?? "";
+  static const List<String> _residentCategories = <String>[
+    'Uncollected Garbage', 'Spilled Waste', 'Driver Behavior', 'Schedule Issue', 'Other'
+  ];
+  static const List<String> _driverCategories = <String>[
+    'Engine', 'Tires', 'Brakes', 'GPS', 'Electrical', 'Fuel', 'Transmission', 'Hydraulic System', 'Body Damage', 'Other'
+  ];
 
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 2, vsync: this);
-    _refreshRotationController = AnimationController(
-      vsync: this,
-      duration: const Duration(seconds: 1),
-    );
-    _fetchResidentComplaints();
-    _listenToDriverIssues();
-    _scrollController.addListener(() {
-      if (_scrollController.offset <= 0 && !_showHeaderShadow) {
-        setState(() => _showHeaderShadow = true);
-      } else if (_scrollController.offset > 0 && _showHeaderShadow) {
-        setState(() => _showHeaderShadow = false);
-      }
-    });
+    _ownsController = widget.controller == null;
+    _c = widget.controller ?? ComplaintCenterController();
+    _c.addListener(_onChanged);
+    _c.start();
+    if (widget.listenForNewComplaints) _listenForNewComplaints();
   }
 
   @override
   void dispose() {
-    _driverIssuesSubscription?.cancel();
-    _refreshRotationController.dispose();
-    _tabController.dispose();
-    _scrollController.dispose();
-    _residentSearchController.dispose();
-    _driverSearchController.dispose();
+    _c.removeListener(_onChanged);
+    if (_ownsController) _c.dispose();
+    _searchDebounce?.cancel();
+    _newComplaintSub?.cancel();
+    _search.dispose();
     super.dispose();
   }
 
-  Future<void> _refreshAllStats({bool manual = false}) async {
-    if (_isRefreshing) return;
-    
-    if (mounted) {
-      setState(() {
-        _isRefreshing = true;
-        _showRefreshSpinner = manual;
-        _manualPullDepth = manual ? 80.0 : 0.0;
-      });
-    }
-    _refreshRotationController.repeat();
-
-    await Future.wait([
-      _fetchResidentComplaints(silent: true),
-      Future.delayed(const Duration(milliseconds: 1500)),
-    ]);
-
-    if (manual) {
-      await Future.delayed(const Duration(seconds: 2));
-    }
-
-    if (mounted) {
-      setState(() {
-        _isRefreshing = false;
-      });
-      await Future.delayed(const Duration(milliseconds: 600));
-      if (mounted) {
-        setState(() {
-          _showRefreshSpinner = false;
-          _manualPullDepth = 0.0;
-        });
-      }
-      _refreshRotationController.stop();
-
-      if (manual) {
-        showDialog(
-          context: context,
-          barrierColor: Colors.black.withOpacity(0.1),
-          barrierDismissible: false,
-          builder: (context) {
-            Future.delayed(const Duration(milliseconds: 1500), () {
-              if (Navigator.canPop(context)) Navigator.pop(context);
-            });
-            return Center(
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(32),
-                  boxShadow: [
-                    BoxShadow(color: Colors.black.withOpacity(0.08), blurRadius: 15, offset: const Offset(0, 5))
-                  ],
-                ),
-                child: const Material(
-                  color: Colors.transparent,
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Icons.check_circle_rounded, color: Colors.green, size: 20),
-                      SizedBox(width: 12),
-                      Text(
-                        "Incident reports synchronized",
-                        style: TextStyle(fontWeight: FontWeight.w800, fontSize: 13, color: Color(0xFF1A1A1A)),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            );
-          },
-        );
-      }
-    }
+  void _onChanged() {
+    if (mounted) setState(() {});
   }
 
-  Future<void> _fetchResidentComplaints({bool silent = false}) async {
-    if (!silent) setState(() => _isLoadingResident = true);
+  /// A saved resident complaint writes an Admin notification; it is only a signal to re-read
+  /// the list from MySQL (the notification is never the complaint record).
+  void _listenForNewComplaints() {
     try {
-      final response = await _apiService.getComplaints();
-      if (response.data['success'] == true) {
-        setState(() { 
-          _residentComplaints = response.data['data']; 
-          _isLoadingResident = false; 
-        });
-      }
-    } catch (e) { 
-      if (mounted) setState(() => _isLoadingResident = false); 
+      _newComplaintSub = FirebaseDatabase.instance.ref('notifications').limitToLast(1).onChildAdded.listen((DatabaseEvent e) {
+        if (!_baselineSeen) {
+          _baselineSeen = true;
+          return;
+        }
+        final Object? v = e.snapshot.value;
+        if (v is Map && (v['type'] ?? '').toString() == 'RESIDENT_COMPLAINT' && _c.query.source == ComplaintSource.resident) {
+          _c.load(silent: true);
+        }
+      }, onError: (Object e) => debugPrint('complaint notification listener: $e'));
+    } catch (e) {
+      debugPrint('complaint notification listener unavailable: $e');
     }
   }
 
-  void _listenToDriverIssues() {
-    _driverIssuesSubscription?.cancel();
-    _driverIssuesSubscription = _database.ref('truck_issues').onValue.listen((event) {
-      if (event.snapshot.exists && event.snapshot.value != null) {
-        final Map data = event.snapshot.value as Map;
-        final List list = [];
-        data.forEach((key, value) {
-          list.add({...Map<String, dynamic>.from(value as Map), 'id': key});
-        });
-        // Sort newest first
-        list.sort((a, b) => (b['createdAt'] ?? 0).compareTo(a['createdAt'] ?? 0));
-        if (mounted) {
-          setState(() {
-            _driverIssues = list;
-            _isLoadingDriver = false;
-          });
-        }
-      } else {
-        if (mounted) {
-          setState(() {
-            _driverIssues = [];
-            _isLoadingDriver = false;
-          });
-        }
-      }
-    });
+  void _onSearchChanged(String value) {
+    _searchDebounce?.cancel();
+    _searchDebounce = Timer(const Duration(milliseconds: 400), () => _c.setSearch(value));
   }
 
   @override
   Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        bool isMobile = constraints.maxWidth < 900;
-        return Scaffold(
-          backgroundColor: const Color(0xFFF8F9FA), // Subtle gray background to make white cards pop
-          body: SafeArea(
-            child: Stack(
-              children: [
-                Listener(
-                  behavior: HitTestBehavior.translucent,
-                  onPointerMove: (event) {
-                    bool atTop = _scrollController.hasClients && _scrollController.offset <= 0;
-                    if (!_isRefreshing && (atTop || _manualPullDepth > 0)) {
-                      if (event.delta.dy > 0 || _manualPullDepth > 0) {
-                        setState(() {
-                          _manualPullDepth += event.delta.dy * 0.5;
-                          if (_manualPullDepth < 0) _manualPullDepth = 0;
-                          if (_manualPullDepth > 120) _manualPullDepth = 120;
-                          _showRefreshSpinner = _manualPullDepth > 0;
-                        });
-                      }
-                    }
-                  },
-                  onPointerUp: (event) {
-                    if (_manualPullDepth > 70 && !_isRefreshing) {
-                      _refreshAllStats(manual: true);
-                    } else if (!_isRefreshing) {
-                      setState(() {
-                        _manualPullDepth = 0;
-                        _showRefreshSpinner = false;
-                      });
-                    }
-                  },
-                  child: Column(
-                    children: [
-                      _buildHeader(isMobile),
-                      const SizedBox(height: 16),
-                      _buildTabBar(),
-                      const SizedBox(height: 8),
-                      Expanded(
-                        child: TabBarView(
-                          controller: _tabController,
-                          children: [
-                            _isLoadingResident ? const Center(child: CircularProgressIndicator(color: Color(0xFF00897B))) : _buildList(true),
-                            _isLoadingDriver ? const Center(child: CircularProgressIndicator(color: Color(0xFF00897B))) : _buildList(false)
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                AnimatedBuilder(
-                  animation: _refreshRotationController,
-                  builder: (context, child) {
-                    bool shouldShow = _showRefreshSpinner || _manualPullDepth > 0;
-                    if (!shouldShow) return const SizedBox.shrink();
-
-                    final double targetTop = (_isRefreshing && _showRefreshSpinner)
-                        ? 80.0
-                        : (-40 + _manualPullDepth).clamp(-40.0, 80.0);
-                    
-                    final double opacity = (_isRefreshing && _showRefreshSpinner)
-                        ? 1.0
-                        : (_manualPullDepth / 60).clamp(0.0, 1.0);
-
-                    return AnimatedPositioned(
-                      duration: Duration(milliseconds: _isRefreshing ? 200 : 400),
-                      curve: Curves.easeOutCubic,
-                      top: targetTop,
-                      left: 0,
-                      right: 0,
-                      child: Center(
-                        child: Opacity(
-                          opacity: opacity,
-                          child: Container(
-                            padding: const EdgeInsets.all(8),
-                            decoration: BoxDecoration(
-                              color: Colors.white,
-                              shape: BoxShape.circle,
-                              boxShadow: [
-                                BoxShadow(color: Colors.black.withOpacity(0.15), blurRadius: 8, offset: const Offset(0, 3)),
+    return Scaffold(
+      backgroundColor: const Color(0xFFF8F9FA),
+      body: SafeArea(
+        child: Column(
+          children: <Widget>[
+            _buildHeader(),
+            Expanded(
+              child: RefreshIndicator(
+                color: _teal,
+                onRefresh: () => _c.load(),
+                child: LayoutBuilder(builder: (BuildContext context, BoxConstraints box) {
+                  final bool narrow = box.maxWidth < 600;
+                  final double gutter = narrow ? 16 : 24;
+                  return CustomScrollView(
+                    key: const ValueKey<String>('complaint-center-scroll'),
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    slivers: <Widget>[
+                      SliverToBoxAdapter(
+                        child: _centered(
+                          Padding(
+                            padding: EdgeInsets.fromLTRB(gutter, 16, gutter, 0),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: <Widget>[
+                                _buildCounters(narrow),
+                                const SizedBox(height: 14),
+                                _buildScopeTabs(narrow),
+                                const SizedBox(height: 12),
+                                _buildSourceAndSearch(narrow),
+                                const SizedBox(height: 10),
+                                _buildFilters(),
+                                const SizedBox(height: 10),
+                                _buildResultSummary(),
                               ],
-                            ),
-                            child: Transform.rotate(
-                              angle: (_isRefreshing && _showRefreshSpinner)
-                                  ? 0
-                                  : (_manualPullDepth / 80) * 2 * math.pi,
-                              child: RotationTransition(
-                                turns: _refreshRotationController,
-                                child: const Icon(Icons.refresh_rounded, color: Color(0xFF00796B), size: 24),
-                              ),
                             ),
                           ),
                         ),
                       ),
-                    );
-                  },
-                ),
-              ],
+                      SliverToBoxAdapter(
+                        child: _centered(
+                          Padding(
+                            padding: EdgeInsets.fromLTRB(gutter, 8, gutter, 24),
+                            child: _buildList(box.maxWidth),
+                          ),
+                        ),
+                      ),
+                    ],
+                  );
+                }),
+              ),
             ),
-          ),
-        );
-      }
-    );
-  }
-
-  Widget _buildCircularBackButton() {
-    final bool isMobile = MediaQuery.of(context).size.width < 900;
-    return GestureDetector(
-      onTap: () {
-        if (isMobile) {
-          Scaffold.of(context).openDrawer();
-        } else if (widget.onBack != null) {
-          widget.onBack!();
-        } else {
-          Navigator.pop(context);
-        }
-      },
-      child: Container(
-        width: 44,
-        height: 44,
-        alignment: Alignment.center,
-        decoration: const BoxDecoration(
-          color: Color(0xFFF1F5F9),
-          shape: BoxShape.circle,
-        ),
-        child: Icon(
-          isMobile ? Icons.menu_rounded : Icons.arrow_back_ios_new_rounded,
-          color: const Color(0xFF1E293B),
-          size: isMobile ? 22 : 18,
+          ],
         ),
       ),
     );
   }
 
-  Widget _buildHeader(bool isMobile) {
+  Widget _centered(Widget child) =>
+      Center(child: ConstrainedBox(constraints: const BoxConstraints(maxWidth: 1100), child: child));
+
+  // ------------------------------------------------------------------ header
+
+  Widget _buildHeader() {
+    final bool isMobile = MediaQuery.of(context).size.width < 900;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
       decoration: BoxDecoration(
         color: Colors.white,
-        border: Border(bottom: BorderSide(color: const Color(0xFFF1F5F9), width: _showHeaderShadow ? 0 : 1)),
-        boxShadow: [
-          if (_showHeaderShadow)
-            BoxShadow(
-              color: Colors.black.withOpacity(0.04),
-              blurRadius: 10,
-              offset: const Offset(0, 4),
-            )
-        ],
+        boxShadow: <BoxShadow>[BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 10, offset: const Offset(0, 4))],
       ),
       child: Row(
-        children: [
-          _buildCircularBackButton(),
+        children: <Widget>[
+          Semantics(
+            button: true,
+            label: isMobile ? 'Open menu' : 'Back',
+            child: InkWell(
+              customBorder: const CircleBorder(),
+              onTap: () {
+                if (isMobile && Scaffold.maybeOf(context)?.hasDrawer == true) {
+                  Scaffold.of(context).openDrawer();
+                } else if (isMobile) {
+                  final ScaffoldState? outer = context.findAncestorStateOfType<ScaffoldState>();
+                  if (outer != null && outer.hasDrawer) {
+                    outer.openDrawer();
+                  } else if (widget.onBack != null) {
+                    widget.onBack!();
+                  } else {
+                    Navigator.maybePop(context);
+                  }
+                } else if (widget.onBack != null) {
+                  widget.onBack!();
+                } else {
+                  Navigator.maybePop(context);
+                }
+              },
+              child: Container(
+                width: 44,
+                height: 44,
+                alignment: Alignment.center,
+                decoration: const BoxDecoration(color: _surface, shape: BoxShape.circle),
+                child: Icon(isMobile ? Icons.menu_rounded : Icons.arrow_back_ios_new_rounded,
+                    color: const Color(0xFF1E293B), size: isMobile ? 22 : 18),
+              ),
+            ),
+          ),
           const SizedBox(width: 14),
           const Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  "Resolve Radar",
-                  style: TextStyle(
-                    fontSize: 20,
-                    fontWeight: FontWeight.w800,
-                    color: Color(0xFF0F172A),
-                    letterSpacing: -0.3,
-                  ),
-                ),
+              children: <Widget>[
+                Text('Complaint Center',
+                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: _ink, letterSpacing: -0.3)),
                 SizedBox(height: 2),
-                Text(
-                  "Manage system complaints",
-                  style: TextStyle(
-                    fontSize: 12.5,
-                    color: Color(0xFF64748B),
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
+                Text('Manage, track, and resolve resident and driver complaints',
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 12.5, color: _muted, fontWeight: FontWeight.w500)),
               ],
             ),
           ),
-          Container(
-            width: 44,
-            height: 44,
-            decoration: const BoxDecoration(
-              color: Color(0xFFE6F4F1),
-              shape: BoxShape.circle,
-            ),
-            child: const Icon(
-              Icons.chat_bubble_rounded,
-              color: Color(0xFF007A63),
-              size: 20,
-            ),
+          const SizedBox(width: 8),
+          IconButton(
+            tooltip: 'Refresh',
+            onPressed: _c.loading ? null : () => _c.load(),
+            icon: const Icon(Icons.refresh_rounded, color: _teal),
           ),
         ],
       ),
     );
   }
 
-  Widget _buildTabBar() {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 4),
-      color: Colors.transparent, 
-      child: Center(
-        child: Container(
-          constraints: const BoxConstraints(maxWidth: 500),
-          height: 48,
-          padding: const EdgeInsets.all(4),
-          decoration: BoxDecoration(
-            color: const Color(0xFFF1F5F9),
-            borderRadius: BorderRadius.circular(14),
-          ),
-          child: TabBar(
-            controller: _tabController,
-            overlayColor: WidgetStateProperty.all(Colors.transparent),
-            splashFactory: NoSplash.splashFactory,
-            labelColor: Colors.white,
-            unselectedLabelColor: const Color(0xFF475569),
-            indicatorSize: TabBarIndicatorSize.tab,
-            indicator: BoxDecoration(
-              borderRadius: BorderRadius.circular(10),
-              color: const Color(0xFF007A63),
+  // ------------------------------------------------------------------ counters + tabs
+
+  Widget _buildCounters(bool narrow) {
+    final ComplaintCounts n = _c.counts;
+    final bool ready = _c.countsKnown; // unknown counts are "–", never a confirmed 0
+    Widget card(String key, String label, int value, IconData icon, Color fg, Color bg, VoidCallback onTap) {
+      return Expanded(
+        child: Material(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(18),
+          child: InkWell(
+            key: ValueKey<String>('counter-$key'),
+            borderRadius: BorderRadius.circular(18),
+            onTap: onTap,
+            child: Container(
+              padding: EdgeInsets.symmetric(horizontal: narrow ? 10 : 16, vertical: narrow ? 10 : 12),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(18),
+                border: Border.all(color: const Color(0xFFEFF2F5)),
+              ),
+              child: Row(
+                children: <Widget>[
+                  Container(
+                    padding: const EdgeInsets.all(7),
+                    decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(10)),
+                    child: Icon(icon, color: fg, size: narrow ? 16 : 18),
+                  ),
+                  SizedBox(width: narrow ? 8 : 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: <Widget>[
+                        Text(ready ? '$value' : '–',
+                            style: TextStyle(fontSize: narrow ? 18 : 22, fontWeight: FontWeight.w900, color: _ink, height: 1.1)),
+                        Text(label,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(fontSize: narrow ? 10.5 : 12, fontWeight: FontWeight.w700, color: _muted)),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
             ),
-            dividerColor: Colors.transparent,
-            labelStyle: const TextStyle(
-              fontWeight: FontWeight.w800,
-              fontSize: 13,
-              letterSpacing: 0.3,
-            ),
-            unselectedLabelStyle: const TextStyle(
-              fontWeight: FontWeight.w700,
-              fontSize: 13,
-            ),
-            tabs: [
-              Tab(text: "RESIDENTS (${_residentComplaints.length})"),
-              Tab(text: "DRIVERS (${_driverIssues.length})"),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildList(bool isResident) {
-    List<dynamic> rawList = isResident ? _residentComplaints : _driverIssues;
-    
-    // Apply Filters
-    List<dynamic> filteredList = rawList.where((item) {
-      if (isResident) {
-        final String name = (item['full_name'] ?? "").toString().toLowerCase();
-        final String category = (item['category'] ?? "").toString().toLowerCase();
-        final String description = (item['description'] ?? "").toString().toLowerCase();
-        final String rawPurok = (item['purok'] ?? "").toString();
-        final String rawLocation = (item['location'] ?? "").toString();
-        final String canonicalPurok = _canonicalizeAreaName(rawPurok.isNotEmpty && rawPurok != "Unknown" ? rawPurok : rawLocation);
-        final String status = _normalizeStatus((item['status'] ?? "").toString());
-        final String search = _residentSearchController.text.toLowerCase().trim();
-        
-        bool matchSearch = search.isEmpty ||
-            name.contains(search) ||
-            category.contains(search) ||
-            description.contains(search) ||
-            rawPurok.toLowerCase().contains(search) ||
-            rawLocation.toLowerCase().contains(search);
-
-        bool matchCategory = _residentCategoryFilter == "All Categories" || (item['category'] ?? "").toString() == _residentCategoryFilter;
-        bool matchStatus = _residentStatusFilter == "All Status" || status.toLowerCase() == _residentStatusFilter.toLowerCase();
-        bool matchLocation = _residentLocationFilter == "All Locations" ||
-            canonicalPurok.toLowerCase() == _residentLocationFilter.toLowerCase() ||
-            rawPurok.toLowerCase().contains(_residentLocationFilter.toLowerCase()) ||
-            rawLocation.toLowerCase().contains(_residentLocationFilter.toLowerCase());
-        bool matchDate = true;
-        if (_residentDateFilter != null) {
-          final String itemDateStr = (item['created_at'] ?? "").toString();
-          if (itemDateStr.length >= 10) {
-            final DateTime? itemDate = DateTime.tryParse(itemDateStr.substring(0, 10));
-            matchDate = itemDate != null && 
-                itemDate.year == _residentDateFilter!.year && 
-                itemDate.month == _residentDateFilter!.month && 
-                itemDate.day == _residentDateFilter!.day;
-          }
-        }
-        return matchSearch && matchCategory && matchStatus && matchLocation && matchDate;
-      } else {
-        final String truckId = (item['truckId'] ?? "").toString().toLowerCase();
-        final String driverName = (item['driverName'] ?? "").toString().toLowerCase();
-        final String issueType = (item['issueType'] ?? "").toString().toLowerCase();
-        final String description = (item['description'] ?? "").toString().toLowerCase();
-        final String status = _normalizeStatus((item['status'] ?? "").toString());
-        final String search = _driverSearchController.text.toLowerCase().trim();
-        
-        bool matchSearch = search.isEmpty ||
-            truckId.contains(search) ||
-            driverName.contains(search) ||
-            issueType.contains(search) ||
-            description.contains(search);
-
-        bool matchStatus = _driverStatusFilter == "All Status" || status.toLowerCase() == _driverStatusFilter.toLowerCase();
-        bool matchCategory = _driverCategoryFilter == "All Categories" || (item['issueType'] ?? "").toString() == _driverCategoryFilter;
-        bool matchDate = true;
-        if (_driverDateFilter != null) {
-          final dynamic rawTs = item['createdAt'];
-          if (rawTs != null) {
-            final DateTime itemDate = DateTime.fromMillisecondsSinceEpoch(rawTs is int ? rawTs : int.parse(rawTs.toString()));
-            matchDate = itemDate.year == _driverDateFilter!.year && 
-                itemDate.month == _driverDateFilter!.month && 
-                itemDate.day == _driverDateFilter!.day;
-          }
-        }
-        return matchSearch && matchStatus && matchDate && matchCategory;
-      }
-    }).toList();
-
-    return Column(
-      children: [
-        _buildSearchAndFilterBar(isResident),
-        const SizedBox(height: 4),
-        Expanded(
-          child: AnimatedBuilder(
-            animation: _scrollController,
-            builder: (context, child) {
-              final double offset = _scrollController.hasClients ? _scrollController.offset : 0;
-              return Transform.translate(
-                offset: Offset(0, offset < 0 ? offset : 0),
-                child: ScrollConfiguration(
-                  behavior: ScrollConfiguration.of(context).copyWith(overscroll: false),
-                  child: filteredList.isEmpty 
-                    ? Center(
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(Icons.search_off_rounded, size: 64, color: Colors.grey.shade300),
-                            const SizedBox(height: 16),
-                            Text("No reports match your filters", style: TextStyle(color: Colors.grey.shade500, fontWeight: FontWeight.w600)),
-                          ],
-                        ),
-                      )
-                    : LayoutBuilder(
-                        builder: (context, boxConstraints) {
-                          final bool isWeb = boxConstraints.maxWidth > 900;
-                          if (isWeb) {
-                            return GridView.builder(
-                              controller: _scrollController,
-                              physics: (_manualPullDepth > 0 || _isRefreshing)
-                                  ? const NeverScrollableScrollPhysics()
-                                  : const ClampingScrollPhysics(),
-                              padding: const EdgeInsets.fromLTRB(20, 12, 20, 100),
-                              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                                crossAxisCount: 2,
-                                crossAxisSpacing: 16,
-                                mainAxisSpacing: 12,
-                                mainAxisExtent: 185,
-                              ),
-                              itemCount: filteredList.length,
-                              itemBuilder: (context, i) {
-                                return _buildCard(filteredList[i], i, isResident);
-                              },
-                            );
-                          }
-                          return ListView.builder(
-                            controller: _scrollController,
-                            physics: (_manualPullDepth > 0 || _isRefreshing) 
-                                ? const NeverScrollableScrollPhysics() 
-                                : const ClampingScrollPhysics(),
-                            padding: const EdgeInsets.fromLTRB(20, 12, 20, 100),
-                            itemCount: filteredList.length,
-                            itemBuilder: (context, i) {
-                              return _buildCard(filteredList[i], i, isResident);
-                            },
-                          );
-                        }
-                      ),
-                ),
-              );
-            },
           ),
         ),
+      );
+    }
+
+    return Row(
+      children: <Widget>[
+        card('pending', 'Pending', n.pending, Icons.hourglass_empty_rounded, const Color(0xFFB45309), const Color(0xFFFEF3C7), () {
+          _c.showActive(status: ComplaintStatus.pending);
+        }),
+        SizedBox(width: narrow ? 8 : 12),
+        card('in-progress', 'In Progress', n.inProgress, Icons.autorenew_rounded, const Color(0xFF0369A1), const Color(0xFFE0F2FE), () {
+          _c.showActive(status: ComplaintStatus.inProgress);
+        }),
+        SizedBox(width: narrow ? 8 : 12),
+        card('resolved', 'Resolved', n.resolved, Icons.verified_rounded, const Color(0xFF15803D), const Color(0xFFDCFCE7),
+            () => _c.setScope(ComplaintScope.resolved)),
       ],
     );
   }
 
-  String _normalizeStatus(String s) {
-    String str = s.toUpperCase().trim().replaceAll('_', ' ');
-    if (str == 'PENDING' || str == 'SUBMITTED') return 'Pending';
-    if (str == 'IN PROGRESS' || str == 'UNDER REVIEW' || str.contains('PROGRESS')) return 'In Progress';
-    if (str == 'RESOLVED' || str == 'COMPLETED') return 'Resolved';
-    return 'Pending';
-  }
-
-  Widget _buildSearchAndFilterBar(bool isResident) {
-    final bool isDesktop = Responsive.isDesktop(context);
-    final bool isSmall = MediaQuery.of(context).size.width < 600;
-
-    return Container(
-      width: double.infinity,
-      padding: EdgeInsets.fromLTRB(isSmall ? 16 : 24, 0, isSmall ? 16 : 24, isDesktop ? 20 : 8),
-      color: Colors.transparent, 
-      child: Center(
-        child: Container(
-          constraints: const BoxConstraints(maxWidth: 1000),
-          padding: isDesktop ? const EdgeInsets.all(16) : EdgeInsets.zero,
-          decoration: isDesktop ? BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(24),
-            boxShadow: AppTheme.balancedPulidongShadow,
-            border: Border.all(color: Colors.grey.shade50, width: 1.5),
-          ) : null,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _buildSearchBar(isResident),
-              const SizedBox(height: 12),
-              _buildFilters(isResident),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildSearchBar(bool isResident) {
-    final bool isSmall = MediaQuery.of(context).size.width < 600;
-    return Container(
-      height: 48,
-      decoration: BoxDecoration(
-        color: const Color(0xFFF7F8FA),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.grey.shade300, width: 1.5),
-      ),
-      child: TextField(
-        controller: isResident ? _residentSearchController : _driverSearchController,
-        onChanged: (_) => setState(() {}),
-        cursorColor: Colors.black54,
-        style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14, color: Color(0xFF1A1A1A)),
-        decoration: InputDecoration(
-          hintText: isResident ? (isSmall ? "Search resident..." : "Search resident name...") : (isSmall ? "Search driver..." : "Search driver or truck..."),
-          hintStyle: const TextStyle(color: Color(0xFFBDBDBD), fontSize: 13),
-          prefixIcon: const Icon(Icons.search_rounded, color: Color(0xFF00897B), size: 20),
-          border: InputBorder.none,
-          contentPadding: const EdgeInsets.symmetric(vertical: 12),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildFilters(bool isResident) {
-    final bool isDesktop = Responsive.isDesktop(context);
-    final double spacing = isDesktop ? 20.0 : 16.0;
-
-    List<Widget> children = [];
-    if (isResident) {
-      children = [
-        _buildDropdownFilter(
-            Icons.alt_route_rounded,
-            _residentCategoryFilter, 
-            _residentCategories, 
-            (val) => setState(() => _residentCategoryFilter = val)
-          ),
-          SizedBox(width: spacing),
-          _buildDropdownFilter(
-            Icons.location_on_rounded,
-            _residentLocationFilter,
-            _locationOptions,
-            (val) => setState(() => _residentLocationFilter = val)
-          ),
-          SizedBox(width: spacing),
-          _filterChip(Icons.calendar_today_outlined, _residentDateFilter == null ? "All Dates" : DateFormat('MMM dd, yyyy').format(_residentDateFilter!), onTap: () => _showDatePicker(true)),
-          SizedBox(width: spacing),
-          _buildDropdownFilter(
-            Icons.info_outline_rounded, 
-            _residentStatusFilter, 
-            _statusOptions, 
-            (val) => setState(() => _residentStatusFilter = val)
-          ),
-      ];
-    } else {
-      children = [
-        _buildDropdownFilter(
-            Icons.alt_route_rounded,
-            _driverCategoryFilter, 
-            _driverCategories, 
-            (val) => setState(() => _driverCategoryFilter = val)
-          ),
-          SizedBox(width: spacing),
-          _filterChip(Icons.calendar_today_outlined, _driverDateFilter == null ? "All Dates" : DateFormat('MMM dd, yyyy').format(_driverDateFilter!), onTap: () => _showDatePicker(false)),
-          SizedBox(width: spacing),
-          _buildDropdownFilter(
-            Icons.info_outline_rounded, 
-            _driverStatusFilter, 
-            _statusOptions, 
-            (val) => setState(() => _driverStatusFilter = val)
-          ),
-      ];
-    }
-
-    return SingleChildScrollView(
-      scrollDirection: Axis.horizontal,
-      physics: const BouncingScrollPhysics(),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: children,
-      ),
-    );
-  }
-
-  Widget _buildDropdownFilter(IconData icon, String currentVal, List<String> options, Function(String) onSelect) {
-    return PopupMenuButton<String>(
-      onSelected: onSelect,
-      offset: const Offset(0, 36),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-      elevation: 6,
-      color: Colors.white,
-      itemBuilder: (context) => options.map((opt) {
-        bool isSelected = opt == currentVal;
-        return PopupMenuItem<String>(
-          value: opt,
-          child: Row(
-            children: [
-              Icon(
-                isSelected ? Icons.check_circle_rounded : Icons.circle_outlined,
-                size: 16,
-                color: isSelected ? const Color(0xFF007A63) : Colors.grey.shade400,
-              ),
-              const SizedBox(width: 10),
-              Text(
-                opt,
+  Widget _buildScopeTabs(bool narrow) {
+    final ComplaintCounts n = _c.counts;
+    final bool ready = _c.countsKnown;
+    Widget tab(ComplaintScope scope, String label, int count) {
+      final bool selected = _c.query.scope == scope;
+      return Expanded(
+        child: Semantics(
+          selected: selected,
+          button: true,
+          child: InkWell(
+            key: ValueKey<String>('scope-${scope.name}'),
+            borderRadius: BorderRadius.circular(10),
+            onTap: selected ? null : () => _c.setScope(scope),
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 180),
+              alignment: Alignment.center,
+              padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 6),
+              decoration: BoxDecoration(color: selected ? _teal : Colors.transparent, borderRadius: BorderRadius.circular(10)),
+              child: Text(
+                ready ? '$label ($count)' : label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
                 style: TextStyle(
-                  fontWeight: isSelected ? FontWeight.w800 : FontWeight.w600,
-                  color: isSelected ? const Color(0xFF007A63) : const Color(0xFF1E293B),
-                  fontSize: 13,
+                  fontWeight: FontWeight.w800,
+                  fontSize: narrow ? 12 : 13,
+                  letterSpacing: 0.3,
+                  color: selected ? Colors.white : const Color(0xFF475569),
                 ),
               ),
-            ],
+            ),
           ),
-        );
-      }).toList(),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 16, color: const Color(0xFF007A63)),
-          const SizedBox(width: 6),
-          Text(currentVal, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13, color: Color(0xFF0F172A))),
-          const SizedBox(width: 2),
-          const Icon(Icons.arrow_drop_down_rounded, size: 18, color: Color(0xFF64748B)),
-        ],
-      ),
-    );
-  }
-
-  Widget _filterChip(IconData icon, String label, {VoidCallback? onTap}) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 16, color: const Color(0xFF007A63)),
-          const SizedBox(width: 6),
-          Text(label, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13, color: Color(0xFF0F172A))),
-          const SizedBox(width: 2),
-          const Icon(Icons.arrow_drop_down_rounded, size: 18, color: Color(0xFF64748B)),
-        ],
-      ),
-    );
-  }
-
-
-  Future<void> _showDatePicker(bool isResident) async {
-    final DateTime? current = isResident ? _residentDateFilter : _driverDateFilter;
-    
-    DateTime? picked = await showDialog<DateTime>(
-      context: context,
-      builder: (context) => Dialog(
-        backgroundColor: Colors.white,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(32)),
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 400),
-          child: _CuteDatePicker(initialDate: current ?? DateTime.now(), isMobile: false),
         ),
-      ),
-    );
-
-    setState(() {
-      if (isResident) {
-        _residentDateFilter = picked;
-      } else {
-        _driverDateFilter = picked;
-      }
-    });
-  }
-
-
-  Widget _buildCard(dynamic c, int index, bool isResident) {
-    String status = (c['status'] ?? 'PENDING').toString().toUpperCase().replaceAll('_', ' ');
-    if (status == 'SUBMITTED') status = 'PENDING';
-
-    Color statusBgColor = const Color(0xFFFEF3C7);
-    Color statusTextColor = const Color(0xFFB45309);
-
-    if (status == 'RESOLVED' || status == 'COMPLETED') {
-      status = 'RESOLVED';
-      statusBgColor = const Color(0xFFDCFCE7);
-      statusTextColor = const Color(0xFF15803D);
-    } else if (status == 'IN PROGRESS' || status == 'UNDER REVIEW') {
-      status = 'IN PROGRESS';
-      statusBgColor = const Color(0xFFE0F2FE);
-      statusTextColor = const Color(0xFF0369A1);
-    }
-
-    String title = isResident ? (c['category'] ?? "General") : (c['issueType'] ?? "Truck Issue");
-    String reporter = isResident ? (c['full_name'] ?? 'Resident') : (c['driverName'] ?? 'Driver');
-    String description = (c['description'] ?? "").toString();
-    String truckInfo = !isResident ? "Truck ${c['truckId'] ?? 'N/A'}" : "";
-
-    String date = "";
-    if (isResident) {
-      date = (c['created_at'] ?? '').toString();
-    } else {
-      final dynamic rawTs = c['createdAt'];
-      if (rawTs != null) {
-        final DateTime dt = DateTime.fromMillisecondsSinceEpoch(rawTs is int ? rawTs : int.parse(rawTs.toString()));
-        date = DateFormat('yyyy-MM-dd HH:mm:ss').format(dt);
-      }
+      );
     }
 
     return Container(
+      padding: const EdgeInsets.all(4),
+      decoration: BoxDecoration(color: _surface, borderRadius: BorderRadius.circular(14)),
+      child: Row(
+        children: <Widget>[
+          tab(ComplaintScope.active, narrow ? 'ACTIVE' : 'ACTIVE COMPLAINTS', n.pending + n.inProgress),
+          tab(ComplaintScope.resolved, narrow ? 'RESOLVED ARCHIVE' : 'RESOLVED ARCHIVE', n.resolved),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSourceAndSearch(bool narrow) {
+    final Widget sources = Wrap(
+      spacing: 8,
+      children: <Widget>[
+        for (final ComplaintSource s in ComplaintSource.values)
+          ChoiceChip(
+            key: ValueKey<String>('source-${s.name}'),
+            label: Text(s == ComplaintSource.resident ? 'Residents' : 'Drivers'),
+            avatar: Icon(s == ComplaintSource.resident ? Icons.home_rounded : Icons.local_shipping_rounded,
+                size: 16, color: _c.query.source == s ? Colors.white : _teal),
+            selected: _c.query.source == s,
+            showCheckmark: false,
+            selectedColor: _teal,
+            backgroundColor: Colors.white,
+            side: BorderSide(color: _c.query.source == s ? _teal : const Color(0xFFE2E8F0)),
+            labelStyle: TextStyle(
+                fontWeight: FontWeight.w800, fontSize: 12.5, color: _c.query.source == s ? Colors.white : const Color(0xFF334155)),
+            onSelected: (bool on) {
+              if (!on || _c.query.source == s) return;
+              _searchDebounce?.cancel();
+              _search.clear();
+              _c.setSource(s);
+            },
+          ),
+      ],
+    );
+    final Widget search = SizedBox(
+      height: 44,
+      child: TextField(
+        key: const ValueKey<String>('complaint-search'),
+        controller: _search,
+        onChanged: _onSearchChanged,
+        onSubmitted: (String v) {
+          _searchDebounce?.cancel();
+          _c.setSearch(v);
+        },
+        textInputAction: TextInputAction.search,
+        style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14, color: Color(0xFF1A1A1A)),
+        decoration: InputDecoration(
+          hintText: _c.query.source == ComplaintSource.resident ? 'Search complaint # or resident name' : 'Search driver, truck or report #',
+          hintStyle: const TextStyle(color: Color(0xFF9CA3AF), fontSize: 13),
+          prefixIcon: const Icon(Icons.search_rounded, color: Color(0xFF00897B), size: 20),
+          suffixIcon: _search.text.isEmpty
+              ? null
+              : IconButton(
+                  tooltip: 'Clear search',
+                  icon: const Icon(Icons.close_rounded, size: 18),
+                  onPressed: () {
+                    _searchDebounce?.cancel();
+                    _search.clear();
+                    _c.setSearch('');
+                  },
+                ),
+          filled: true,
+          fillColor: Colors.white,
+          contentPadding: const EdgeInsets.symmetric(vertical: 10),
+          enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: Color(0xFFE2E8F0))),
+          focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: _teal, width: 1.5)),
+        ),
+      ),
+    );
+    if (narrow) {
+      return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: <Widget>[sources, const SizedBox(height: 10), search]);
+    }
+    return Row(children: <Widget>[sources, const SizedBox(width: 16), Expanded(child: search)]);
+  }
+
+  // ------------------------------------------------------------------ filters
+
+  Widget _buildFilters() {
+    final ComplaintQuery q = _c.query;
+    final bool resident = q.source == ComplaintSource.resident;
+    final List<String> categories = resident ? _residentCategories : _driverCategories;
+    final String dateWord = q.scope == ComplaintScope.resolved ? 'Resolved' : 'Submitted';
+    String dateLabel = 'Any date';
+    if (q.from != null && q.to != null) {
+      final DateFormat f = DateFormat('MMM d');
+      dateLabel = DateUtils.isSameDay(q.from, q.to) ?DateFormat('MMM d, yyyy').format(q.from!) : '${f.format(q.from!)} – ${DateFormat('MMM d, yyyy').format(q.to!)}';
+    }
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: <Widget>[
+        _menuFilter<String>(
+          key: 'filter-category',
+          icon: Icons.category_rounded,
+          label: q.category ?? 'All categories',
+          active: q.category != null,
+          options: <String?>[null, ...categories],
+          optionLabel: (String? v) => v ?? 'All categories',
+          selected: q.category,
+          onSelected: _c.setCategory,
+        ),
+        if (resident)
+          _menuFilter<String>(
+            key: 'filter-location',
+            icon: Icons.location_on_rounded,
+            label: q.location ?? 'All locations',
+            active: q.location != null,
+            options: <String?>[null, ...ServiceAreaService.documentedAreaNames],
+            optionLabel: (String? v) => v ?? 'All locations',
+            selected: q.location,
+            onSelected: _c.setLocation,
+          ),
+        if (q.scope == ComplaintScope.active)
+          _menuFilter<ComplaintStatus>(
+            key: 'filter-status',
+            icon: Icons.flag_rounded,
+            label: q.status == null ? 'Pending & In Progress' : ComplaintFlow.label(q.status!),
+            active: q.status != null,
+            options: const <ComplaintStatus?>[null, ComplaintStatus.pending, ComplaintStatus.inProgress],
+            optionLabel: (ComplaintStatus? v) => v == null ? 'Pending & In Progress' : ComplaintFlow.label(v),
+            selected: q.status,
+            onSelected: _c.setStatus,
+          ),
+        _chipButton(
+          key: 'filter-date',
+          icon: Icons.calendar_today_rounded,
+          label: '$dateWord: $dateLabel',
+          active: q.from != null,
+          onTap: _pickDateRange,
+        ),
+        if (q.hasFilters)
+          TextButton.icon(
+            key: const ValueKey<String>('filter-clear'),
+            onPressed: () {
+              _searchDebounce?.cancel();
+              _search.clear();
+              _c.clearFilters();
+            },
+            icon: const Icon(Icons.filter_alt_off_rounded, size: 18),
+            label: const Text('Clear filters', style: TextStyle(fontWeight: FontWeight.w800)),
+            style: TextButton.styleFrom(foregroundColor: const Color(0xFFB91C1C)),
+          ),
+      ],
+    );
+  }
+
+  Widget _chipButton({required String key, required IconData icon, required String label, required bool active, VoidCallback? onTap}) {
+    return Material(
+      color: active ? const Color(0xFFE6F4F1) : Colors.white,
+      borderRadius: BorderRadius.circular(12),
+      child: InkWell(
+        key: ValueKey<String>(key),
+        borderRadius: BorderRadius.circular(12),
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: active ? _teal.withValues(alpha: 0.5) : const Color(0xFFE2E8F0)),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Icon(icon, size: 16, color: _teal),
+              const SizedBox(width: 6),
+              Flexible(
+                child: Text(label,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 12.5, color: _ink)),
+              ),
+              const SizedBox(width: 2),
+              const Icon(Icons.arrow_drop_down_rounded, size: 18, color: _muted),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _menuFilter<T>({
+    required String key,
+    required IconData icon,
+    required String label,
+    required bool active,
+    required List<T?> options,
+    required String Function(T?) optionLabel,
+    required T? selected,
+    required Future<void> Function(T?) onSelected,
+  }) {
+    return PopupMenuButton<int>(
+      key: ValueKey<String>(key),
+      tooltip: label,
+      onSelected: (int i) => onSelected(options[i]),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+      color: Colors.white,
+      itemBuilder: (BuildContext context) => <PopupMenuEntry<int>>[
+        for (int i = 0; i < options.length; i++)
+          PopupMenuItem<int>(
+            value: i,
+            child: Row(
+              children: <Widget>[
+                Icon(options[i] == selected ? Icons.check_circle_rounded : Icons.circle_outlined,
+                    size: 16, color: options[i] == selected ? _teal : Colors.grey.shade400),
+                const SizedBox(width: 10),
+                Flexible(
+                  child: Text(optionLabel(options[i]),
+                      style: TextStyle(
+                          fontWeight: options[i] == selected ? FontWeight.w800 : FontWeight.w600,
+                          color: options[i] == selected ? _teal : const Color(0xFF1E293B),
+                          fontSize: 13)),
+                ),
+              ],
+            ),
+          ),
+      ],
+      child: IgnorePointer(child: _chipButton(key: '$key-chip', icon: icon, label: label, active: active, onTap: () {})),
+    );
+  }
+
+  Future<void> _pickDateRange() async {
+    final ComplaintQuery q = _c.query;
+    final DateTime now = DateTime.now();
+    final AppDatePick? pick = await showAppDateRangePicker(
+      context,
+      firstDate: DateTime(2020),
+      lastDate: DateTime(now.year, now.month, now.day),
+      initialRange: q.from != null && q.to != null ? DateTimeRange(start: q.from!, end: q.to!) : null,
+      title: q.scope == ComplaintScope.resolved ? 'Resolution date' : 'Submission date',
+      clearable: q.from != null || q.to != null,
+    );
+    if (pick == null) return;
+    if (pick.cleared) {
+      await _c.setDateRange(null, null);
+    } else if (pick.range != null) {
+      await _c.setDateRange(pick.range!.start, pick.range!.end);
+    }
+  }
+
+  // ------------------------------------------------------------------ list
+
+  Widget _buildResultSummary() {
+    final ComplaintPage? p = _c.page;
+    final String what = _c.query.scope == ComplaintScope.resolved ? 'resolved' : 'active';
+    final String who = _c.query.source == ComplaintSource.resident ? 'resident complaints' : 'driver reports';
+    return Row(
+      children: <Widget>[
+        Expanded(
+          child: Text(
+            p == null
+                ? (_c.error != null && !_c.loading ? 'Could not load $what $who' : 'Loading $what $who…')
+                : (p.total == 0 ? 'No $what $who' : 'Showing ${p.firstIndex}–${p.lastIndex} of ${p.total} $what $who'),
+            key: const ValueKey<String>('result-summary'),
+            style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: _muted),
+          ),
+        ),
+        if (_c.loading && p != null) const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: _teal)),
+      ],
+    );
+  }
+
+  Widget _buildList(double width) {
+    final ComplaintPage? p = _c.page;
+    final String? error = _c.error;
+    if (p == null && error == null) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: 60),
+        child: Center(child: CircularProgressIndicator(color: Color(0xFF00897B))),
+      );
+    }
+    final List<Widget> children = <Widget>[];
+    if (error != null) children.add(_errorBanner(error));
+    if (p != null && p.items.isEmpty && error == null) children.add(_emptyState());
+    if (p != null && p.items.isNotEmpty) {
+      final bool twoColumns = width >= 1000;
+      if (twoColumns) {
+        for (int i = 0; i < p.items.length; i += 2) {
+          children.add(Padding(
+            padding: const EdgeInsets.only(bottom: 12),
+            child: IntrinsicHeight(
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: <Widget>[
+                  Expanded(child: _ComplaintCard(record: p.items[i], onOpen: () => _openDetails(p.items[i]))),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: i + 1 < p.items.length
+                        ? _ComplaintCard(record: p.items[i + 1], onOpen: () => _openDetails(p.items[i + 1]))
+                        : const SizedBox.shrink(),
+                  ),
+                ],
+              ),
+            ),
+          ));
+        }
+      } else {
+        for (final ComplaintRecord r in p.items) {
+          children.add(Padding(padding: const EdgeInsets.only(bottom: 12), child: _ComplaintCard(record: r, onOpen: () => _openDetails(r))));
+        }
+      }
+      children.add(_pager(p));
+    }
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: children);
+  }
+
+  Widget _pager(ComplaintPage p) {
+    if (p.pageCount <= 1) return const SizedBox(height: 8);
+    final ButtonStyle style = OutlinedButton.styleFrom(
+      foregroundColor: _teal,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+    );
+    return Padding(
+      padding: const EdgeInsets.only(top: 4, bottom: 8),
+      child: LayoutBuilder(builder: (BuildContext context, BoxConstraints box) {
+        final bool compact = box.maxWidth < 420;
+        Widget button(String key, bool enabled, int target, IconData icon, String label) {
+          final VoidCallback? onPressed = enabled && !_c.loading ? () => _c.goToPage(target) : null;
+          return compact
+              ? OutlinedButton(key: ValueKey<String>(key), onPressed: onPressed, style: style, child: Icon(icon, semanticLabel: label))
+              : OutlinedButton.icon(key: ValueKey<String>(key), onPressed: onPressed, style: style, icon: Icon(icon), label: Text(label));
+        }
+
+        return Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: <Widget>[
+            button('page-prev', p.page > 1, p.page - 1, Icons.chevron_left_rounded, 'Previous'),
+            Flexible(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                child: Text('Page ${p.page} of ${p.pageCount}',
+                    key: const ValueKey<String>('page-label'),
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(fontWeight: FontWeight.w800, color: _ink)),
+              ),
+            ),
+            button('page-next', p.hasMore, p.page + 1, Icons.chevron_right_rounded, 'Next'),
+          ],
+        );
+      }),
+    );
+  }
+
+  Widget _errorBanner(String message) {
+    return Container(
+      key: const ValueKey<String>('complaint-error'),
       margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFEF2F2),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFFFECACA)),
+      ),
+      child: Row(
+        children: <Widget>[
+          const Icon(Icons.error_outline_rounded, color: Color(0xFFDC2626), size: 20),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(message, style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: Color(0xFF991B1B))),
+          ),
+          TextButton(onPressed: () => _c.load(), child: const Text('Retry')),
+        ],
+      ),
+    );
+  }
+
+  Widget _emptyState() {
+    final bool archive = _c.query.scope == ComplaintScope.resolved;
+    final bool filtered = _c.query.hasFilters;
+    return Padding(
+      key: const ValueKey<String>('complaint-empty'),
+      padding: const EdgeInsets.symmetric(vertical: 48),
+      child: Column(
+        children: <Widget>[
+          Icon(filtered ? Icons.search_off_rounded : (archive ? Icons.inventory_2_outlined : Icons.task_alt_rounded),
+              size: 56, color: Colors.grey.shade300),
+          const SizedBox(height: 12),
+          Text(
+            filtered ? 'No complaints match your filters' : (archive ? 'No resolved complaints yet' : 'No active complaints'),
+            style: TextStyle(color: Colors.grey.shade600, fontWeight: FontWeight.w700),
+          ),
+          if (!filtered && !archive)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text('Everything has been handled.', style: TextStyle(color: Colors.grey.shade500, fontSize: 12.5)),
+            ),
+        ],
+      ),
+    );
+  }
+
+  // ------------------------------------------------------------------ details + actions
+
+  Future<void> _openDetails(ComplaintRecord record) async {
+    final bool wide = MediaQuery.of(context).size.width >= 700;
+    final Widget body = _ComplaintDetailsView(controller: _c, record: record, onTransitioned: _afterTransition);
+    if (wide) {
+      await showDialog<void>(
+        context: context,
+        builder: (BuildContext ctx) => Dialog(
+          backgroundColor: Colors.white,
+          insetPadding: const EdgeInsets.all(24),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
+          child: ConstrainedBox(constraints: const BoxConstraints(maxWidth: 640, maxHeight: 760), child: body),
+        ),
+      );
+    } else {
+      await showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        useSafeArea: true,
+        backgroundColor: Colors.white,
+        shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
+        builder: (BuildContext ctx) => ConstrainedBox(
+          constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.9),
+          child: body,
+        ),
+      );
+    }
+  }
+
+  /// Called after the store confirmed a status change (details already closed).
+  void _afterTransition(ComplaintRecord record, TransitionResult r) {
+    if (!mounted) return;
+    final String who = record.source == ComplaintSource.resident ? 'resident' : 'driver';
+    String msg;
+    if (!r.changed) {
+      msg = r.message ?? '${record.displayId} is already ${ComplaintFlow.label(r.status).toLowerCase()}.';
+    } else if (r.status == ComplaintStatus.resolved) {
+      msg = '${record.displayId} resolved and moved to the Resolved Archive.';
+    } else {
+      msg = '${record.displayId} marked as In Progress.';
+    }
+    if (r.notification == 'sent' || r.notification == 'already') msg += ' The $who has been notified.';
+    CustomNotification.showTopNotification(context, msg, false);
+    if (r.notificationFailed) _showNotificationFailure(record, r.status);
+  }
+
+  void _showNotificationFailure(ComplaintRecord record, ComplaintStatus status) {
+    showDialog<void>(
+      context: context,
+      builder: (BuildContext ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+        title: const Text('Notification not delivered', style: TextStyle(fontWeight: FontWeight.w900)),
+        content: Text(
+          'The status of ${record.displayId} was saved, but the ${record.roleLabel.toLowerCase()} notification could not be '
+          'delivered. The complaint history already shows the new status. You can retry the notification now.',
+        ),
+        actions: <Widget>[
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Later')),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: _teal),
+            onPressed: () async {
+              Navigator.pop(ctx);
+              try {
+                // Same target again: no second transition; the server re-checks the notification.
+                final TransitionResult again = await _c.retryNotification(record, status);
+                if (!mounted) return;
+                if (again.notificationFailed) {
+                  _showNotificationFailure(record, status);
+                } else {
+                  CustomNotification.showTopNotification(context, 'Notification delivered for ${record.displayId}.', false);
+                }
+              } catch (e) {
+                if (mounted) CustomNotification.showTopNotification(context, ComplaintFlow.errorMessage(e), true);
+              }
+            },
+            child: const Text('Retry notification'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+String _fmtDate(DateTime? d) => d == null ? '—' : DateFormat('MMM d, yyyy • h:mm a').format(d);
+
+class _StatusBadge extends StatelessWidget {
+  const _StatusBadge(this.status);
+
+  final ComplaintStatus status;
+
+  @override
+  Widget build(BuildContext context) {
+    final (Color bg, Color fg) = switch (status) {
+      ComplaintStatus.pending => (const Color(0xFFFEF3C7), const Color(0xFFB45309)),
+      ComplaintStatus.inProgress => (const Color(0xFFE0F2FE), const Color(0xFF0369A1)),
+      ComplaintStatus.resolved => (const Color(0xFFDCFCE7), const Color(0xFF15803D)),
+    };
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(8)),
+      child: Text(ComplaintFlow.label(status).toUpperCase(),
+          style: TextStyle(color: fg, fontSize: 10.5, fontWeight: FontWeight.w800, letterSpacing: 0.5)),
+    );
+  }
+}
+
+class _ComplaintCard extends StatelessWidget {
+  const _ComplaintCard({required this.record, required this.onOpen});
+
+  final ComplaintRecord record;
+  final VoidCallback onOpen;
+
+  @override
+  Widget build(BuildContext context) {
+    final bool resident = record.source == ComplaintSource.resident;
+    final String? place = resident ? record.locationLabel : (record.truckId != null ? 'Truck ${record.truckId}' : null);
+    return Container(
+      key: ValueKey<String>('complaint-card-${record.source.name}-${record.id}'),
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(28),
+        borderRadius: BorderRadius.circular(24),
         boxShadow: AppTheme.balancedPulidongShadow,
         border: Border.all(color: Colors.grey.shade50, width: 1.5),
       ),
       child: Material(
         color: Colors.transparent,
-        borderRadius: BorderRadius.circular(28),
+        borderRadius: BorderRadius.circular(24),
         child: InkWell(
-          onTap: () => _showDetailsModal(c, isResident),
-          borderRadius: BorderRadius.circular(28),
+          onTap: onOpen,
+          borderRadius: BorderRadius.circular(24),
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+            padding: const EdgeInsets.all(16),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // Top Row: Number Badge | Avatar Icon Box | Title, Reporter, Description | Status Badge
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
                 Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    // Two-digit number badge (01, 02, 03...)
+                  children: <Widget>[
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFE0F2F1),
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                      child: Text(
-                        (index + 1).toString().padLeft(2, '0'),
-                        style: const TextStyle(
-                          color: Color(0xFF00796B),
-                          fontWeight: FontWeight.w900,
-                          fontSize: 13,
-                          letterSpacing: -0.2,
-                        ),
-                      ),
+                      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 7),
+                      decoration: BoxDecoration(color: const Color(0xFFE0F2F1), borderRadius: BorderRadius.circular(10)),
+                      child: Text(record.displayId,
+                          style: const TextStyle(color: _tealDark, fontWeight: FontWeight.w900, fontSize: 12.5)),
                     ),
                     const SizedBox(width: 12),
-                    // Avatar Icon Box
-                    Container(
-                      width: 50,
-                      height: 50,
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFE6F4F1),
-                        borderRadius: BorderRadius.circular(16),
-                      ),
-                      child: const Icon(
-                        Icons.warning_amber_rounded,
-                        color: Color(0xFF00796B),
-                        size: 26,
-                      ),
-                    ),
-                    const SizedBox(width: 14),
-                    // Content Area
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            title,
-                            style: const TextStyle(
-                              fontWeight: FontWeight.w900,
-                              fontSize: 16.5,
-                              color: Color(0xFF1A1A1A),
-                              letterSpacing: -0.3,
-                            ),
-                          ),
+                        children: <Widget>[
+                          Text(record.category,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 15.5, color: Color(0xFF1A1A1A))),
                           const SizedBox(height: 3),
                           Row(
-                            children: [
-                              const Icon(Icons.person, size: 14, color: Color(0xFF64748B)),
+                            children: <Widget>[
+                              Icon(resident ? Icons.person_rounded : Icons.badge_rounded, size: 14, color: _muted),
                               const SizedBox(width: 4),
                               Expanded(
-                                child: Text(
-                                  isResident ? reporter : "$reporter ($truckInfo)",
-                                  style: const TextStyle(
-                                    color: Color(0xFF475569),
-                                    fontSize: 13,
-                                    fontWeight: FontWeight.w500,
-                                  ),
+                                child: Text.rich(
+                                  TextSpan(children: <InlineSpan>[
+                                    TextSpan(text: record.reporterName),
+                                    TextSpan(
+                                      text: ' · ${record.roleLabel}',
+                                      style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w800, color: _muted),
+                                    ),
+                                  ]),
+                                  maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(color: Color(0xFF475569), fontSize: 13, fontWeight: FontWeight.w600),
                                 ),
                               ),
                             ],
                           ),
-                          if (isResident && (c['purok'] != null || c['location'] != null)) ...[
-                            const SizedBox(height: 3),
-                            Row(
-                              children: [
-                                const Icon(Icons.location_on_rounded, size: 14, color: Color(0xFF00897B)),
-                                const SizedBox(width: 4),
-                                Expanded(
-                                  child: Text(
-                                    "Location: ${c['purok'] ?? 'N/A'}${c['location'] != null && c['location'] != c['purok'] ? ' • ${c['location']}' : ''}",
-                                    style: const TextStyle(
-                                      color: Color(0xFF00796B),
-                                      fontSize: 12,
-                                      fontWeight: FontWeight.w600,
-                                    ),
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ],
-                          if (description.isNotEmpty) ...[
-                            const SizedBox(height: 4),
-                            Text(
-                              description,
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                color: Color(0xFF64748B),
-                                fontSize: 13,
-                                fontWeight: FontWeight.w400,
-                              ),
-                            ),
-                          ],
                         ],
                       ),
                     ),
                     const SizedBox(width: 8),
-                    // Status Badge
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                      decoration: BoxDecoration(
-                        color: statusBgColor,
-                        borderRadius: BorderRadius.circular(8),
+                    _StatusBadge(record.status),
+                  ],
+                ),
+                if (place != null) ...<Widget>[
+                  const SizedBox(height: 8),
+                  Row(
+                    children: <Widget>[
+                      Icon(resident ? Icons.location_on_rounded : Icons.local_shipping_rounded, size: 14, color: const Color(0xFF00897B)),
+                      const SizedBox(width: 4),
+                      Expanded(
+                        child: Text(place,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(color: _tealDark, fontSize: 12, fontWeight: FontWeight.w600)),
                       ),
-                      child: Text(
-                        status,
-                        style: TextStyle(
-                          color: statusTextColor,
-                          fontSize: 10.5,
-                          fontWeight: FontWeight.w800,
-                          letterSpacing: 0.5,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 14),
-                const Divider(height: 1, color: Color(0xFFF1F4F8)),
-                const SizedBox(height: 12),
-                // Bottom Row: Clock & Date | View details >
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Row(
-                      children: [
-                        const Icon(Icons.access_time_rounded, size: 14, color: Color(0xFF94A3B8)),
-                        const SizedBox(width: 5),
-                        Text(
-                          date,
-                          style: const TextStyle(
-                            fontSize: 12,
-                            color: Color(0xFF94A3B8),
-                            fontWeight: FontWeight.w500,
-                          ),
-                        ),
-                      ],
-                    ),
-                    Row(
-                      children: [
-                        const Text(
-                          "View details",
-                          style: TextStyle(
-                            color: Color(0xFF007A63),
-                            fontWeight: FontWeight.w700,
-                            fontSize: 13,
-                          ),
-                        ),
-                        const SizedBox(width: 2),
-                        const Icon(
-                          Icons.chevron_right_rounded,
-                          size: 16,
-                          color: Color(0xFF007A63),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _reporterPill(String text, IconData icon, {bool isTruck = false}) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-      decoration: BoxDecoration(
-        color: isTruck ? const Color(0xFFF3E5F5) : const Color(0xFFF1F4F8),
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 12, color: isTruck ? Colors.purple.shade700 : Colors.grey.shade600),
-          const SizedBox(width: 6),
-          Flexible(
-            child: Text(
-              text, 
-              style: TextStyle(color: isTruck ? Colors.purple.shade900 : const Color(0xFF455A64), fontSize: 11, fontWeight: FontWeight.w800),
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildUrgencyBadge(dynamic urgency) {
-    String u = urgency.toString().toUpperCase();
-    Color color = _getUrgencyColor(urgency);
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      decoration: BoxDecoration(
-        color: color.withOpacity(0.1), 
-        borderRadius: BorderRadius.circular(10), 
-        border: Border.all(color: color.withOpacity(0.3), width: 1)
-      ),
-      child: Text(u, style: TextStyle(color: color, fontSize: 10, fontWeight: FontWeight.w900, letterSpacing: 0.5)),
-    );
-  }
-
-  Widget _buildStatusBadge(String status, Color color) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      decoration: BoxDecoration(
-        color: color.withOpacity(0.1), 
-        borderRadius: BorderRadius.circular(10), 
-        border: Border.all(color: color.withOpacity(0.3), width: 1)
-      ),
-      child: Text(status, style: TextStyle(color: color, fontSize: 10, fontWeight: FontWeight.w900, letterSpacing: 0.5)),
-    );
-  }
-
-  void _showDetailsModal(dynamic item, bool isResident) {
-    final String status = (item['status'] ?? 'PENDING').toString().toUpperCase();
-    final TextEditingController responseController = TextEditingController(text: item['adminResponse'] ?? item['admin_response'] ?? "");
-    final bool isMobile = MediaQuery.of(context).size.width < 900;
-    bool isModalLoading = true;
-
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setModalState) {
-          if (isModalLoading) {
-            Future.delayed(const Duration(milliseconds: 800), () {
-              if (mounted) setModalState(() => isModalLoading = false);
-            });
-          }
-
-          Widget contentBody(ScrollController scrollController) => Container(
-            padding: const EdgeInsets.fromLTRB(32, 24, 32, 24), // Increased bottom padding to 24 for better spacing
-            decoration: BoxDecoration(
-              color: Colors.white,
-              // Responsive radius: Full curve for Dialog (Web/Tablet), Top-only curve for BottomSheet (Mobile)
-              borderRadius: isMobile 
-                  ? const BorderRadius.vertical(top: Radius.circular(32)) 
-                  : BorderRadius.circular(32),
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                if (isMobile) Center(child: Container(width: 40, height: 4, margin: const EdgeInsets.only(bottom: 24), decoration: BoxDecoration(color: Colors.grey.shade200, borderRadius: BorderRadius.circular(10)))),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(isResident ? "Resident Complaint" : "Driver Report", 
-                          style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w900, color: Color(0xFF00796B))),
-                        const SizedBox(height: 4),
-                        Text(isResident ? "Review and respond to resident feedback." : "Assess and update vehicle technical issues.", 
-                          style: const TextStyle(fontSize: 12, color: Colors.grey, fontWeight: FontWeight.w500)),
-                      ],
-                    ),
-                    IconButton(
-                      onPressed: () => Navigator.pop(context), 
-                      icon: const Icon(Icons.close_rounded, color: Colors.grey),
-                      padding: EdgeInsets.zero,
-                      constraints: const BoxConstraints(),
-                    ),
-                  ],
-                ),
-                const Divider(height: 40),
-                Flexible(
-                  child: ListView(
-                    controller: scrollController,
-                    shrinkWrap: true,
-                    physics: const BouncingScrollPhysics(),
-                    padding: EdgeInsets.zero,
-                    children: [
-                      if (isModalLoading)
-                        Center(
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(vertical: 40),
-                            child: Column(
-                              children: [
-                                const CircularProgressIndicator(color: Color(0xFF00897B), strokeWidth: 3),
-                                const SizedBox(height: 16),
-                                Text("Fetching full report details...", style: TextStyle(color: Colors.grey.shade500, fontWeight: FontWeight.w600, fontSize: 13)),
-                              ],
-                            ),
-                          ),
-                        )
-                      else ...[
-                        _buildInfoSection("DESCRIPTION", isResident ? (item['description'] ?? '') : (item['description'] ?? '')),
-                        const SizedBox(height: 12),
-                        _buildInfoSection("REPORTER", isResident ? (item['full_name'] ?? 'Unknown') : (item['driverName'] ?? 'Unknown')),
-                        if (isResident) ...[
-                          _buildInfoSection("PUROK / AREA", item['purok'] ?? 'N/A'),
-                          _buildInfoSection("SPECIFIC LOCATION", item['location'] ?? item['address'] ?? 'N/A'),
-                        ],
-                        if (!isResident) _buildInfoSection("TRUCK ID", item['truckId'] ?? 'N/A'),
-                        _buildInfoSection("CATEGORY / ISSUE", isResident ? (item['category'] ?? 'General') : (item['issueType'] ?? 'N/A')),
-                        if (!isResident) _buildInfoSection("URGENCY", (item['urgency'] ?? 'Medium').toString().toUpperCase(), color: _getUrgencyColor(item['urgency'])),
-                        _buildInfoSection("SUBMITTED", isResident ? (item['created_at'] ?? '') : DateFormat('MMM dd, yyyy • h:mm a').format(DateTime.fromMillisecondsSinceEpoch(item['createdAt'] ?? 0))),
-                        const Divider(height: 40),
-                        const Text("ADMIN ACTION", style: TextStyle(fontSize: 14, fontWeight: FontWeight.w900, letterSpacing: 1.1, color: Colors.grey)),
-                        const SizedBox(height: 16),
-                        TextField(
-                          controller: responseController,
-                          maxLines: 3,
-                          style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15),
-                          decoration: InputDecoration(
-                            hintText: "Enter response to the ${isResident ? 'resident' : 'driver'}...",
-                            hintStyle: TextStyle(color: Colors.grey.shade400, fontSize: 14),
-                            filled: true,
-                            fillColor: const Color(0xFFF7F8FA),
-                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide.none),
-                            contentPadding: const EdgeInsets.all(20),
-                          ),
-                        ),
-                        const SizedBox(height: 32),
-                        Row(
-                          children: [
-                            if (status != 'IN_PROGRESS' && status != 'RESOLVED')
-                              Expanded(child: _buildActionButton("MARK IN PROGRESS", Colors.blue, () async {
-                                bool confirmed = await _showConfirmDialog(
-                                  title: "Mark as In Progress?",
-                                  message: "Are you sure you want to update this report's status to In Progress?",
-                                );
-                                if (confirmed) {
-                                  _updateStatus(item, 'IN_PROGRESS', responseController.text, isResident);
-                                }
-                              })),
-                            if (status != 'IN_PROGRESS' && status != 'RESOLVED') const SizedBox(width: 16),
-                            if (status != 'RESOLVED')
-                              Expanded(child: _buildActionButton("RESOLVE INCIDENT", const Color(0xFF00897B), () async {
-                                bool confirmed = await _showConfirmDialog(
-                                  title: "Resolve Incident?",
-                                  message: "Are you sure you want to mark this incident as resolved?",
-                                );
-                                if (confirmed) {
-                                  _updateStatus(item, 'RESOLVED', responseController.text, isResident);
-                                }
-                              })),
-                          ],
-                        ),
-                      ],
-                      const SizedBox(height: 24),
                     ],
                   ),
-                ),
-              ],
-            ),
-          );
-
-          if (isMobile) {
-            return Container(
-              padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
-              child: contentBody(ScrollController()),
-            );
-          } else {
-            return Center(
-              child: Dialog(
-                backgroundColor: Colors.transparent,
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 600, maxHeight: 750),
-                  child: contentBody(ScrollController()),
-                ),
-              ),
-            );
-          }
-        },
-      ),
-    );
-  }
-
-  Widget _buildInfoSection(String label, String value, {Color? color}) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 20),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(label, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: Colors.grey, letterSpacing: 1)),
-          const SizedBox(height: 4),
-          Text(value, style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: color ?? Colors.black87)),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildActionButton(String label, Color color, VoidCallback onTap) {
-    return ElevatedButton(
-      onPressed: onTap,
-      style: ElevatedButton.styleFrom(
-        backgroundColor: color,
-        foregroundColor: Colors.white,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        padding: const EdgeInsets.symmetric(vertical: 16),
-        elevation: 0,
-      ),
-      child: Text(label, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 13)),
-    );
-  }
-
-  Color _getUrgencyColor(dynamic urgency) {
-    String u = urgency.toString().toLowerCase();
-    if (u == 'critical') return Colors.red;
-    if (u == 'high') return Colors.orange.shade900;
-    if (u == 'medium') return Colors.orange;
-    return Colors.blue;
-  }
-
-  Future<void> _updateStatus(dynamic item, String newStatus, String adminResponse, bool isResident) async {
-    try {
-      if (isResident) {
-        await _apiService.updateComplaint(int.parse(item['id'].toString()), newStatus.toLowerCase(), adminResponse);
-        
-        // Notify Resident if resolved
-        if (newStatus == 'RESOLVED') {
-          await _database.ref('notifications').push().set({
-            'type': 'COMPLAINT_RESOLVED',
-            'title': 'Complaint Resolved',
-            'message': 'Your complaint regarding ${item['category']} has been resolved.',
-            'resident_id': item['user_id']?.toString(),
-            'relatedId': item['id'],
-            'timestamp': ServerValue.timestamp,
-            'isRead': false,
-          });
-        }
-
-        await _fetchResidentComplaints();
-      } else {
-        final updates = {
-          'status': newStatus,
-          'adminResponse': adminResponse,
-          'updatedAt': ServerValue.timestamp,
-        };
-        if (newStatus == 'RESOLVED') {
-          updates['resolvedAt'] = ServerValue.timestamp;
-        }
-        await _database.ref('truck_issues/${item['id']}').update(updates);
-        
-        // Notify Driver
-        await _database.ref('notifications').push().set({
-          'type': 'ISSUE_UPDATE',
-          'title': 'Truck Issue ${newStatus.replaceAll('_', ' ')}',
-          'message': 'Your report regarding ${item['issueType']} has been updated to ${newStatus.replaceAll('_', ' ')}.',
-          'truck_id': item['truckId'],
-          'targetUserId': item['driverId']?.toString(), // ADDED targeting current driver
-          'targetRole': 'driver',
-          'relatedId': item['id'],
-          'timestamp': ServerValue.timestamp,
-          'isRead': false,
-        });
-      }
-      
-      if (mounted) {
-        Navigator.pop(context);
-        String msg = newStatus == 'RESOLVED' ? "Report successfully resolved!" : "Report marked as in progress.";
-        CustomNotification.showTopNotification(context, msg, false);
-      }
-    } catch (e) {
-      if (mounted) CustomNotification.showTopNotification(context, "Error: $e", true);
-    }
-  }
-
-  Future<bool> _showConfirmDialog({required String title, required String message}) async {
-    return await showDialog<bool>(
-      context: context,
-      builder: (context) => Dialog(
-        backgroundColor: Colors.white,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(32)),
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 400),
-          child: Container(
-            padding: const EdgeInsets.fromLTRB(32, 40, 32, 32),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(title, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w900)),
-                const SizedBox(height: 16),
-                Text(message, textAlign: TextAlign.center, style: TextStyle(color: Colors.grey.shade600, fontSize: 14, height: 1.5)),
-                const SizedBox(height: 32),
+                ],
+                if (record.description.trim().isNotEmpty) ...<Widget>[
+                  const SizedBox(height: 6),
+                  Text(record.description,
+                      maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(color: _muted, fontSize: 13)),
+                ],
+                const SizedBox(height: 12),
+                const Divider(height: 1, color: Color(0xFFF1F4F8)),
+                const SizedBox(height: 10),
                 Row(
-                  children: [
+                  children: <Widget>[
+                    const Icon(Icons.access_time_rounded, size: 14, color: Color(0xFF94A3B8)),
+                    const SizedBox(width: 5),
                     Expanded(
-                      child: OutlinedButton(
-                        onPressed: () => Navigator.pop(context, false),
-                        style: OutlinedButton.styleFrom(
-                          side: BorderSide(color: Colors.grey.shade300, width: 1.5),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                          padding: const EdgeInsets.symmetric(vertical: 16),
-                        ),
-                        child: const Text("NO", style: TextStyle(color: Colors.grey, fontWeight: FontWeight.w900, letterSpacing: 1.2)),
+                      child: Text(
+                        record.isResolved && record.resolvedAt != null
+                            ? 'Resolved ${_fmtDate(record.resolvedAt)}'
+                            : 'Submitted ${_fmtDate(record.submittedAt)}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 12, color: Color(0xFF94A3B8), fontWeight: FontWeight.w500),
                       ),
                     ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      flex: 2,
-                      child: ElevatedButton(
-                        onPressed: () => Navigator.pop(context, true),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF00897B),
-                          foregroundColor: Colors.white,
-                          minimumSize: const Size(0, 56),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                          elevation: 0,
-                        ),
-                        child: const Text("YES, PROCEED", style: TextStyle(fontWeight: FontWeight.w900)),
-                      ),
-                    ),
+                    Text(record.isResolved ? 'View Resolution' : 'View Details',
+                        style: const TextStyle(color: _teal, fontWeight: FontWeight.w700, fontSize: 13)),
+                    const Icon(Icons.chevron_right_rounded, size: 16, color: _teal),
                   ],
                 ),
               ],
@@ -1370,192 +964,346 @@ class _ComplaintsScreenState extends State<ComplaintsScreen> with TickerProvider
           ),
         ),
       ),
-    ) ?? false;
+    );
   }
 }
 
-class _CuteDatePicker extends StatefulWidget {
-  final DateTime initialDate;
-  final bool isMobile;
-  const _CuteDatePicker({super.key, required this.initialDate, required this.isMobile});
+/// Complaint details with status history; Active complaints get the lifecycle actions,
+/// Resolved ones are read-only.
+class _ComplaintDetailsView extends StatefulWidget {
+  const _ComplaintDetailsView({required this.controller, required this.record, required this.onTransitioned});
+
+  final ComplaintCenterController controller;
+  final ComplaintRecord record;
+  final void Function(ComplaintRecord record, TransitionResult result) onTransitioned;
 
   @override
-  State<_CuteDatePicker> createState() => _CuteDatePickerState();
+  State<_ComplaintDetailsView> createState() => _ComplaintDetailsViewState();
 }
 
-class _CuteDatePickerState extends State<_CuteDatePicker> {
-  late DateTime _selectedDate;
-  late DateTime _viewMonth;
-  bool _isYearPickerVisible = false;
+class _ComplaintDetailsViewState extends State<_ComplaintDetailsView> {
+  ComplaintDetail? _detail;
+  String? _error;
 
   @override
   void initState() {
     super.initState();
-    _selectedDate = widget.initialDate;
-    _viewMonth = DateTime(_selectedDate.year, _selectedDate.month);
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() => _error = null);
+    try {
+      final ComplaintDetail d = await widget.controller.detail(widget.record);
+      if (mounted) setState(() => _detail = d);
+    } catch (e) {
+      if (mounted) setState(() => _error = ComplaintFlow.errorMessage(e));
+    }
+  }
+
+  Future<void> _change(ComplaintStatus to) async {
+    final ComplaintRecord current = _detail?.record ?? widget.record;
+    final TransitionResult? r = await showDialog<TransitionResult>(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext ctx) => _StatusChangeDialog(controller: widget.controller, record: current, target: to),
+    );
+    if (r == null || !mounted) return;
+    Navigator.of(context).pop(); // close the details; the list was reloaded from the store
+    widget.onTransitioned(current, r);
   }
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: 420,
-      padding: const EdgeInsets.fromLTRB(32, 32, 32, 24),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: widget.isMobile ? const BorderRadius.vertical(top: Radius.circular(32)) : BorderRadius.circular(32),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (widget.isMobile) Center(child: Container(width: 40, height: 4, margin: const EdgeInsets.only(bottom: 24), decoration: BoxDecoration(color: Colors.grey.shade200, borderRadius: BorderRadius.circular(10)))),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text("Select Date", style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900, color: Color(0xFF00796B))),
-                  const SizedBox(height: 4),
-                  Text(widget.isMobile ? "Pick a date to filter." : "Choose a specific date to filter reports.", style: const TextStyle(fontSize: 12, color: Colors.grey, fontWeight: FontWeight.w500)),
-                ],
+    final ComplaintRecord c = _detail?.record ?? widget.record;
+    final bool resident = c.source == ComplaintSource.resident;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: <Widget>[
+        Padding(
+          padding: const EdgeInsets.fromLTRB(24, 20, 12, 8),
+          child: Row(
+            children: <Widget>[
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Text('${resident ? 'Complaint' : 'Driver Report'} ${c.displayId}',
+                        style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w900, color: _tealDark)),
+                    const SizedBox(height: 4),
+                    _StatusBadge(c.status),
+                  ],
+                ),
               ),
-              IconButton(onPressed: () => Navigator.pop(context), icon: const Icon(Icons.close_rounded, color: Colors.grey), padding: EdgeInsets.zero, constraints: const BoxConstraints()),
+              IconButton(tooltip: 'Close', onPressed: () => Navigator.of(context).pop(), icon: const Icon(Icons.close_rounded, color: Colors.grey)),
             ],
           ),
-          const Divider(height: 48),
-          
-          if (!_isYearPickerVisible) ...[
-            // MONTH & NAVIGATION
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                GestureDetector(
-                  onTap: () => setState(() => _isYearPickerVisible = true),
-                  child: MouseRegion(
-                    cursor: SystemMouseCursors.click,
-                    child: Row(
-                      children: [
-                        Text(DateFormat('MMMM yyyy').format(_viewMonth), style: const TextStyle(fontWeight: FontWeight.w900, color: Color(0xFF455A64), fontSize: 16)),
-                        const Icon(Icons.arrow_drop_down_rounded, color: Colors.grey),
-                      ],
+        ),
+        const Divider(height: 1),
+        Flexible(
+          child: ListView(
+            shrinkWrap: true,
+            padding: const EdgeInsets.fromLTRB(24, 16, 24, 16),
+            children: <Widget>[
+              if (_detail == null && _error == null)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 8),
+                  child: LinearProgressIndicator(color: _teal, backgroundColor: _surface),
+                ),
+              if (_error != null)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: Row(children: <Widget>[
+                    Expanded(child: Text('Latest details could not be loaded: $_error', style: const TextStyle(color: Color(0xFF991B1B), fontSize: 12.5))),
+                    TextButton(onPressed: _load, child: const Text('Retry')),
+                  ]),
+                ),
+              _field('Category', c.category),
+              _field('Complainant', '${c.reporterName} (${c.roleLabel})'),
+              if (resident) _field('Location / Purok', c.locationLabel ?? 'Not specified'),
+              if (!resident) _field('Truck', c.truckId ?? 'N/A'),
+              if (!resident && c.urgency != null) _field('Urgency', c.urgency!.toUpperCase()),
+              _field('Submitted', _fmtDate(c.submittedAt)),
+              _field('Description', c.description.trim().isEmpty ? '—' : c.description),
+              const SizedBox(height: 4),
+              const Text('STATUS HISTORY', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: Colors.grey, letterSpacing: 1)),
+              const SizedBox(height: 8),
+              ..._history(c),
+              if (c.isResolved) ...<Widget>[
+                const SizedBox(height: 12),
+                Container(
+                  key: const ValueKey<String>('resolution-panel'),
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF0FDF4),
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: const Color(0xFFBBF7D0)),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      const Row(children: <Widget>[
+                        Icon(Icons.verified_rounded, size: 18, color: Color(0xFF15803D)),
+                        SizedBox(width: 8),
+                        Text('RESOLUTION', style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w900, color: Color(0xFF15803D), letterSpacing: 0.8)),
+                      ]),
+                      const SizedBox(height: 8),
+                      Text(c.resolutionNote ?? 'No resolution note was recorded.',
+                          style: const TextStyle(fontSize: 14, height: 1.45, fontWeight: FontWeight.w600, color: Color(0xFF14532D))),
+                      const SizedBox(height: 8),
+                      Text('Resolved: ${c.resolvedAt == null ? 'date not recorded' : _fmtDate(c.resolvedAt)}',
+                          style: const TextStyle(fontSize: 12, color: Color(0xFF166534))),
+                      if (c.resolvedBy != null)
+                        Text('Resolved by: ${c.resolvedBy}', style: const TextStyle(fontSize: 12, color: Color(0xFF166534))),
+                    ],
+                  ),
+                ),
+              ] else if (c.resolutionNote != null) ...<Widget>[
+                const SizedBox(height: 8),
+                _field('Admin note', c.resolutionNote!),
+              ],
+            ],
+          ),
+        ),
+        if (!c.isResolved) ...<Widget>[
+          const Divider(height: 1),
+          Padding(
+            padding: EdgeInsets.fromLTRB(24, 12, 24, 16 + MediaQuery.of(context).viewPadding.bottom),
+            child: Row(
+              children: <Widget>[
+                if (c.status == ComplaintStatus.pending) ...<Widget>[
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      key: const ValueKey<String>('action-in-progress'),
+                      onPressed: () => _change(ComplaintStatus.inProgress),
+                      icon: const Icon(Icons.autorenew_rounded),
+                      label: const Text('Mark In Progress', style: TextStyle(fontWeight: FontWeight.w800)),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: const Color(0xFF0369A1),
+                        side: const BorderSide(color: Color(0xFF0369A1)),
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                ],
+                Expanded(
+                  child: FilledButton.icon(
+                    key: const ValueKey<String>('action-resolve'),
+                    onPressed: () => _change(ComplaintStatus.resolved),
+                    icon: const Icon(Icons.task_alt_rounded),
+                    label: const Text('Mark Resolved', style: TextStyle(fontWeight: FontWeight.w800)),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: const Color(0xFF00897B),
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                     ),
                   ),
                 ),
-                Row(
-                  children: [
-                    IconButton(icon: const Icon(Icons.chevron_left_rounded), onPressed: () => setState(() => _viewMonth = DateTime(_viewMonth.year, _viewMonth.month - 1))),
-                    IconButton(icon: const Icon(Icons.chevron_right_rounded), onPressed: () => setState(() => _viewMonth = DateTime(_viewMonth.year, _viewMonth.month + 1))),
-                  ],
-                ),
               ],
             ),
-            const SizedBox(height: 16),
-            // CALENDAR GRID
-            Theme(
-              data: Theme.of(context).copyWith(
-                colorScheme: const ColorScheme.light(primary: Color(0xFF00897B), onPrimary: Colors.white, onSurface: Color(0xFF1A1A1A)),
-              ),
-              child: SizedBox(
-                height: 300,
-                child: CalendarDatePicker(
-                  initialDate: _selectedDate,
-                  firstDate: DateTime(2020),
-                  lastDate: DateTime.now(),
-                  onDateChanged: (date) => setState(() => _selectedDate = date),
-                ),
-              ),
-            ),
-          ] else ...[
-            // YEAR GRID
-            GestureDetector(
-              onTap: () => setState(() => _isYearPickerVisible = false),
-              child: MouseRegion(
-                cursor: SystemMouseCursors.click,
-                child: Row(
-                  children: [
-                    Text(DateFormat('MMMM yyyy').format(_viewMonth), style: const TextStyle(fontWeight: FontWeight.w900, color: Color(0xFF455A64), fontSize: 16)),
-                    const Icon(Icons.arrow_drop_up_rounded, color: Colors.grey),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 16),
-            const Divider(height: 1),
-            const SizedBox(height: 24),
-            _buildYearGrid(),
-            const SizedBox(height: 24),
-            const Divider(height: 1),
-          ],
+          ),
+        ],
+      ],
+    );
+  }
 
-          const SizedBox(height: 32),
-          Row(
-            children: [
+  List<Widget> _history(ComplaintRecord c) {
+    final List<ComplaintHistoryEvent> events = _detail?.history ?? ComplaintHistoryEvent.derive(c);
+    if (events.isEmpty) {
+      return const <Widget>[Text('No history recorded.', style: TextStyle(color: _muted, fontSize: 13))];
+    }
+    return <Widget>[
+      for (final ComplaintHistoryEvent e in events)
+        Padding(
+          padding: const EdgeInsets.only(bottom: 10),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Padding(padding: const EdgeInsets.only(top: 2), child: _StatusBadge(e.status)),
+              const SizedBox(width: 10),
               Expanded(
-                child: TextButton(
-                  onPressed: () => Navigator.pop(context, null),
-                  style: TextButton.styleFrom(foregroundColor: Colors.grey, padding: const EdgeInsets.symmetric(vertical: 16)),
-                  child: const Text("CLEAR", style: TextStyle(fontWeight: FontWeight.w900, letterSpacing: 1.1)),
-                ),
-              ),
-              const SizedBox(width: 16),
-              Expanded(
-                flex: 2,
-                child: ElevatedButton(
-                  onPressed: () => Navigator.pop(context, _selectedDate),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF00897B),
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                    elevation: 0,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                  ),
-                  child: const Text("APPLY FILTER", style: TextStyle(fontWeight: FontWeight.w900, fontSize: 13)),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Text(
+                      '${e.status == ComplaintStatus.pending ? 'Submitted' : ComplaintFlow.label(e.status)} · ${e.at == null ? 'date not recorded' : _fmtDate(e.at)}',
+                      style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: _ink),
+                    ),
+                    if (e.by != null) Text('by ${e.by}', style: const TextStyle(fontSize: 12, color: _muted)),
+                    if (e.note != null && e.status != ComplaintStatus.resolved)
+                      Text(e.note!, style: const TextStyle(fontSize: 12.5, color: Color(0xFF334155))),
+                  ],
                 ),
               ),
             ],
           ),
+        ),
+    ];
+  }
+
+  Widget _field(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Text(label.toUpperCase(), style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: Colors.grey, letterSpacing: 1)),
+          const SizedBox(height: 3),
+          SelectableText(value, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: Colors.black87)),
         ],
       ),
     );
   }
+}
 
-  Widget _buildYearGrid() {
-    final List<int> years = List.generate(12, (index) => 2020 + index); 
-    return GridView.builder(
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 3, mainAxisSpacing: 20, crossAxisSpacing: 20, childAspectRatio: 2.2,
-      ),
-      itemCount: years.length,
-      itemBuilder: (context, index) {
-        final int year = years[index];
-        final bool isSelected = year == _viewMonth.year;
-        return InkWell(
-          onTap: () {
-            setState(() {
-              _viewMonth = DateTime(year, _viewMonth.month);
-              _isYearPickerVisible = false;
-            });
-          },
-          borderRadius: BorderRadius.circular(20),
-          child: Container(
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: isSelected ? const Color(0xFF00897B) : Colors.transparent,
-              borderRadius: BorderRadius.circular(20),
-            ),
-            child: Text(
-              year.toString(),
-              style: TextStyle(
-                fontSize: 16,
-                fontWeight: isSelected ? FontWeight.w900 : FontWeight.w600,
-                color: isSelected ? Colors.white : const Color(0xFF455A64),
+/// Confirmation for one transition. Resolving requires a resolution note. The dialog waits for
+/// the store's confirmation and returns it; errors stay in the dialog (nothing is claimed early).
+class _StatusChangeDialog extends StatefulWidget {
+  const _StatusChangeDialog({required this.controller, required this.record, required this.target});
+
+  final ComplaintCenterController controller;
+  final ComplaintRecord record;
+  final ComplaintStatus target;
+
+  @override
+  State<_StatusChangeDialog> createState() => _StatusChangeDialogState();
+}
+
+class _StatusChangeDialogState extends State<_StatusChangeDialog> {
+  final TextEditingController _note = TextEditingController();
+  bool _saving = false;
+  String? _error;
+
+  bool get _resolving => widget.target == ComplaintStatus.resolved;
+
+  @override
+  void dispose() {
+    _note.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    if (_saving) return;
+    if (_resolving) {
+      final String? invalid = ComplaintFlow.validateResolutionNote(_note.text);
+      if (invalid != null) {
+        setState(() => _error = invalid);
+        return;
+      }
+    }
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    try {
+      final TransitionResult r = await widget.controller.transition(widget.record, widget.target, _note.text);
+      if (mounted) Navigator.of(context).pop(r);
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _saving = false;
+          _error = ComplaintFlow.errorMessage(e);
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final String id = widget.record.displayId;
+    final String who = widget.record.source == ComplaintSource.resident ? 'resident' : 'driver';
+    return AlertDialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+      title: Text(_resolving ? 'Resolve $id?' : 'Mark $id as In Progress?', style: const TextStyle(fontWeight: FontWeight.w900)),
+      content: SizedBox(
+        width: 440,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: <Widget>[
+              Text(
+                _resolving
+                    ? 'Confirm that this complaint has been addressed. It will move to the Resolved Archive and the $who will be notified.'
+                    : 'Confirm that you are now working on this complaint. The $who will be notified.',
+                style: const TextStyle(color: _muted, height: 1.4),
               ),
-            ),
+              const SizedBox(height: 14),
+              TextField(
+                key: const ValueKey<String>('status-note'),
+                controller: _note,
+                enabled: !_saving,
+                maxLines: 4,
+                maxLength: ComplaintFlow.resolutionNoteMaxLength,
+                decoration: InputDecoration(
+                  labelText: _resolving ? 'Resolution note (required)' : 'Note to the $who (optional)',
+                  hintText: _resolving ? 'Describe the action taken, e.g. "Garbage collected on Monday by truck GT-007."' : null,
+                  alignLabelWithHint: true,
+                  filled: true,
+                  fillColor: const Color(0xFFF7F8FA),
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(14), borderSide: BorderSide.none),
+                ),
+              ),
+              if (_error != null)
+                Text(_error!, key: const ValueKey<String>('status-error'), style: const TextStyle(color: Color(0xFFB91C1C), fontWeight: FontWeight.w600)),
+            ],
           ),
-        );
-      },
+        ),
+      ),
+      actions: <Widget>[
+        TextButton(onPressed: _saving ? null : () => Navigator.of(context).pop(), child: const Text('Cancel')),
+        FilledButton(
+          key: const ValueKey<String>('status-confirm'),
+          onPressed: _saving ? null : _submit,
+          style: FilledButton.styleFrom(backgroundColor: _resolving ? const Color(0xFF00897B) : const Color(0xFF0369A1)),
+          child: _saving
+              ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+              : Text(_resolving ? 'Mark Resolved' : 'Mark In Progress'),
+        ),
+      ],
     );
   }
 }

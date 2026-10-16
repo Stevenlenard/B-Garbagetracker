@@ -2,6 +2,8 @@
 header("Content-Type: application/json");
 date_default_timezone_set('Asia/Manila');
 require_once 'db_config.php';
+require_once 'auth_token.php';
+require_once 'auth_session_lib.php';
 
 $data = json_decode(file_get_contents("php://input"));
 
@@ -23,7 +25,31 @@ try {
         // Clean up the OTP after successful verification
         $conn->prepare("DELETE FROM password_resets WHERE email = ?")->execute([$email]);
 
-        echo json_encode(["success" => true, "message" => "OTP verified successfully"]);
+        $response = ["success" => true, "message" => "OTP verified successfully"];
+        if (($data->purpose ?? '') === 'login') {
+            $u = $conn->prepare("SELECT user_id, role, is_archived, password_hash FROM users WHERE email = ?");
+            $u->execute([$email]);
+            $row = $u->fetch(PDO::FETCH_ASSOC);
+            if ($row && (int)$row['is_archived'] === 0) {
+                $session = null;
+                if (gt_session_requested($data) && gt_sessions_available($conn)) {
+                    try {
+                        $session = gt_session_start($conn, strtolower($row['role']), $row['user_id'], $row['password_hash'],
+                            !empty($data->stay_signed_in), (($data->client ?? '') === 'web') ? 'web' : 'android');
+                    } catch (Exception $e) {
+                        $session = null;
+                    }
+                }
+                if ($session !== null) {
+                    $response['auth_token'] = $session['access_token'];
+                    $response['session'] = $session;
+                } else {
+                    $token = gt_issue_token($row['user_id'], $row['role']);
+                    if ($token !== null) $response['auth_token'] = $token;
+                }
+            }
+        }
+        echo json_encode($response);
         exit;
     }
 

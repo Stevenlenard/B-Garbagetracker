@@ -1,0 +1,9 @@
+# Database backups / snapshot bundles: never served over the web (they contain personal data).
+# PHP on the server still creates, lists and deletes them; download them from hPanel File Manager.
+<IfModule mod_authz_core.c>
+  Require all denied
+</IfModule>
+<IfModule !mod_authz_core.c>
+  Order allow,deny
+  Deny from all
+</IfModule>

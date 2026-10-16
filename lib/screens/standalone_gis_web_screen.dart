@@ -2,14 +2,25 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import '../chatbot/faq_bot.dart';
+import '../widgets/truck_chat_widget.dart';
+import '../widgets/map_view_switch.dart';
+import '../widgets/map_style_toggle.dart';
+import 'collection_route_optimization_screen.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:intl/intl.dart';
 import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart' hide Size, Visibility;
 import 'package:pointer_interceptor/pointer_interceptor.dart';
 import 'package:url_launcher/url_launcher.dart';
+import '../config/mapbox_config.dart';
 import '../utils/app_theme.dart';
+import '../utils/fleet_status.dart';
 import '../api/api_service.dart';
 import '../widgets/fade_slide_entrance.dart';
+import '../services/truck_locations_feed.dart';
+import '../utils/marker_labels.dart';
+import '../utils/truck_identity.dart';
+import '../widgets/mapbox_gate.dart';
 
 /// Standalone Web GIS Page for Resident Garbage Truck Tracking
 ///
@@ -24,6 +35,30 @@ class StandaloneGisWebScreen extends StatefulWidget {
 }
 
 class _StandaloneGisWebScreenState extends State<StandaloneGisWebScreen> with TickerProviderStateMixin {
+  /// Map | Collection status switch. The status view is built on first use (no second map at start).
+  bool _showStatus = false;
+  bool _statusOpened = false;
+  bool _satellite = false;
+  bool _cameraPlaced = false; // recenter only on the first style load, not after a style switch
+
+  Future<void> _setSatellite(bool v) async {
+    setState(() => _satellite = v);
+    _pointAnnotationManager = null; // its layer goes with the old style; recreated on load
+    await MapStyles.apply(_mapboxMap, satellite: v);
+  }
+
+  Widget _viewSwitch(int selected) => MapViewSwitch(
+        options: const <MapViewOption>[
+          MapViewOption('Live map', Icons.map_rounded),
+          MapViewOption('Collection status', Icons.fact_check_rounded, color: Color(0xFF1565C0)),
+        ],
+        selected: selected,
+        onChanged: (int i) => setState(() {
+          _showStatus = i == 1;
+          if (_showStatus) _statusOpened = true;
+        }),
+      );
+
   // --- CONFIGURABLE CONSTANTS ---
   /// Hostinger Production Domain
   static const String hostingerDomain = 'https://indigo-bear-885857.hostingersite.com';
@@ -37,10 +72,6 @@ class _StandaloneGisWebScreenState extends State<StandaloneGisWebScreen> with Ti
   /// URL for residents to download the mobile application directly
   static const String downloadAppUrl = 'https://indigo-bear-885857.hostingersite.com/app-release.apk';
 
-  /// Mapbox Access Token
-  static const String mapboxAccessToken =
-      "pk.eyJ1IjoicHJpbmNlNjcwMyIsImEiOiJjbW9zeHB2ODIwNDFnMnRwdWxsam9sYWJmIn0.8DQhyf9Z9-yP8lCuP2WS3g";
-
   // --- STATE MANAGEMENT ---
   final FirebaseDatabase _database = FirebaseDatabase.instance;
   final ApiService _apiService = ApiService();
@@ -50,6 +81,8 @@ class _StandaloneGisWebScreenState extends State<StandaloneGisWebScreen> with Ti
   StreamSubscription? _connectionSubscription;
   StreamSubscription? _notificationsSubscription;
   Timer? _phpSyncTimer;
+  Timer? _fleetAgingTimer;
+  String _lastFleetSig = '';
 
   Map<String, dynamic> _firebaseLocations = {};
   Map<String, dynamic> _phpLocations = {};
@@ -85,7 +118,7 @@ class _StandaloneGisWebScreenState extends State<StandaloneGisWebScreen> with Ti
   @override
   void initState() {
     super.initState();
-    MapboxOptions.setAccessToken(mapboxAccessToken);
+    MapboxConfig.applyAccessToken(); // no-op when main() already applied it
     _pulseController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1800),
@@ -96,6 +129,8 @@ class _StandaloneGisWebScreenState extends State<StandaloneGisWebScreen> with Ti
     _initFirebase();
     _syncPhpLocations();
     _phpSyncTimer = Timer.periodic(const Duration(seconds: 8), (_) => _syncPhpLocations());
+    // Freshness changes without any event (a crashed driver writes nothing).
+    _fleetAgingTimer = Timer.periodic(const Duration(seconds: 15), (_) => _reprocessTruckData());
   }
 
   void _onPulseTick() async {
@@ -119,6 +154,7 @@ class _StandaloneGisWebScreenState extends State<StandaloneGisWebScreen> with Ti
     _connectionSubscription?.cancel();
     _notificationsSubscription?.cancel();
     _phpSyncTimer?.cancel();
+    _fleetAgingTimer?.cancel();
     _pulseController.removeListener(_onPulseTick);
     _pulseController.dispose();
     super.dispose();
@@ -153,7 +189,7 @@ class _StandaloneGisWebScreenState extends State<StandaloneGisWebScreen> with Ti
     });
 
     // 2. Live truck locations stream
-    _truckLocationsSubscription = _database.ref('truck_locations').onValue.listen((event) {
+    _truckLocationsSubscription = TruckLocationsFeed.shared().events.listen((event) {
       if (event.snapshot.exists && event.snapshot.value != null) {
         _firebaseLocations = Map<String, dynamic>.from(event.snapshot.value as Map);
         _reprocessTruckData();
@@ -296,7 +332,7 @@ class _StandaloneGisWebScreenState extends State<StandaloneGisWebScreen> with Ti
     // 2. Filter ONLY genuinely online/active drivers with valid coordinates and fresh timestamps
     canonicalMap.forEach((tid, val) {
       final Map<String, dynamic> truckData = Map<String, dynamic>.from(val);
-      final String status = (truckData['status'] ?? 'ACTIVE').toString().toUpperCase();
+      final String status = FleetStatus.normalizeStatus(truckData['status'], fallback: 'ACTIVE');
 
       final String driverName = (truckData['driver_name'] ?? truckData['driverName'] ?? '').toString();
       final String tidLower = tid.toLowerCase();
@@ -310,7 +346,8 @@ class _StandaloneGisWebScreenState extends State<StandaloneGisWebScreen> with Ti
       final bool isActiveStatus = status == 'ACTIVE' || status == 'IDLE' || status == 'COLLECTING' || status == 'FULL';
       final bool isOfflineStatus = status == 'OFFLINE' || status == 'COMPLETED' || status == 'FINISHED';
 
-      final bool isOnlineFlag = truckData['isOnline'] == true || truckData['is_online'] == true || truckData['is_online'] == 1;
+      // Owner-aware flag (a replaced runtime's disconnect never marks a newer session offline).
+      final bool isOnlineFlag = FleetStatus.hasOnlineFlag(truckData);
 
       final dynamic lastSeenRaw = truckData['lastSeen'] ?? truckData['last_seen'] ?? truckData['timestamp'];
       int lastSeenMs = 0;
@@ -332,9 +369,15 @@ class _StandaloneGisWebScreenState extends State<StandaloneGisWebScreen> with Ti
       }
 
       // Freshness check: location update must be within last 30 seconds for live active trucks
-      final bool isFresh = (secondsAgo >= 0 && secondsAgo <= 30) || (lastSeenMs > 0 && (now - lastSeenMs).abs() <= 30000);
+      // Shared freshness window (3 min). The previous 30 s window made trucks vanish
+      // after a single missed update and was sensitive to device clock skew.
+      final bool isFresh = (secondsAgo >= 0 && secondsAgo * 1000 <= FleetStatus.freshnessWindowMs) ||
+          (lastSeenMs > 0 && FleetStatus.isFresh(lastSeenMs, now));
 
-      final bool isGenuinelyActive = isValidCoords && isActiveStatus && !isOfflineStatus && isOnlineFlag && isFresh;
+      final bool isSessionValid = FleetStatus.isSessionValid(
+          FleetStatus.parseTimestampMs(truckData['login_time'] ?? truckData['loginTime']), now);
+      final bool isGenuinelyActive =
+          isValidCoords && isActiveStatus && !isOfflineStatus && isOnlineFlag && isFresh && isSessionValid;
 
       if (isGenuinelyActive) {
         parsedTrucks.add({
@@ -343,12 +386,53 @@ class _StandaloneGisWebScreenState extends State<StandaloneGisWebScreen> with Ti
           'latitude': lat,
           'longitude': lng,
           'driver_name': driverName,
+          'driver_id': truckData['driver_id'] ?? truckData['driverId'],
+          'last_seen_ms': lastSeenMs,
           'plate_number': truckData['plate_number'] ?? truckData['plateNumber'] ?? truckData['license_number'] ?? '',
           'speed': double.tryParse(truckData['speed']?.toString() ?? '0') ?? 0.0,
           'updatedAt': truckData['updatedAt'] ?? lastSeenMs,
         });
       }
     });
+
+    // One live truck per driver id (when known): the most recently updated wins.
+    final Map<String, int> bestIndexByDriver = <String, int>{};
+    final Set<int> dropIndexes = <int>{};
+    for (int i = 0; i < parsedTrucks.length; i++) {
+      final String? dId = parsedTrucks[i]['driver_id']?.toString();
+      if (dId == null || dId.isEmpty || dId == 'null') continue;
+      final int? prev = bestIndexByDriver[dId];
+      if (prev == null) {
+        bestIndexByDriver[dId] = i;
+      } else {
+        final int a = (parsedTrucks[i]['last_seen_ms'] as int?) ?? 0;
+        final int b = (parsedTrucks[prev]['last_seen_ms'] as int?) ?? 0;
+        if (a >= b) {
+          dropIndexes.add(prev);
+          bestIndexByDriver[dId] = i;
+        } else {
+          dropIndexes.add(i);
+        }
+      }
+    }
+    if (dropIndexes.isNotEmpty) {
+      final List<Map<String, dynamic>> kept = <Map<String, dynamic>>[];
+      for (int i = 0; i < parsedTrucks.length; i++) {
+        if (!dropIndexes.contains(i)) kept.add(parsedTrucks[i]);
+      }
+      parsedTrucks
+        ..clear()
+        ..addAll(kept);
+    }
+
+    // The aging timer re-runs this with unchanged data; skip the rebuild then.
+    final String fleetSig = (parsedTrucks
+            .map((Map<String, dynamic> t) => '${t['truck_id']}|${t['status']}|${t['latitude']}|${t['longitude']}|${t['updatedAt']}')
+            .toList()
+          ..sort())
+        .join(';');
+    if (fleetSig == _lastFleetSig && !_isLoading) return;
+    _lastFleetSig = fleetSig;
 
     if (mounted) {
       setState(() {
@@ -438,7 +522,10 @@ class _StandaloneGisWebScreenState extends State<StandaloneGisWebScreen> with Ti
     } catch (_) {}
 
     _updateMapMarkers(context);
-    _recenterMap(context);
+    if (!_cameraPlaced) {
+      _cameraPlaced = true;
+      _recenterMap(context);
+    }
   }
 
   double _getResponsiveZoom(double screenWidth) {
@@ -451,8 +538,53 @@ class _StandaloneGisWebScreenState extends State<StandaloneGisWebScreen> with Ti
     }
   }
 
+  // Set when new truck data arrives during an in-flight marker update; the update
+  // is re-run once with the latest `_activeTrucks` instead of the data being dropped.
+  bool _markersDirty = false;
+
+  /// The truck data often arrives before the map style has finished loading. Instead of
+  /// dropping that draw (the truck then appeared only after its next GPS update, up to a
+  /// minute later), retry shortly until the style is ready.
+  int _styleRetries = 0;
+  void _retryMarkersSoon() {
+    if (!mounted || _styleRetries >= 40) return;
+    _styleRetries++;
+    Future<void>.delayed(const Duration(milliseconds: 500), () {
+      if (mounted) _updateMapMarkers();
+    });
+  }
+
+  /// Current zoom, for fanning out overlapping truck markers (default when unavailable).
+  Future<double> _markerZoom() async {
+    try {
+      return _lastFanZoom = (await _mapboxMap?.getCameraState())?.zoom ?? 14.5;
+    } catch (_) {
+      return 14.5;
+    }
+  }
+  double? _lastFanZoom;
+
+  /// After a zoom of half a level or more, re-fan the truck markers for the new scale.
+  Future<void> _refanOnZoom() async {
+    final double? before = _lastFanZoom;
+    double z;
+    try {
+      z = (await _mapboxMap?.getCameraState())?.zoom ?? before ?? 14.5;
+    } catch (_) {
+      return;
+    }
+    if (before == null || (z - before).abs() >= 0.5) _updateMapMarkers();
+  }
+
+
   Future<void> _updateMapMarkers([BuildContext? ctx]) async {
-    if (_mapboxMap == null || _isUpdatingMarkers) return;
+    if (_mapboxMap == null) return;
+    if (_isUpdatingMarkers) {
+      _markersDirty = true;
+      return;
+    }
+    // Claim the slot before the first await so two callers can never both proceed.
+    _isUpdatingMarkers = true;
 
     final BuildContext? activeContext = ctx ?? (mounted ? context : null);
     final double screenWidth = activeContext != null
@@ -462,7 +594,10 @@ class _StandaloneGisWebScreenState extends State<StandaloneGisWebScreen> with Ti
 
     try {
       final style = _mapboxMap!.style;
-      if (!await style.isStyleLoaded()) return;
+      if (!await style.isStyleLoaded()) {
+        _retryMarkersSoon();
+        return;
+      }
       _isUpdatingMarkers = true;
       final String sourceId = "web-trucks-source";
       final String circleLayerId = "web-trucks-circle-layer";
@@ -482,10 +617,19 @@ class _StandaloneGisWebScreenState extends State<StandaloneGisWebScreen> with Ti
           "properties": {
             "truckId": tid,
             "status": status,
-            "label": "🚛 $tid\n$status",
+            // Same look as every other map: fill = the truck's own colour, ring = status.
+            "color": TruckIdentity.hex(tid),
+            "statusColor": TruckIdentity.statusHex(status),
+            "driverName": (truck['driver_name'] ?? '').toString(),
+            "label": MarkerLabels.single(
+              truckId: tid,
+              status: status,
+              driverName: truck['driver_name']?.toString(),
+            ),
           }
         };
       }).toList();
+      MarkerLabels.fanOutOverlapping(features, zoom: await _markerZoom());
 
       final featureCollection = {
         "type": "FeatureCollection",
@@ -494,14 +638,8 @@ class _StandaloneGisWebScreenState extends State<StandaloneGisWebScreen> with Ti
 
       final geoJsonStr = jsonEncode(featureCollection);
 
-      final statusColorExpr = [
-        "match", ["get", "status"],
-        "IDLE", "#FF9800",
-        "FULL", "#F44336",
-        "COLLECTING", "#4CAF50",
-        "ACTIVE", "#4CAF50",
-        "#4CAF50"
-      ];
+      final List<Object> statusColorExpr = <Object>["get", "statusColor"];
+      final List<Object> identityColorExpr = <Object>["get", "color"];
 
       final double markerRadius = isMobile ? 8.0 : 9.5;
       final double strokeWidth = isMobile ? 3.0 : 3.5;
@@ -530,7 +668,8 @@ class _StandaloneGisWebScreenState extends State<StandaloneGisWebScreen> with Ti
           circleStrokeWidth: strokeWidth,
           circleStrokeColor: Colors.white.toARGB32(),
         ));
-        await style.setStyleLayerProperty(circleLayerId, "circle-color", statusColorExpr);
+        await style.setStyleLayerProperty(circleLayerId, "circle-color", identityColorExpr);
+        await style.setStyleLayerProperty(circleLayerId, "circle-stroke-color", statusColorExpr);
 
         // 3. Inner White Core Dot
         await style.addLayer(CircleLayer(
@@ -559,7 +698,8 @@ class _StandaloneGisWebScreenState extends State<StandaloneGisWebScreen> with Ti
       } else {
         await style.setStyleSourceProperty(sourceId, "data", geoJsonStr);
         await style.setStyleLayerProperty("web-trucks-pulse-layer", "circle-color", statusColorExpr);
-        await style.setStyleLayerProperty(circleLayerId, "circle-color", statusColorExpr);
+        await style.setStyleLayerProperty(circleLayerId, "circle-color", identityColorExpr);
+        await style.setStyleLayerProperty(circleLayerId, "circle-stroke-color", statusColorExpr);
         await style.setStyleLayerProperty(circleLayerId, "circle-radius", markerRadius);
         await style.setStyleLayerProperty("web-trucks-label-layer", "text-field", ["get", "label"]);
         await style.setStyleLayerProperty("web-trucks-label-layer", "text-color", statusColorExpr);
@@ -577,14 +717,7 @@ class _StandaloneGisWebScreenState extends State<StandaloneGisWebScreen> with Ti
           final String tid = truck['truck_id'].toString();
           final String status = (truck['status'] ?? 'ACTIVE').toString().toUpperCase();
           
-          Color statusColor;
-          if (status == 'IDLE') {
-            statusColor = Colors.orange;
-          } else if (status == 'FULL') {
-            statusColor = Colors.redAccent;
-          } else {
-            statusColor = Colors.green;
-          }
+          final Color statusColor = Color(0xFF000000 | int.parse(TruckIdentity.statusHex(status).substring(1), radix: 16));
 
           final options = PointAnnotationOptions(
             geometry: Point(coordinates: Position(lng, lat)),
@@ -600,12 +733,19 @@ class _StandaloneGisWebScreenState extends State<StandaloneGisWebScreen> with Ti
           _annotationTruckMap[annotation.id] = truck;
         }
       } catch (_) {}
+      _styleRetries = 0;
     } catch (e) {
-      if (!e.toString().contains("Style is not done loading")) {
+      if (e.toString().contains("Style is not done loading")) {
+        _retryMarkersSoon();
+      } else {
         debugPrint("[WEB GIS] Marker update error: $e");
       }
     } finally {
       _isUpdatingMarkers = false;
+      if (_markersDirty && mounted) {
+        _markersDirty = false;
+        _updateMapMarkers();
+      }
     }
   }
 
@@ -797,6 +937,19 @@ class _StandaloneGisWebScreenState extends State<StandaloneGisWebScreen> with Ti
     }
   }
 
+  /// Opens `#/<route>` of this site in a new tab (same tab on phones).
+  Future<void> _openWebPage(String route) async {
+    String path = Uri.base.path;
+    if (!path.endsWith('/')) path = '$path/';
+    final Uri uri = Uri.parse('${Uri.base.origin}$path#/$route');
+    final bool phone = defaultTargetPlatform == TargetPlatform.android || defaultTargetPlatform == TargetPlatform.iOS;
+    try {
+      await launchUrl(uri, webOnlyWindowName: phone ? '_self' : '_blank', mode: phone ? LaunchMode.platformDefault : LaunchMode.externalApplication);
+    } catch (e) {
+      debugPrint("[WEB GIS] Open $route error: $e");
+    }
+  }
+
   void _openWebLogin({required bool openInNewTab}) async {
     final String origin = Uri.base.origin;
     String path = Uri.base.path;
@@ -942,23 +1095,26 @@ class _StandaloneGisWebScreenState extends State<StandaloneGisWebScreen> with Ti
 
     return Scaffold(
       backgroundColor: Colors.white,
-      body: FadeSlideEntrance(
+      body: Stack(children: [
+        Positioned.fill(child: FadeSlideEntrance(
         child: Column(
           children: [
             // Modern Web Header
             _buildWebHeader(context, screenWidth),
 
-            // Main GIS Content
+            // Main GIS Content: live map, or the public (read-only) collection status
             Expanded(
-              child: Stack(
+              child: IndexedStack(index: _showStatus ? 1 : 0, sizing: StackFit.expand, children: [
+              Stack(
                 children: [
                   // GIS Map Area
                   Positioned.fill(
                     child: MouseRegion(
                       onHover: (event) => _checkHoverOnDesktop(event.localPosition),
-                      child: MapWidget(
+                      child: MapboxGate(child: MapWidget(
                         onMapCreated: _onMapCreated,
                         onStyleLoadedListener: _onStyleLoaded,
+                        onMapIdleListener: (_) => _refanOnZoom(),
                         onCameraChangeListener: (_) {
                           if (_selectedTruck != null) {
                             _updateSelectedTruckScreenPos();
@@ -968,7 +1124,7 @@ class _StandaloneGisWebScreenState extends State<StandaloneGisWebScreen> with Ti
                           center: Point(coordinates: _defaultCenter),
                           zoom: initialZoom,
                         ),
-                      ),
+                      )),
                     ),
                   ),
 
@@ -1008,6 +1164,15 @@ class _StandaloneGisWebScreenState extends State<StandaloneGisWebScreen> with Ti
                       ),
                     ),
 
+                  // Map | Satellite
+                  Positioned(
+                    top: isMobile ? null : 18,
+                    right: isMobile ? null : 18,
+                    bottom: isMobile ? 40 : null, // above the Mapbox logo
+                    left: isMobile ? 10 : null,
+                    child: MapStyleToggle(satellite: _satellite, compact: isMobile, onChanged: _setSatellite),
+                  ),
+
                   // Floating Map Action Controls (Recenter / Reset)
                   Positioned(
                     bottom: isMobile ? 16 : 24,
@@ -1039,9 +1204,14 @@ class _StandaloneGisWebScreenState extends State<StandaloneGisWebScreen> with Ti
                     _buildAnchoredTruckPopup(context, isMobile),
 
                   // Loading / Empty Status Overlay
+                  // Only the loading state blocks the map. The "no truck online" note is display-only:
+                  // it used to cover the whole map and swallow every click (controls, panning).
                   if (_isLoading || _activeTruckCount == 0)
                     Positioned.fill(
-                      child: PointerInterceptor(
+                      child: IgnorePointer(
+                        ignoring: !_isLoading,
+                        child: PointerInterceptor(
+                        intercepting: _isLoading,
                         child: Container(
                           color: Colors.white.withValues(alpha: _isLoading ? 0.85 : 0.0),
                           child: Center(
@@ -1096,158 +1266,129 @@ class _StandaloneGisWebScreenState extends State<StandaloneGisWebScreen> with Ti
                           ),
                         ),
                       ),
+                      ),
                     ),
                 ],
               ),
+              // Public view: statuses and visit history only (no route planning, no truck ids per visit).
+              _statusOpened
+                  ? const CollectionRouteOptimizationScreen(role: 'public', isEmbedded: true, showHeader: false)
+                  : const SizedBox.shrink(),
+              ]),
             ),
           ],
         ),
-      ),
+      )),
+        // Help assistant for visitors: public answers only (sign-in, app download, the map).
+        TruckChatLauncher(
+          role: 'guest',
+          right: 24,
+          bottom: isMobile ? 190 : 170,
+          onAction: (BotAction a) {
+            // Truck Buddy opens a FRESH sign-in / the registration page, never this device's
+            // saved accounts ("Continue as ..."), so a visitor only ever reaches their own account.
+            if (a == BotAction.signIn) _openWebPage('login_new');
+            if (a == BotAction.createAccount) _openWebPage('register');
+            if (a == BotAction.downloadApp) _launchDownloadApp();
+            if (a == BotAction.collectionStatus || a == BotAction.track) {
+              setState(() {
+                _showStatus = a == BotAction.collectionStatus;
+                if (_showStatus) _statusOpened = true;
+              });
+            }
+          },
+        ),
+      ]),
     );
   }
 
   // --- HEADER WIDGET ---
+  /// One slim header: brand on the left, Live map | Collection status in the middle, actions on
+  /// the right. Phones get the switch on a thin second row.
   Widget _buildWebHeader(BuildContext context, double screenWidth) {
     final bool isDesktop = screenWidth >= 1024;
-    final bool isTablet = screenWidth >= 600 && screenWidth < 1024;
     final bool isMobile = screenWidth < 600;
+    final bool switchInline = screenWidth >= 860;
+
+    final Widget brand = Row(mainAxisSize: MainAxisSize.min, children: [
+      Container(
+        width: isMobile ? 34 : 38,
+        height: isMobile ? 34 : 38,
+        decoration: BoxDecoration(
+          gradient: const LinearGradient(colors: [AppColors.loginButtonStart, AppColors.loginButtonEnd], begin: Alignment.topLeft, end: Alignment.bottomRight),
+          borderRadius: BorderRadius.circular(11),
+          boxShadow: [BoxShadow(color: AppColors.loginButtonEnd.withValues(alpha: 0.28), blurRadius: 8, offset: const Offset(0, 3))],
+        ),
+        child: Icon(Icons.local_shipping_rounded, size: isMobile ? 17 : 19, color: Colors.white),
+      ),
+      SizedBox(width: isMobile ? 8 : 11),
+      Flexible(
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+          Text(
+            'Garbage Truck Tracker',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(fontSize: isMobile ? 14.5 : 17, fontWeight: FontWeight.w900, color: const Color(0xFF1A1A1A), letterSpacing: -0.4),
+          ),
+          const SizedBox(height: 2),
+          Row(mainAxisSize: MainAxisSize.min, children: [
+            Container(width: 6, height: 6, decoration: BoxDecoration(color: _connStatusText, shape: BoxShape.circle)),
+            const SizedBox(width: 5),
+            Flexible(
+              child: Text(
+                isMobile ? _connStatus : '$_connStatus · Barangay Balintawak, Lipa City',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: isMobile ? 10.5 : 11.5, fontWeight: FontWeight.w700, color: const Color(0xFF64748B)),
+              ),
+            ),
+          ]),
+        ]),
+      ),
+    ]);
+
+    final Widget actions = Row(mainAxisSize: MainAxisSize.min, children: [
+      _buildHeaderActionButton(
+        label: isDesktop ? 'Download App' : 'App',
+        icon: Icons.smartphone_rounded,
+        isOutlined: true,
+        isMobile: isMobile,
+        tooltip: 'Directly download the mobile app',
+        onTap: _launchDownloadApp,
+      ),
+      SizedBox(width: isMobile ? 6 : 10),
+      _buildHeaderActionButton(
+        label: isDesktop ? 'Login to App' : 'Login',
+        icon: Icons.login_rounded,
+        isOutlined: false,
+        isMobile: isMobile,
+        tooltip: 'Login to the App. Click to open full system in a new tab.',
+        onTap: _launchSignIn,
+      ),
+    ]);
 
     return Container(
-      padding: EdgeInsets.symmetric(
-        horizontal: isDesktop ? 32.0 : (isTablet ? 20.0 : 12.0),
-        vertical: isMobile ? 10.0 : 14.0,
-      ),
+      padding: EdgeInsets.fromLTRB(isDesktop ? 28 : (isMobile ? 12 : 20), isMobile ? 8 : 10, isDesktop ? 28 : (isMobile ? 12 : 20), isMobile ? 8 : 10),
       decoration: BoxDecoration(
         color: Colors.white,
-        border: Border(bottom: BorderSide(color: Colors.grey.shade200, width: 1)),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.04),
-            blurRadius: 10,
-            offset: const Offset(0, 4),
-          )
-        ],
+        border: Border(bottom: BorderSide(color: Colors.grey.shade200)),
+        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.035), blurRadius: 10, offset: const Offset(0, 3))],
       ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          // Left: Logo & Title
-          Expanded(
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  padding: EdgeInsets.all(isMobile ? 8 : 10),
-                  decoration: BoxDecoration(
-                    gradient: const LinearGradient(
-                      colors: [AppColors.loginButtonStart, AppColors.loginButtonEnd],
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
-                    ),
-                    borderRadius: BorderRadius.circular(14),
-                    boxShadow: [
-                      BoxShadow(
-                        color: AppColors.loginButtonEnd.withValues(alpha: 0.3),
-                        blurRadius: 8,
-                        offset: const Offset(0, 3),
-                      )
-                    ],
-                  ),
-                  child: Icon(
-                    Icons.local_shipping_rounded,
-                    size: isMobile ? 18 : 22,
-                    color: Colors.white,
-                  ),
-                ),
-                SizedBox(width: isMobile ? 8 : 12),
-                Flexible(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        "Garbage Truck Tracker",
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: isDesktop ? 20 : (isTablet ? 17 : 14),
-                          fontWeight: FontWeight.w900,
-                          color: const Color(0xFF1A1A1A),
-                          letterSpacing: -0.5,
-                        ),
-                      ),
-                      const SizedBox(height: 2),
-                      Row(
-                        children: [
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2.5),
-                            decoration: BoxDecoration(
-                              color: _connStatusBg,
-                              borderRadius: BorderRadius.circular(6),
-                            ),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Container(
-                                  width: 5,
-                                  height: 5,
-                                  decoration: BoxDecoration(
-                                    color: _connStatusText,
-                                    shape: BoxShape.circle,
-                                  ),
-                                ),
-                                const SizedBox(width: 5),
-                                Text(
-                                  _connStatus,
-                                  style: TextStyle(
-                                    color: _connStatusText,
-                                    fontSize: isMobile ? 9.0 : 10.0,
-                                    fontWeight: FontWeight.w800,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
-
-          const SizedBox(width: 8),
-
-          // Right: Action Buttons
-          Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              // Download App Button
-              _buildHeaderActionButton(
-                label: isDesktop ? "Download App" : "App",
-                icon: Icons.smartphone_rounded,
-                isOutlined: true,
-                isMobile: isMobile,
-                tooltip: "Directly download the mobile app",
-                onTap: _launchDownloadApp,
-              ),
-
-              SizedBox(width: isMobile ? 6 : 10),
-
-              // Login to App Button
-              _buildHeaderActionButton(
-                label: isDesktop ? "Login to App" : "Login",
-                icon: Icons.login_rounded,
-                isOutlined: false,
-                isMobile: isMobile,
-                tooltip: "Login to the App. Click to open full system in a new tab.",
-                onTap: _launchSignIn,
-              ),
-            ],
-          ),
+      child: Column(mainAxisSize: MainAxisSize.min, children: [
+        Row(children: [
+          Expanded(child: Align(alignment: Alignment.centerLeft, child: brand)),
+          if (switchInline) ...[
+            const SizedBox(width: 12),
+            _viewSwitch(_showStatus ? 1 : 0),
+            const SizedBox(width: 12),
+          ],
+          Expanded(child: Align(alignment: Alignment.centerRight, child: actions)),
+        ]),
+        if (!switchInline) ...[
+          const SizedBox(height: 8),
+          SizedBox(width: double.infinity, child: Center(child: _viewSwitch(_showStatus ? 1 : 0))),
         ],
-      ),
+      ]),
     );
   }
 
@@ -1739,7 +1880,32 @@ class _StandaloneGisWebScreenState extends State<StandaloneGisWebScreen> with Ti
     Color statusTagText;
     IconData alertIcon;
 
-    if (hasValidCollectionNotif) {
+    // The live truck status comes first: a FULL, IDLE or PAUSED truck is not "collecting".
+    final String truckStatus = (_primaryTruck?['status'] ?? '').toString().toUpperCase();
+    final String moreTrucks = _activeTruckCount > 1 ? ' (${_activeTruckCount - 1} more truck${_activeTruckCount > 2 ? 's' : ''} online)' : '';
+
+    if (isTruckActive && truckStatus == 'FULL') {
+      alertTitle = "Truck Full";
+      alertMessage = "Garbage truck ($truckId) is full and heading to unload. This collection trip has ended.$moreTrucks";
+      statusTag = "Full";
+      statusTagBg = const Color(0xFFFFEBEE);
+      statusTagText = const Color(0xFFC62828);
+      alertIcon = Icons.delete_rounded;
+    } else if (isTruckActive && truckStatus == 'PAUSED') {
+      alertTitle = "Collection Paused";
+      alertMessage = "Garbage truck ($truckId) has paused collecting for a while. It will continue shortly.$moreTrucks";
+      statusTag = "Paused";
+      statusTagBg = const Color(0xFFFFF3E0);
+      statusTagText = const Color(0xFFE65100);
+      alertIcon = Icons.pause_circle_outline_rounded;
+    } else if (isTruckActive && truckStatus == 'IDLE') {
+      alertTitle = "Truck Stopped";
+      alertMessage = "Garbage truck ($truckId) is online but not moving right now.$moreTrucks";
+      statusTag = "Idle";
+      statusTagBg = const Color(0xFFFFF3E0);
+      statusTagText = const Color(0xFFE65100);
+      alertIcon = Icons.local_shipping_outlined;
+    } else if (hasValidCollectionNotif) {
       alertTitle = (_latestNotification!['title'] ?? "Garbage Collection Alert").toString();
       alertMessage = (_latestNotification!['message'] ?? "Notice for Barangay Balintawak residents.").toString();
 
@@ -1770,7 +1936,7 @@ class _StandaloneGisWebScreenState extends State<StandaloneGisWebScreen> with Ti
       }
     } else if (isTruckActive) {
       alertTitle = "Garbage Collection Ongoing";
-      alertMessage = "Garbage truck ($truckId) is actively collecting in Barangay Balintawak. Please place your waste at designated pickup points.";
+      alertMessage = "Garbage truck ($truckId) is actively collecting in Barangay Balintawak. Please place your waste at designated pickup points.$moreTrucks";
       statusTag = "Ongoing";
       statusTagBg = const Color(0xFFE8F5E9);
       statusTagText = const Color(0xFF2E7D32);

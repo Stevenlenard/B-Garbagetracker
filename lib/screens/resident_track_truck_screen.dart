@@ -1,3 +1,7 @@
+import '../widgets/truck_legend.dart';
+import '../widgets/floating_map_legend.dart';
+import '../utils/truck_identity.dart';
+import '../utils/route_geometry.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
@@ -9,6 +13,8 @@ import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart' hide Size, Visibil
 import 'package:pointer_interceptor/pointer_interceptor.dart';
 import 'package:geolocator/geolocator.dart' as geo;
 import '../utils/prediction_engine.dart';
+import '../utils/fleet_status.dart';
+import '../utils/tracking_telemetry.dart';
 import '../utils/app_theme.dart';
 import '../utils/session_manager.dart';
 import '../models/user.dart';
@@ -17,11 +23,18 @@ import '../widgets/fade_slide_entrance.dart';
 import '../utils/custom_notification.dart';
 import '../services/truck_assignment_service.dart';
 import '../api/api_service.dart';
+import '../services/truck_locations_feed.dart';
+import '../utils/marker_labels.dart';
+import '../widgets/map_style_toggle.dart';
+import '../widgets/mapbox_gate.dart';
+import '../utils/map_colors.dart';
 
 class ResidentTrackTruckScreen extends StatefulWidget {
   final bool isEmbedded;
   final VoidCallback? onBack;
-  const ResidentTrackTruckScreen({super.key, this.isEmbedded = false, this.onBack});
+  /// Optional "Map | Collection status" switch shown in the panel header (resident dashboard).
+  final Widget? viewSwitch;
+  const ResidentTrackTruckScreen({super.key, this.isEmbedded = false, this.onBack, this.viewSwitch});
 
   @override
   State<ResidentTrackTruckScreen> createState() => _ResidentTrackTruckScreenState();
@@ -38,11 +51,14 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
   final DraggableScrollableController _sheetController = DraggableScrollableController();
 
   final Map<String, StreamSubscription> _routeSubscriptions = {};
+  final Map<String, StreamSubscription> _tripMetaSubscriptions = {}; // start point of the bound trip
+  final Map<String, String> _routeSessionByTruck = {}; // trip each route line is bound to
   final Map<String, Position?> _sessionStartPoints = {};
   final Map<String, List<Map>> _lastRoutePoints = {};
 
   String? _followedTruckId;
   Timer? _phpSyncTimer;
+  Timer? _fleetAgingTimer;
   StreamSubscription? _usersSubscription;
   final Set<String> _validDriverIds = {};
   final Set<String> _validDriverNames = {};
@@ -53,6 +69,20 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
   bool _isMapActive = false;
   bool _isTargetActive = false;
   bool _isFleetPanelVisible = true;
+  bool _satellite = false;
+
+  /// Map | Satellite (the style-loaded handler redraws trucks and routes on the new style).
+  void _setSatellite(bool v) {
+    setState(() => _satellite = v);
+    MapStyles.apply(mapboxMap, satellite: v);
+  }
+
+  /// Desktop: labelled pill beside the bottom round control button.
+  Widget _desktopStyleToggle() => Positioned(
+        left: 24 + 56 + 12,
+        bottom: 32 + 9,
+        child: MapStyleToggle(satellite: _satellite, onChanged: _setSatellite),
+      );
   bool _isRefreshing = false;
   bool _isDataLoading = true;
   bool _isDataExpanded = false;
@@ -76,6 +106,10 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
     _getResidentLocation();
     _syncPhpLocations();
     _phpSyncTimer = Timer.periodic(const Duration(seconds: 8), (_) => _syncPhpLocations());
+    // Freshness changes without any event (a crashed driver writes nothing).
+    _fleetAgingTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      if (mounted) _processMergedTrucks();
+    });
     _circleController = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 15),
@@ -99,12 +133,18 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
     });
   }
 
+  // MySQL positions (written only at driver login/logout). Kept apart from the
+  // Firebase map so they can never overwrite a fresher Firebase position; they are
+  // only used for trucks Firebase does not report at all.
+  Map<String, dynamic> _phpLocations = {};
+
   void _syncPhpLocations() async {
     try {
       final response = await _apiService.getLocations();
       if (response.data != null && response.data['locations'] != null) {
         final List phpLocations = response.data['locations'] as List;
         final Map<String, dynamic> phpMap = {};
+        final int nowMs = DateTime.now().millisecondsSinceEpoch;
         for (var loc in phpLocations) {
           final String driverName = (loc['driver_name'] ?? loc['driverName'] ?? '').toString();
 
@@ -112,6 +152,13 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
           final String status = (loc['status'] ?? 'ACTIVE').toString().toUpperCase();
           final bool isPhpOnline = status != 'OFFLINE' &&
               (loc['is_online'] == true || loc['isOnline'] == true || loc['is_online'] == 1 || loc['is_online'] == null);
+
+          // Use the server-computed age so the entry keeps its real timestamp
+          // (previously every poll stamped it "now", making old data look fresh).
+          final dynamic secondsAgoRaw = loc['seconds_ago'] ?? loc['secondsAgo'];
+          final int lastSeenMs = secondsAgoRaw is num
+              ? nowMs - (secondsAgoRaw.toInt() * 1000)
+              : FleetStatus.parseTimestampMs(loc['updated_at']);
 
           if (tid.isNotEmpty) {
             phpMap[tid] = {
@@ -122,12 +169,12 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
               'speed': double.tryParse(loc['speed']?.toString() ?? '0') ?? 0.0,
               'status': status,
               'isOnline': isPhpOnline,
-              'lastSeen': DateTime.now().millisecondsSinceEpoch,
+              'lastSeen': lastSeenMs,
             };
           }
         }
-        if (phpMap.isNotEmpty && mounted) {
-          _liveLocations.addAll(phpMap);
+        if (mounted) {
+          _phpLocations = phpMap;
           _processMergedTrucks();
         }
       }
@@ -206,35 +253,41 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
 
   void _startPulseAnimation() {
     _pulseTimer?.cancel();
-    _pulseTimer = Timer.periodic(const Duration(milliseconds: 35), (timer) {
+    // 120 ms ticks (was 35 ms with a whole-screen setState). Step sizes are scaled
+    // so the pulse period is unchanged; the values are only read by the map style
+    // layers, so no widget rebuild is needed.
+    _pulseTimer = Timer.periodic(const Duration(milliseconds: 120), (timer) {
       if (!mounted || mapboxMap == null) return;
-      
-      setState(() {
-        // Pulse 1
-        _pulseRadius += 0.6;
-        _pulseOpacity -= 0.015;
-        if (_pulseRadius >= 28.0) {
-          _pulseRadius = 8.0;
-          _pulseOpacity = 0.6;
-        }
 
-        // Pulse 2 (offset)
-        _pulseRadius2 += 0.6;
-        _pulseOpacity2 -= 0.015;
-        if (_pulseRadius2 >= 28.0) {
-          _pulseRadius2 = 8.0;
-          _pulseOpacity2 = 0.4;
-        } else if (_pulseRadius2 < 8.0) {
-          _pulseRadius2 = 18.0;
-          _pulseOpacity2 = 0.4;
-        }
-      });
+      // Pulse 1
+      _pulseRadius += 2.0;
+      _pulseOpacity -= 0.05;
+      if (_pulseRadius >= 28.0) {
+        _pulseRadius = 8.0;
+        _pulseOpacity = 0.6;
+      }
+
+      // Pulse 2 (offset)
+      _pulseRadius2 += 2.0;
+      _pulseOpacity2 -= 0.05;
+      if (_pulseRadius2 >= 28.0) {
+        _pulseRadius2 = 8.0;
+        _pulseOpacity2 = 0.4;
+      } else if (_pulseRadius2 < 8.0) {
+        _pulseRadius2 = 18.0;
+        _pulseOpacity2 = 0.4;
+      }
       _updatePulseLayers();
     });
   }
 
+  bool _isPulseUpdating = false;
+
   void _updatePulseLayers() async {
     if (mapboxMap == null) return;
+    // Skip the tick if the previous style update is still running.
+    if (_isPulseUpdating) return;
+    _isPulseUpdating = true;
     try {
       final style = mapboxMap!.style;
       if (await style.styleLayerExists("trucks-pulse-layer")) {
@@ -253,14 +306,19 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
         await style.setStyleLayerProperty("resident-pulse-layer-2", "circle-radius", _pulseRadius2);
         await style.setStyleLayerProperty("resident-pulse-layer-2", "circle-opacity", _pulseOpacity2.clamp(0.0, 1.0));
       }
-    } catch (_) {}
+    } catch (_) {
+    } finally {
+      _isPulseUpdating = false;
+    }
   }
 
   @override
   void dispose() {
     _routeSubscriptions.forEach((key, sub) => sub.cancel());
+    _tripMetaSubscriptions.forEach((key, sub) => sub.cancel());
     _usersSubscription?.cancel();
     _phpSyncTimer?.cancel();
+    _fleetAgingTimer?.cancel();
     _circleController.dispose();
     _refreshRotationController.dispose();
     _pulseTimer?.cancel();
@@ -388,8 +446,9 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
       }
     });
 
-    _database.ref('truck_locations').onValue.listen((event) {
+    TruckLocationsFeed.shared().events.listen((event) {
       _liveLocations = event.snapshot.exists ? Map<String, dynamic>.from(event.snapshot.value as Map) : {};
+      TrackingTelemetry.onTruckLocations(_liveLocations, source: 'resident_track'); // dev-only, no-op in production
       _liveLocations.forEach((key, val) {
         if (val is Map) {
           debugPrint("[RESIDENT LIVE LOCATION READ]\n"
@@ -408,22 +467,34 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
     final List<Map<dynamic, dynamic>> mergedList = [];
     final Set<String> processedTruckIds = {};
 
-    _liveLocations.forEach((key, rawLive) {
+    // Firebase is authoritative. MySQL entries are added only for trucks that
+    // Firebase does not report, so older MySQL data can never replace a newer
+    // Firebase position.
+    final Map<String, dynamic> sourceLocations = Map<String, dynamic>.from(_liveLocations);
+    final Set<String> firebaseTids = {};
+    _liveLocations.forEach((key, raw) {
+      firebaseTids.add(key.toString().toUpperCase());
+      if (raw is Map && raw['truck_id'] != null) {
+        firebaseTids.add(raw['truck_id'].toString().toUpperCase());
+      }
+    });
+    _phpLocations.forEach((tid, val) {
+      if (!firebaseTids.contains(tid.toUpperCase())) sourceLocations[tid] = val;
+    });
+
+    sourceLocations.forEach((key, rawLive) {
       if (rawLive == null || rawLive is! Map) return;
       final Map liveData = Map<String, dynamic>.from(rawLive);
       final String tid = (liveData['truck_id'] ?? key).toString().toUpperCase();
-      final String status = (liveData['status'] ?? 'ACTIVE').toString().toUpperCase();
+      final String status = FleetStatus.normalizeStatus(liveData['status'], fallback: 'ACTIVE');
       processedTruckIds.add(tid);
 
       final double lat = double.tryParse(liveData['latitude']?.toString() ?? liveData['lat']?.toString() ?? '0') ?? 0.0;
       final double lng = double.tryParse(liveData['longitude']?.toString() ?? liveData['lng']?.toString() ?? '0') ?? 0.0;
       final bool hasValidCoords = (lat != 0.0 && lng != 0.0);
-      final bool isOnlineField = liveData['isOnline'] != false;
-      final dynamic lastSeenRaw = liveData['lastSeen'];
-      final int lastSeen = lastSeenRaw is num ? lastSeenRaw.toInt() : 0;
       final int now = DateTime.now().millisecondsSinceEpoch;
-      final bool isFresh = lastSeen == 0 || (now - lastSeen).abs() < 900000;
-      final bool isGenuinelyOnline = hasValidCoords && status != 'OFFLINE' && status != 'COMPLETED' && status != 'FINISHED' && isOnlineField && isFresh;
+      // Shared "live" definition (same as the admin Active Fleet cards and maps).
+      final bool isGenuinelyOnline = hasValidCoords && FleetStatus.isLive(liveData, nowMs: now);
 
       final resolved = TruckAssignmentService.resolveFleetNode(
         nodeKey: key.toString(),
@@ -458,6 +529,29 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
         'status': status,
       });
     });
+
+    // One live truck per driver: when a driver has several live nodes, only the most
+    // recently seen stays online (same rule as the cards: FleetStatus.latestPerKey).
+    final Map<String, int> newestByDriver = <String, int>{};
+    for (int i = 0; i < mergedList.length; i++) {
+      final Map<dynamic, dynamic> t = mergedList[i];
+      if (t['isOnline'] != true) continue;
+      final String dId = (t['driver_id'] ?? t['driverId'] ?? '').toString();
+      if (dId.isEmpty || dId == 'null') continue;
+      final int? prev = newestByDriver[dId];
+      final int seen = FleetStatus.parseTimestampMs(t['lastSeen'] ?? t['last_seen']);
+      if (prev == null) {
+        newestByDriver[dId] = i;
+      } else {
+        final int prevSeen = FleetStatus.parseTimestampMs(mergedList[prev]['lastSeen'] ?? mergedList[prev]['last_seen']);
+        if (seen >= prevSeen) {
+          mergedList[prev]['isOnline'] = false;
+          newestByDriver[dId] = i;
+        } else {
+          t['isOnline'] = false;
+        }
+      }
+    }
 
     _allTrucksRegistry.forEach((id, truckData) {
       final String tid = id.toString().toUpperCase();
@@ -505,6 +599,8 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
       for (var id in trucksToClear) {
         _routeSubscriptions[id]?.cancel();
         _routeSubscriptions.remove(id);
+        _tripMetaSubscriptions.remove(id)?.cancel();
+        _routeSessionByTruck.remove(id);
         _clearTruckRoute(id);
       }
 
@@ -513,10 +609,20 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
         final String tid = t['truck_id'];
         final String? sid = t['current_session']?.toString();
         if (sid != null && sid.isNotEmpty) {
-          if (!_routeSubscriptions.containsKey(tid)) _setupRouteSubscription(tid, sid);
+          // The route line always belongs to the truck's CURRENT trip: a new trip
+          // (new login / new collection) re-binds it instead of keeping the old one.
+          if (_routeSessionByTruck[tid] != sid) {
+            if (_routeSessionByTruck.containsKey(tid)) {
+              _lastRoutePoints.remove(tid);
+              _clearTruckRoute(tid);
+            }
+            _setupRouteSubscription(tid, sid);
+          }
         } else {
           _routeSubscriptions[tid]?.cancel();
           _routeSubscriptions.remove(tid);
+          _tripMetaSubscriptions.remove(tid)?.cancel();
+          _routeSessionByTruck.remove(tid);
           _clearTruckRoute(tid);
         }
       }
@@ -525,6 +631,8 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
 
   void _setupRouteSubscription(String truckId, String sessionId) {
     _routeSubscriptions[truckId]?.cancel();
+    _tripMetaSubscriptions.remove(truckId)?.cancel();
+    _routeSessionByTruck[truckId] = sessionId;
     _routeSubscriptions[truckId] = _database.ref('driver_routes/$sessionId/route').onValue.listen((event) {
       if (event.snapshot.exists && event.snapshot.value != null) {
         final Map data = event.snapshot.value as Map;
@@ -540,7 +648,7 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
       }
     });
 
-    _database.ref('driver_routes/$sessionId').onValue.listen((event) {
+    _tripMetaSubscriptions[truckId] = _database.ref('driver_routes/$sessionId').onValue.listen((event) {
       if (event.snapshot.exists && event.snapshot.value != null) {
         final Map data = event.snapshot.value as Map;
         if (data['start_lat'] != null && data['start_lng'] != null) {
@@ -568,153 +676,63 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
      }
   }
 
-  void _updateRoutePolyline(String truckId, List<Map> points) async {
-    if (mapboxMap == null || points.length < 2) return;
+  final Map<String, List<Map>> _pendingRoutePoints = <String, List<Map>>{};
+  final Set<String> _routeUpdateRunning = <String>{};
+  String? _highlightedTruckId; // selected truck (legend): its route is drawn on top
 
-    int parseTs(dynamic ts) {
-      if (ts is num) return ts.toInt();
-      if (ts is String) {
-        final parsedInt = int.tryParse(ts);
-        if (parsedInt != null) return parsedInt;
-        return DateTime.tryParse(ts)?.millisecondsSinceEpoch ?? 0;
+  /// Latest-wins: a burst of GPS points can never leave the line on an older geometry
+  /// (an update that arrives while one is rendering replaces the pending one).
+  void _updateRoutePolyline(String truckId, List<Map> points) {
+    _pendingRoutePoints[truckId] = points;
+    if (_routeUpdateRunning.contains(truckId)) return;
+    _drainRouteUpdates(truckId);
+  }
+
+  Future<void> _drainRouteUpdates(String truckId) async {
+    _routeUpdateRunning.add(truckId);
+    try {
+      while (_pendingRoutePoints.containsKey(truckId)) {
+        final List<Map> pts = _pendingRoutePoints.remove(truckId)!;
+        await _renderRoutePolyline(truckId, pts);
       }
-      return 0;
+    } finally {
+      _routeUpdateRunning.remove(truckId);
     }
+  }
 
-    final List<Map> sortedPoints = List<Map>.from(points);
-    sortedPoints.sort((a, b) => parseTs(a['timestamp']).compareTo(parseTs(b['timestamp'])));
+  Future<void> _renderRoutePolyline(String truckId, List<Map> points) async {
+    final MapboxMap? map = mapboxMap;
+    if (map == null) return;
 
+    // Same geometry rules as the Admin live map (utils/route_geometry.dart). Fewer than
+    // two valid points draws nothing: no line is ever invented.
+    final List<Map<String, dynamic>> features = RouteGeometry.lineFeatures(points);
     final String sourceId = "route-source-$truckId";
-    final List<Map<String, dynamic>> features = [];
-
-    final List<Map> validPoints = [];
-    for (int i = 0; i < sortedPoints.length; i++) {
-      final p = sortedPoints[i];
-      final double lat = (p['latitude'] ?? p['lat'] ?? 0.0).toDouble();
-      final double lng = (p['longitude'] ?? p['lng'] ?? 0.0).toDouble();
-      final double accuracy = (p['accuracy'] ?? 0.0).toDouble();
-      final int ts = parseTs(p['timestamp']);
-
-      if (lat < -90 || lat > 90 || lng < -180 || lng > 180 || (lat == 0 && lng == 0)) {
-        continue;
-      }
-
-      if (accuracy > 100.0) {
-        debugPrint("[RESIDENT ROUTE] Skipping point with poor accuracy: ${accuracy}m");
-        continue;
-      }
-
-      if (validPoints.isNotEmpty) {
-        final prev = validPoints.last;
-        final double prevLat = (prev['latitude'] ?? prev['lat'] ?? 0.0).toDouble();
-        final double prevLng = (prev['longitude'] ?? prev['lng'] ?? 0.0).toDouble();
-        final int prevTs = parseTs(prev['timestamp']);
-
-        final double d = geo.Geolocator.distanceBetween(prevLat, prevLng, lat, lng);
-        final double dtSec = (ts > 0 && prevTs > 0) ? ((ts - prevTs) / 1000.0) : 0.0;
-
-        // Skip exact duplicate consecutive points (< 0.5 meters)
-        if (d < 0.5) continue;
-
-        // Reject impossible GPS jump
-        if (dtSec > 0) {
-          final double speedKmH = (d / dtSec) * 3.6;
-          if (speedKmH > 120.0 && d > 100.0) {
-            debugPrint("[RESIDENT ROUTE] Rejecting outlier jump: ${d.toStringAsFixed(1)}m in ${dtSec.toStringAsFixed(1)}s (speed: ${speedKmH.toStringAsFixed(1)} km/h)");
-            continue;
-          }
-          if (d > 400.0 && dtSec < 10.0) {
-            debugPrint("[RESIDENT ROUTE] Rejecting sudden jump: ${d.toStringAsFixed(1)}m in ${dtSec.toStringAsFixed(1)}s");
-            continue;
-          }
-        }
-      }
-
-      validPoints.add(p);
-    }
-
-    if (validPoints.length >= 2) {
-      List<List<double>> currentSegmentCoords = [];
-      String currentColor = (validPoints[0]['color'] ?? 'GREEN').toString().toUpperCase();
-
-      double firstLat = (validPoints[0]['latitude'] ?? validPoints[0]['lat'] ?? 0.0).toDouble();
-      double firstLng = (validPoints[0]['longitude'] ?? validPoints[0]['lng'] ?? 0.0).toDouble();
-      currentSegmentCoords.add([firstLng, firstLat]);
-
-      for (int i = 1; i < validPoints.length; i++) {
-        final curr = validPoints[i];
-        final prev = validPoints[i - 1];
-
-        final double currLat = (curr['latitude'] ?? curr['lat'] ?? 0.0).toDouble();
-        final double currLng = (curr['longitude'] ?? curr['lng'] ?? 0.0).toDouble();
-        final int currTs = parseTs(curr['timestamp']);
-
-        final double prevLat = (prev['latitude'] ?? prev['lat'] ?? 0.0).toDouble();
-        final double prevLng = (prev['longitude'] ?? prev['lng'] ?? 0.0).toDouble();
-        final int prevTs = parseTs(prev['timestamp']);
-
-        String color = (curr['color'] ?? 'GREEN').toString().toUpperCase();
-
-        final double d = geo.Geolocator.distanceBetween(prevLat, prevLng, currLat, currLng);
-        final double dtSec = (currTs > 0 && prevTs > 0) ? ((currTs - prevTs) / 1000.0) : 0.0;
-
-        // GPS GAP / INTERRUPTION CHECK (> 3 min gap OR > 800m distance gap)
-        bool isGap = (dtSec > 180.0) || (d > 800.0);
-
-        if (isGap) {
-          if (currentSegmentCoords.length >= 2) {
-            features.add({
-              "type": "Feature",
-              "geometry": {
-                "type": "LineString",
-                "coordinates": List<List<double>>.from(currentSegmentCoords)
-              },
-              "properties": {"color": currentColor}
-            });
-          }
-          debugPrint("[RESIDENT ROUTE] GPS gap split triggered (${d.toStringAsFixed(1)}m, ${dtSec.toStringAsFixed(1)}s gap). Starting new segment.");
-          currentColor = color;
-          currentSegmentCoords = [[currLng, currLat]];
-        } else if (color != currentColor) {
-          currentSegmentCoords.add([currLng, currLat]);
-          if (currentSegmentCoords.length >= 2) {
-            features.add({
-              "type": "Feature",
-              "geometry": {
-                "type": "LineString",
-                "coordinates": List<List<double>>.from(currentSegmentCoords)
-              },
-              "properties": {"color": currentColor}
-            });
-          }
-          currentColor = color;
-          currentSegmentCoords = [[currLng, currLat]];
-        } else {
-          currentSegmentCoords.add([currLng, currLat]);
-        }
-      }
-
-      if (currentSegmentCoords.length >= 2) {
-        features.add({
-          "type": "Feature",
-          "geometry": {
-            "type": "LineString",
-            "coordinates": List<List<double>>.from(currentSegmentCoords)
-          },
-          "properties": {"color": currentColor}
-        });
-      }
-    }
-
     final featureCollection = {"type": "FeatureCollection", "features": features};
     try {
-      final style = mapboxMap!.style;
+      final style = map.style;
       if (!(await style.styleSourceExists(sourceId))) {
+        if (features.isEmpty) return;
         await style.addSource(GeoJsonSource(id: sourceId, data: jsonEncode(featureCollection)));
-        await style.addLayer(LineLayer(id: "route-layer-$truckId", sourceId: sourceId, lineColor: Colors.green.toARGB32(), lineWidth: 8.0, lineOpacity: 0.9, lineCap: LineCap.ROUND, lineJoin: LineJoin.ROUND));
-        await style.setStyleLayerProperty("route-layer-$truckId", "line-color", ["match", ["get", "color"], "GREEN", "#00FF00", "YELLOW", "#FFFF00", "PINK", "#FF1493", "BLACK", "#000000", "BLUE", "#0000FF", "#00FF00"]);
-      } else { await style.setStyleSourceProperty(sourceId, "data", jsonEncode(featureCollection)); }
-    } catch (_) {}
+        await style.addLayer(LineLayer(id: "route-layer-$truckId", sourceId: sourceId, lineColor: TruckIdentity.argb(truckId), lineWidth: 6.0, lineOpacity: 0.9, lineCap: LineCap.ROUND, lineJoin: LineJoin.ROUND));
+      } else {
+        await style.setStyleSourceProperty(sourceId, "data", jsonEncode(featureCollection));
+      }
+      // The route is drawn in its truck's colour; the selected truck's route is wider,
+      // the others dimmed, and the selected layer is moved above the other routes.
+      final bool selected = _highlightedTruckId != null &&
+          TruckIdentity.normalize(_highlightedTruckId!) == TruckIdentity.normalize(truckId);
+      final bool dim = _highlightedTruckId != null && !selected;
+      final String layerId = "route-layer-$truckId";
+      await style.setStyleLayerProperty(layerId, "line-color", TruckIdentity.hex(truckId));
+      await style.setStyleLayerProperty(layerId, "line-width", selected ? 10.0 : 6.0);
+      await style.setStyleLayerProperty(layerId, "line-opacity", dim ? 0.35 : 0.9);
+      if (selected && await style.styleLayerExists("trucks-pulse-layer")) {
+        await style.moveStyleLayer(layerId, LayerPosition(below: "trucks-pulse-layer"));
+      }
+    } catch (e) {
+      debugPrint("[RESIDENT ROUTE] polyline update error: $e");
+    }
   }
 
   double _getResponsiveZoom(BuildContext context) {
@@ -750,12 +768,54 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
     ));
 
     _updateTruckMarkers();
-    _recenterToBalintawak();
+    // Route lines are layers of the old style: draw them again after a Map | Satellite switch.
+    _lastRoutePoints.forEach((tid, pts) {
+      if (_comparingTrucks.contains(tid)) _updateRoutePolyline(tid, pts);
+    });
+    if (!_cameraPlaced) {
+      _cameraPlaced = true;
+      _recenterToBalintawak();
+    }
   }
 
+  bool _cameraPlaced = false;
+
+  // Set when new truck data arrives during an in-flight marker update; the update
+  // is re-run once with the latest `_trucks` instead of the data being dropped.
+  bool _markersDirty = false;
+
+  /// Current zoom, for fanning out overlapping truck markers (default when unavailable).
+  Future<double> _markerZoom() async {
+    try {
+      return _lastFanZoom = (await mapboxMap?.getCameraState())?.zoom ?? 14.5;
+    } catch (_) {
+      return 14.5;
+    }
+  }
+  double? _lastFanZoom;
+
+  /// After a zoom of half a level or more, re-fan the truck markers for the new scale.
+  Future<void> _refanOnZoom() async {
+    final double? before = _lastFanZoom;
+    double z;
+    try {
+      z = (await mapboxMap?.getCameraState())?.zoom ?? before ?? 14.5;
+    } catch (_) {
+      return;
+    }
+    if (before == null || (z - before).abs() >= 0.5) _updateTruckMarkers();
+  }
+
+
   void _updateTruckMarkers() async {
-    if (mapboxMap == null || _isUpdatingMarkers) return;
+    if (mapboxMap == null) return;
+    if (_isUpdatingMarkers) {
+      if (_markersDirty) TrackingTelemetry.onCoalesced(source: 'resident_track');
+      _markersDirty = true;
+      return;
+    }
     _isUpdatingMarkers = true;
+    final Stopwatch? telemetryClock = TrackingTelemetry.enabled ? (Stopwatch()..start()) : null;
 
     try {
       final style = mapboxMap!.style;
@@ -780,10 +840,14 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
             "type": "TRUCK",
             "truckId": tid,
             "status": status,
-            "label": "$tid\n$status"
+            ...TruckIdentity.markerProps(tid, status),
+            "driverName": (truck['driver_name'] ?? '').toString(),
+            "tripId": (truck['current_session'] ?? '').toString(),
+            "label": MarkerLabels.forNode(truck, truckId: tid),
           }
         };
       }).toList();
+      MarkerLabels.fanOutOverlapping(features, zoom: await _markerZoom());
 
       for (var entry in _sessionStartPoints.entries) {
         if (entry.value != null && _comparingTrucks.contains(entry.key)) {
@@ -812,15 +876,15 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
 
       final statusColorExpr = [
         "match", ["get", "status"],
-        "IDLE", Colors.orange.toARGB32(),
-        "PAUSED", Colors.orange.toARGB32(),
-        "STOP", Colors.red.toARGB32(),
-        "STOPPED", Colors.red.toARGB32(),
-        "FULL", Colors.red.toARGB32(),
-        "COMPLETE", Colors.blue.toARGB32(),
-        "FINISHED", Colors.blue.toARGB32(),
-        "COMPLETED", Colors.blue.toARGB32(),
-        Colors.green.toARGB32()
+        "IDLE", mapColor(Colors.orange),
+        "PAUSED", mapColor(Colors.orange),
+        "STOP", mapColor(Colors.red),
+        "STOPPED", mapColor(Colors.red),
+        "FULL", mapColor(Colors.red),
+        "COMPLETE", mapColor(Colors.blue),
+        "FINISHED", mapColor(Colors.blue),
+        "COMPLETED", mapColor(Colors.blue),
+        mapColor(Colors.green)
       ];
 
       // 2. ENSURE LAYERS EXIST
@@ -849,7 +913,12 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
         // B. Solid Center Pins
         await style.addLayer(CircleLayer(id: "resident-marker-circle", sourceId: residentSourceId, circleRadius: 10.0, circleColor: const Color(0xFF2196F3).toARGB32(), circleStrokeWidth: 3.5, circleStrokeColor: Colors.white.toARGB32(), circleSortKey: 100.0));
         await style.addLayer(CircleLayer(id: "trucks-marker-circle", sourceId: sourceId, circleRadius: 10.0, circleColor: Colors.green.toARGB32(), circleStrokeWidth: 3.5, circleStrokeColor: Colors.white.toARGB32(), circleSortKey: 110.0, filter: ["==", ["get", "type"], "TRUCK"]));
-        await style.setStyleLayerProperty("trucks-marker-circle", "circle-color", statusColorExpr);
+                // Identity colour = truck id (stable everywhere); ring = operational status.
+        await style.setStyleLayerProperty("trucks-marker-circle", "circle-color", ["get", "truckColor"]);
+        await style.setStyleLayerProperty("trucks-marker-circle", "circle-stroke-color", ["get", "statusColor"]);
+        await style.setStyleLayerProperty("trucks-marker-circle", "circle-stroke-width", 4.5);
+        await style.setStyleLayerProperty("trucks-marker-circle", "circle-radius", ["to-number", ["coalesce", ["get", "radius"], "10"]]);
+        await style.setStyleLayerProperty("trucks-marker-circle", "circle-sort-key", ["to-number", ["coalesce", ["get", "sortKey"], "90"]]);
 
         // C. Inner Dot
         await style.addLayer(CircleLayer(id: "resident-inner-dot", sourceId: residentSourceId, circleRadius: 3.5, circleColor: Colors.white.toARGB32(), circleSortKey: 150.0));
@@ -887,17 +956,23 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
           filter: ["==", ["get", "type"], "TRUCK"]
         ));
         await style.setStyleLayerProperty("trucks-live-location-label", "text-field", ["get", "label"]);
-        await style.setStyleLayerProperty("trucks-live-location-label", "text-color", statusColorExpr);
+        await style.setStyleLayerProperty("trucks-live-location-label", "text-color", ["get", "truckColor"]);
       } else {
         await style.setStyleLayerProperty("trucks-pulse-layer", "circle-color", statusColorExpr);
         await style.setStyleLayerProperty("trucks-pulse-layer-2", "circle-color", statusColorExpr);
-        await style.setStyleLayerProperty("trucks-marker-circle", "circle-color", statusColorExpr);
-        await style.setStyleLayerProperty("trucks-live-location-label", "text-color", statusColorExpr);
+        await style.setStyleLayerProperty("trucks-live-location-label", "text-color", ["get", "truckColor"]);
       }
     } catch (e) {
       debugPrint("GIS Sync Error: $e");
     } finally {
       _isUpdatingMarkers = false;
+      if (telemetryClock != null) {
+        TrackingTelemetry.onMarkersRendered(source: 'resident_track', ms: telemetryClock.elapsedMilliseconds);
+      }
+      if (_markersDirty && mounted) {
+        _markersDirty = false;
+        _updateTruckMarkers();
+      }
     }
   }
 
@@ -912,6 +987,76 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
         ),
       );
     });
+  }
+
+  /// Truck legend (identity colour + id; ring = status) as a floating, draggable,
+  /// collapsible card. Tapping a truck highlights its route.
+  ///
+  /// It used to be pinned at top: 12 / right: 12 of the map layer, which ignores the status
+  /// bar and lies under the floating header (painted later), so its rows were hidden.
+  /// The insets below keep it clear of the header, HUD, map controls, panel and bottom nav.
+  Widget _buildTruckLegend({required bool desktop, double controlsBottom = 0}) {
+    final List<String> ids = _trucks
+        .where((t) => t['isOnline'] == true)
+        .map((t) => (t['truck_id'] ?? t['truckNumber'] ?? '').toString())
+        .toList();
+    // Must stay a Positioned: a bare SizedBox would be the map Stack's only non-positioned
+    // child and shrink the whole map card to 0x0 whenever no truck is online.
+    if (ids.isEmpty) return const Positioned(left: 0, top: 0, child: SizedBox.shrink());
+
+    final EdgeInsets leftInsets;
+    final EdgeInsets rightInsets;
+    if (desktop) {
+      // Coordinates of the rounded map card: corner header + HUD top-left (HUD ends ~160),
+      // controls bottom-left (32 + 3 x 56 + 2 x 12), fleet panel + its tab on the right.
+      const double controlsTop = 32 + 3 * 56 + 2 * 12;
+      leftInsets = const EdgeInsets.only(left: 24, top: 170, bottom: controlsTop + 12);
+      rightInsets = EdgeInsets.only(right: _isFleetPanelVisible ? 444 + 24 + 12 : 24 + 12, top: 24, bottom: 24);
+    } else {
+      final Size screen = MediaQuery.sizeOf(context);
+      final EdgeInsets pad = MediaQuery.paddingOf(context); // bottom = nav bar (extendBody)
+      final double headerBtn = (screen.width * 0.12).clamp(44.0, 50.0);
+      final double headerBottom = 12 + pad.top + headerBtn;
+      final double hudBottom = headerBottom + 8 + 36;
+      final double controlBtn = (screen.width * 0.15).clamp(48.0, 60.0);
+      final double controlsTop = controlsBottom + 3 * controlBtn + 2 * 12 + 48; // + Map | Satellite pill
+      // The fleet sheet rests at up to 26% of the height on the left side.
+      final double sheetTop = math.max(pad.bottom, screen.height * 0.26);
+      rightInsets = EdgeInsets.only(right: 12, top: headerBottom + 10, bottom: controlsTop + 10);
+      leftInsets = EdgeInsets.only(left: 12, top: hudBottom + 10, bottom: sheetTop + 10);
+    }
+
+    final List<String> dots = ids.map(TruckIdentity.normalize).where((String s) => s.isNotEmpty).toSet().toList()..sort();
+    return Positioned.fill(
+      child: FloatingMapLegend(
+        sessionId: desktop ? 'resident-track-fleet-desktop' : 'resident-track-fleet-mobile',
+        leftInsets: leftInsets,
+        rightInsets: rightInsets,
+        collapsedPreview: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (final String id in dots.take(4))
+              Container(
+                width: 10,
+                height: 10,
+                margin: const EdgeInsets.only(right: 3),
+                decoration: BoxDecoration(color: TruckIdentity.color(id), shape: BoxShape.circle),
+              ),
+          ],
+        ),
+        child: TruckLegend(
+          truckIds: ids,
+          decorated: false,
+          selectedId: _highlightedTruckId,
+          onSelect: (String id) {
+            setState(() => _highlightedTruckId = (_highlightedTruckId == id) ? null : id);
+            _lastRoutePoints.forEach((tid, pts) {
+              if (_comparingTrucks.contains(tid)) _updateRoutePolyline(tid, pts);
+            });
+          },
+        ),
+      ),
+    );
   }
 
   Widget _buildMapControls({double bottom = 240}) {
@@ -931,7 +1076,13 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
       right: effectiveRight,
       child: Column(
         mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: isDesktop ? CrossAxisAlignment.center : CrossAxisAlignment.end,
         children: [
+          // Phones: Map | Satellite on top of the round buttons (desktop has a labelled pill).
+          if (!isDesktop) ...[
+            MapStyleToggle(satellite: _satellite, compact: true, onChanged: _setSatellite),
+            const SizedBox(height: 12),
+          ],
           // TARGET / GPS LOCATION BUTTON (Recenter to Resident's GPS position)
           _buildMapControlButton(
             icon: Icons.gps_fixed_rounded,
@@ -1032,24 +1183,27 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
         children: [
           // 1. Full GIS Map Background
           Positioned.fill(
-            child: MapWidget(
+            child: MapboxGate(child: MapWidget(
               gestureRecognizers: <Factory<OneSequenceGestureRecognizer>>{
                 Factory<OneSequenceGestureRecognizer>(() => EagerGestureRecognizer()),
               },
               onMapCreated: _onMapCreated,
               onStyleLoadedListener: _onStyleLoaded,
+              onMapIdleListener: (_) => _refanOnZoom(),
               viewport: CameraViewportState(
                 center: Point(coordinates: _balintawakCenter),
                 zoom: _getResponsiveZoom(context),
               ),
-            ),
+            )),
           ),
+          _buildTruckLegend(desktop: true),
 
           // 2. Corner Header (Top-Left)
           _buildCornerHeader(),
 
           // 3. Map Controls HUD (Bottom Left)
           _buildMapControls(bottom: 32),
+          _desktopStyleToggle(),
 
           // 4. Debug / Units Info Overlay
           _buildDebugOverlay(),
@@ -1179,6 +1333,10 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
                     style: TextStyle(color: Colors.grey, fontSize: 12, fontWeight: FontWeight.w700)),
               ],
             ),
+            if (widget.viewSwitch != null) ...[
+              const SizedBox(height: 12),
+              PointerInterceptor(child: widget.viewSwitch!),
+            ],
           ],
         ),
       ),
@@ -1241,22 +1399,29 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
       Positioned.fill(child: Stack(
         children: [
           Positioned.fill(
-            child: MapWidget(
+            child: MapboxGate(child: MapWidget(
               gestureRecognizers: <Factory<OneSequenceGestureRecognizer>>{
                 Factory<OneSequenceGestureRecognizer>(() => EagerGestureRecognizer()),
               },
               onMapCreated: _onMapCreated, 
               onStyleLoadedListener: _onStyleLoaded, 
+              onMapIdleListener: (_) => _refanOnZoom(),
               viewport: CameraViewportState(
                 center: Point(coordinates: _balintawakCenter), 
                 zoom: _getResponsiveZoom(context),
               ),
-            ),
+            )),
           ),
+          _buildTruckLegend(desktop: false, controlsBottom: controlsBottom),
           _buildMapControls(bottom: controlsBottom),
         ],
       )),
       _buildFloatingHeader(),
+      if (widget.viewSwitch != null)
+        Positioned(
+          top: 68, left: 16,
+          child: SafeArea(child: PointerInterceptor(child: widget.viewSwitch!)),
+        ),
       _buildDebugOverlay(),
       Positioned.fill(child: DraggableScrollableSheet(
         controller: _sheetController,
@@ -1353,9 +1518,9 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
     final double btnSize = (width * 0.12).clamp(44.0, 50.0);
     final double floatingHeaderBottom = topSafeArea + 12.0 + btnSize;
 
-    final double topOffset = isDesktop 
+    final double topOffset = (isDesktop 
         ? 125.0 
-        : (floatingHeaderBottom + (isMobile ? 8.0 : 12.0));
+        : (floatingHeaderBottom + (isMobile ? 8.0 : 12.0))) + (widget.viewSwitch != null ? 44.0 : 0.0);
     final double leftOffset = isMobile ? 16.0 : (isTablet ? 20.0 : 24.0);
 
     final int totalFleetUnits = math.max(_validDriverIds.length, _allTrucksRegistry.length);
@@ -1696,12 +1861,14 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
           const SizedBox(height: 24),
 
           // Middle Info: Location, Speed, Driver
-          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-            _buildMetricsInfo(Icons.location_on_rounded, Colors.redAccent, "Location",
-                (truck['current_purok'] ?? "Balintawak").toString()),
-            _buildMetricsInfo(Icons.speed_rounded, Colors.blueAccent, "Speed",
-                "${speed.toStringAsFixed(0)} km/h"),
-            _buildMetricsInfo(Icons.person_rounded, Colors.indigoAccent, "Driver", driver),
+          // Location names can be long: own line (max 2), then Speed and Driver side by side.
+          _buildMetricsInfo(Icons.location_on_rounded, Colors.redAccent, "Location",
+              (truck['current_purok'] ?? "Balintawak").toString(), maxLines: 2),
+          const SizedBox(height: 12),
+          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Expanded(child: _buildMetricsInfo(Icons.speed_rounded, Colors.blueAccent, "Speed", "${speed.toStringAsFixed(0)} km/h")),
+            const SizedBox(width: 12),
+            Expanded(flex: 2, child: _buildMetricsInfo(Icons.person_rounded, Colors.indigoAccent, "Driver", driver)),
           ]),
 
           const SizedBox(height: 20),
@@ -1768,15 +1935,18 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
     );
   }
 
-  Widget _buildMetricsInfo(IconData icon, Color color, String label, String value) {
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+  Widget _buildMetricsInfo(IconData icon, Color color, String label, String value, {int maxLines = 1}) {
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
       Row(children: [
         Icon(icon, size: 12, color: color),
         const SizedBox(width: 4),
         Text(label, style: const TextStyle(fontSize: 10, color: Colors.grey, fontWeight: FontWeight.w700)),
       ]),
       const SizedBox(height: 4),
-      Text(value, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 13, color: Color(0xFF1A1A1A))),
+      Text(value,
+          maxLines: maxLines,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 13, color: Color(0xFF1A1A1A), height: 1.3)),
     ]);
   }
 

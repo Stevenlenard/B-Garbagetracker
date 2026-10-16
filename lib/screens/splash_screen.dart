@@ -29,6 +29,7 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
   late Animation<Offset> _slideAnimation;
   
   bool _isChecking = true;
+  String? _launchNotice; // why a saved sign-in ended (shown on the login screen)
   bool _noInternet = false;
   bool _showLoader = true;
 
@@ -116,10 +117,12 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
 
           if (!mounted) return;
 
-          // Check session and remember me state for auto-login
-          final bool loggedIn = await SessionManager.isLoggedIn();
-          final bool rememberMe = await SessionManager.isRememberMeEnabled();
-          final UserData? user = await SessionManager.getUser();
+          // Restore the sign-in: a revocable session is renewed with the server (ended there
+          // => password required); without "Stay signed in" a new app start needs the password.
+          final LaunchResult launch = await SessionManager.restoreOnLaunch();
+          final bool loggedIn = launch.state == LaunchSession.proceed;
+          _launchNotice = launch.message;
+          final UserData? user = loggedIn ? await SessionManager.getUser() : null;
 
           debugPrint("[AUTH DEBUG] Firebase currentUser exists: ${user != null}");
           debugPrint("[AUTH DEBUG] Saved profile exists: ${user != null}");
@@ -174,7 +177,7 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
               Navigator.pushReplacement(
                 context,
                 PageRouteBuilder(
-                  pageBuilder: (context, animation, secondaryAnimation) => const LoginScreen(),
+                  pageBuilder: (context, animation, secondaryAnimation) => LoginScreen(initialNotice: _launchNotice),
                   transitionsBuilder: (context, animation, secondaryAnimation, child) {
                     return FadeTransition(
                       opacity: CurvedAnimation(

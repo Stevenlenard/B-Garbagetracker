@@ -1,7 +1,18 @@
+import '../widgets/logout_choice_dialog.dart';
+import '../utils/relative_time.dart';
+import '../services/rtdb_port.dart';
+import '../services/notification_inbox.dart';
+import '../models/driver_trip.dart';
+import '../utils/route_history_navigation.dart';
+import '../utils/admin_quick_actions.dart';
 import 'dart:async';
+import 'package:flutter/foundation.dart' show setEquals;
 import 'dart:math' as math;
 import 'dart:ui';
 import 'package:flutter/material.dart';
+import '../widgets/notification_center.dart';
+import '../chatbot/faq_bot.dart';
+import '../widgets/truck_chat_widget.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/cupertino.dart' show CupertinoSliverRefreshControl;
 import 'package:firebase_database/firebase_database.dart';
@@ -14,6 +25,9 @@ import '../utils/app_theme.dart';
 import '../utils/system_logger.dart';
 import '../utils/responsive.dart';
 import '../utils/prediction_engine.dart';
+import '../utils/fleet_snapshot.dart';
+import '../utils/fleet_status.dart';
+import '../utils/tracking_telemetry.dart';
 import 'analytics_screen.dart';
 import 'track_trucks_screen.dart';
 import 'complaints_screen.dart';
@@ -22,6 +36,7 @@ import 'data_management_screen.dart';
 import 'user_management_screen.dart';
 import 'route_history_screen.dart';
 import '../widgets/mapbox_view.dart';
+import 'route_assignments_screen.dart';
 import '../services/admin_settings_service.dart';
 import '../services/notification_service.dart';
 import '../services/truck_assignment_service.dart';
@@ -33,9 +48,14 @@ import '../utils/route_persistence_manager.dart';
 import '../utils/app_localizations.dart';
 import '../utils/responsive_text.dart';
 import '../models/user.dart';
+import '../services/truck_locations_feed.dart';
+import 'collection_route_optimization_screen.dart';
 
 class AdminDashboard extends StatefulWidget {
-  const AdminDashboard({super.key});
+  /// Section to open on (AdminDestinations.*). Lets a direct link to Route History land
+  /// inside the dashboard shell.
+  final int initialIndex;
+  const AdminDashboard({super.key, this.initialIndex = 0});
 
   @override
   State<AdminDashboard> createState() => _AdminDashboardState();
@@ -49,12 +69,6 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
   final ScrollController _scrollController = ScrollController();
   bool _showHeaderShadow = true;
 
-  double _averageSpeed = 0.0;
-  int _activeHotspots = 0;
-  int _totalRoutesToday = 0;
-  int _completedRoutesToday = 0;
-  int _resolvedComplaints = 0;
-  int _totalComplaints = 0;
   int _activeTrucks = 0;
   int _onlineDriversCount = 0;
   final Set<String> _archivedDriverIds = {};
@@ -64,12 +78,28 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
   final Set<String> _genuinelyOnlineDriverIds = {};
   final Set<String> _genuinelyOnlineDriverNamesUpper = {};
   StreamSubscription? _usersPresenceSubscription;
+  StreamSubscription? _truckLocationsSubscription;
+  // Latest raw `truck_locations` snapshot. The fleet is re-derived from it whenever
+  // either the truck data or the driver presence data changes.
+  Map<dynamic, dynamic> _rawTruckLocations = {};
+  VoidCallback? _recomputeFleet;
+  Timer? _fleetAgingTimer;
+  NotificationInbox? _inbox; // this admin's own read/dismiss/clear state
+  InboxState _inboxState = InboxState.empty;
+  StreamSubscription<InboxState>? _inboxSub;
+  Map<dynamic, dynamic>? _rawNotifications;
+  Map<dynamic, dynamic>? _rawUsers; // latest raw `users`, re-evaluated as it ages
+  String _fleetSignature = '';
   int _pendingComplaints = 0;
   int _inProgressComplaints = 0;
   int _residentsCount = 0;
   int _unreadNotificationsCount = 0;
   double _coveragePercent = 0.0;
-  int _selectedIndex = 0;
+  late int _selectedIndex = widget.initialIndex;
+  String? _routeHistoryTripId; // trip requested by Load History / fleet panels
+  DriverTrip? _routeHistoryTrip;
+  final RouteHistoryReturn _routeReturn = RouteHistoryReturn(routeHistoryIndex: AdminDestinations.routeHistory); // section Route History returns to
+  int _routeHistoryEpoch = 0; // bumped on each open so Route History shows current data
   bool _isSidebarExtended = true;
   bool _isRefreshing = false;
   bool _showRefreshSpinner = false;
@@ -90,6 +120,7 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
   @override
   void initState() {
     super.initState();
+    NotificationService.openHomeRequests.addListener(_openHomeFromNotification);
     _loadUser();
     _startClock();
     _circleController = AnimationController(
@@ -186,13 +217,21 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
     }
   }
 
+  /// A tapped phone notification shows the dashboard's Home tab.
+  void _openHomeFromNotification() {
+    if (mounted) setState(() => _selectedIndex = 0);
+  }
+
   @override
   void dispose() {
+    NotificationService.openHomeRequests.removeListener(_openHomeFromNotification);
     _circleController.dispose();
     _refreshRotationController.dispose();
     _clockTimer?.cancel();
     _userSubscription?.cancel();
     _usersPresenceSubscription?.cancel();
+    _fleetAgingTimer?.cancel();
+    _truckLocationsSubscription?.cancel();
     _trucksMetaSubscription?.cancel();
     _scrollController.dispose();
     super.dispose();
@@ -333,9 +372,19 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
   void _listenToUsersPresence() {
     _usersPresenceSubscription?.cancel();
     _usersPresenceSubscription = _database.ref('users').onValue.listen((event) {
-      if (event.snapshot.exists && event.snapshot.value != null) {
-        final Map? data = event.snapshot.value as Map?;
-        if (data == null) return;
+      _rawUsers = (event.snapshot.exists && event.snapshot.value is Map) ? event.snapshot.value as Map : null;
+      _applyUsersPresence();
+    });
+    // Presence ages without any event (a crashed driver writes nothing), so it is
+    // re-evaluated on a timer using the same freshness rule.
+    _fleetAgingTimer?.cancel();
+    _fleetAgingTimer = Timer.periodic(const Duration(seconds: 15), (_) => _applyUsersPresence());
+  }
+
+  void _applyUsersPresence() {
+    {
+      if (_rawUsers != null) {
+        final Map data = _rawUsers!;
 
         int onlineCount = 0;
         final int now = DateTime.now().millisecondsSinceEpoch;
@@ -367,17 +416,15 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
               validDriverIds.add(driverUid);
               if (driverName.isNotEmpty) validDriverNames.add(driverName.toUpperCase());
 
-              final bool isOnline = value['isOnline'] == true;
+              final bool isOnline = FleetStatus.hasOnlineFlag(value);
               final String userStatus = (value['status'] ?? '').toString().toUpperCase();
               final dynamic lastSeenRaw = value['lastSeen'];
               final int lastSeen = lastSeenRaw is num ? lastSeenRaw.toInt() : 0;
               
-              final bool isFresh = lastSeen > 0 && (now - lastSeen).abs() < 120000;
+              // A COMPLETED driver is still connected until logout/disconnect.
               final bool genuinelyOnline = isOnline &&
                   userStatus != 'OFFLINE' &&
-                  userStatus != 'COMPLETED' &&
-                  userStatus != 'FINISHED' &&
-                  (lastSeen == 0 || isFresh || (now - lastSeen).abs() < 300000);
+                  FleetStatus.isFresh(lastSeen, now);
 
               debugPrint("[DRIVER_PRESENCE_CHECK] uid: $driverUid | name: $driverName | isOnline: $isOnline | status: $userStatus | genuinelyOnline: $genuinelyOnline");
 
@@ -392,9 +439,16 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
         debugPrint("[ADMIN_ONLINE_DRIVERS_COUNT] Total online drivers: $onlineCount");
         debugPrint("=============================================");
 
-        if (mounted) {
+        final bool presenceUnchanged = setEquals(_archivedDriverIds, archivedIds) &&
+            setEquals(_archivedDriverNames, archivedNames) &&
+            setEquals(_validDriverIds, validDriverIds) &&
+            setEquals(_validDriverNames, validDriverNames) &&
+            setEquals(_genuinelyOnlineDriverIds, genuinelyOnlineDriverIds) &&
+            setEquals(_genuinelyOnlineDriverNamesUpper, genuinelyOnlineDriverNamesUpper);
+        if (mounted && !presenceUnchanged) {
+          // The "Online Drivers" card is derived from the Active Fleet list
+          // (_recomputeFleet) so both always agree; presence only feeds its inputs.
           setState(() {
-            _onlineDriversCount = onlineCount;
             _archivedDriverIds.clear();
             _archivedDriverIds.addAll(archivedIds);
             _archivedDriverNames.clear();
@@ -412,145 +466,108 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
       } else {
         if (mounted) {
           setState(() {
-            _onlineDriversCount = 0;
+            _archivedDriverIds.clear();
+            _archivedDriverNames.clear();
+            _validDriverIds.clear();
+            _validDriverNames.clear();
+            _genuinelyOnlineDriverIds.clear();
+            _genuinelyOnlineDriverNamesUpper.clear();
           });
         }
       }
-    });
+      // Presence changed: re-derive the fleet so the cards never lag behind it.
+      _recomputeFleet?.call();
+    }
   }
 
   void _setupListeners() {
-    _listenToUsersPresence();
-    _database.ref('truck_locations').onValue.listen((event) {
-      if (event.snapshot.exists && event.snapshot.value != null) {
-        final Map? data = event.snapshot.value as Map?;
-        if (data == null) return;
-        
-        final Map<String, Map<dynamic, dynamic>> driverToLatestTruck = {};
+    _recomputeFleet = () {
+      {
+        final Map<dynamic, dynamic> data = _rawTruckLocations;
+
         final int now = DateTime.now().millisecondsSinceEpoch;
 
-        debugPrint("=== ADMIN DASHBOARD ACTIVE FLEET FILTER TRACE ===");
-
-        data.forEach((key, value) {
-          if (value != null) {
-            final truckMap = Map<dynamic, dynamic>.from(value as Map);
-            final String nodeKey = key.toString();
-            final String tid = (truckMap['truck_id'] ?? nodeKey).toString().toUpperCase();
-            final String? dId = truckMap['driver_id']?.toString() ?? truckMap['driverId']?.toString();
-            final String dName = (truckMap['driver_name'] ?? truckMap['driverName'] ?? 'Driver').toString().trim();
-            final String dNameUpper = dName.toUpperCase();
-            final String driverKey = (dId != null && dId.isNotEmpty && dId != 'null') ? dId : dNameUpper;
-
-            final String role = (truckMap['role'] ?? '').toString().toLowerCase();
-            final bool isExplicitNonDriver = (role == 'resident' || role == 'admin' || role == 'administrator');
-
-            final String accountStatus = (truckMap['account_status'] ?? truckMap['status'] ?? '').toString().toLowerCase();
-            final dynamic isArchivedRaw = truckMap['is_archived'] ?? truckMap['isArchived'];
-            final bool isNodeArchived = accountStatus == 'archived' ||
-                isArchivedRaw == 1 ||
-                isArchivedRaw == '1' ||
-                isArchivedRaw == true ||
-                isArchivedRaw == 'true';
-
-            // Verify driver_id or driver_name belongs to a valid driver with role == 'driver'
-            final bool isDriverIdValid = dId == null || dId.isEmpty || dId == 'null' || _validDriverIds.isEmpty || _validDriverIds.contains(dId);
+        // Shared fleet snapshot (same function as the Resident cards and the live map).
+        // Admin adds account validity from `users` (role == driver, not archived) and
+        // requires the account itself to be genuinely online.
+        final FleetSnapshot fleet = FleetSnapshot.derive(
+          data,
+          nowMs: now,
+          includeCompleted: true, // connected COMPLETED drivers count as online
+          exclude: (String nodeKey, Map node) {
+            final String? dId = node['driver_id']?.toString() ?? node['driverId']?.toString();
+            final String dNameUpper = (node['driver_name'] ?? node['driverName'] ?? 'Driver').toString().trim().toUpperCase();
+            final bool hasId = dId != null && dId.isNotEmpty && dId != 'null';
+            final bool isDriverIdValid = !hasId || _validDriverIds.isEmpty || _validDriverIds.contains(dId);
             final bool isDriverNameValid = _validDriverNames.isEmpty || _validDriverNames.contains(dNameUpper);
-
-            if (isExplicitNonDriver ||
-                isNodeArchived ||
-                !isDriverIdValid ||
+            return !isDriverIdValid ||
                 !isDriverNameValid ||
-                (dId != null && _archivedDriverIds.contains(dId)) ||
-                _archivedDriverNames.contains(dNameUpper) ||
-                tid.contains("ADMIN") ||
-                tid.contains("SYSTEM") ||
-                tid.contains("USER")) {
-              return; // REJECT NON-DRIVERS, RESIDENTS, ADMINS, AND ARCHIVED ACCOUNTS!
-            }
-
-            final String status = (truckMap['status'] ?? 'OFFLINE').toString().toUpperCase();
-            final bool isOnlineField = truckMap['isOnline'] == true || truckMap['is_online'] == true || truckMap['is_online'] == 1;
-            final dynamic lastSeenRaw = truckMap['lastSeen'] ?? truckMap['last_seen'];
-            int lastSeen = 0;
-            if (lastSeenRaw is num) {
-              lastSeen = lastSeenRaw.toInt();
-            } else if (lastSeenRaw != null) {
-              final parsed = DateTime.tryParse(lastSeenRaw.toString().replaceAll(' ', 'T'));
-              if (parsed != null) lastSeen = parsed.millisecondsSinceEpoch;
-            }
-
-            final dynamic loginTimeRaw = truckMap['login_time'] ?? truckMap['loginTime'];
-            int loginTime = 0;
-            if (loginTimeRaw is num) {
-              loginTime = loginTimeRaw.toInt();
-            }
-
-            // Session Limit: 12 Hours (43,200,000 ms) since login
-            final bool isSessionValid = loginTime == 0 || (now - loginTime) < 43200000;
-            final bool isFresh = lastSeen == 0 || (now - lastSeen).abs() < 180000; // 3-minute freshness check
-
-            final bool isUserAccountOnline = (dId != null && _genuinelyOnlineDriverIds.contains(dId)) ||
+                (hasId && _archivedDriverIds.contains(dId)) ||
+                _archivedDriverNames.contains(dNameUpper);
+          },
+          requirePresence: (String driverKey, Map node) {
+            final String? dId = node['driver_id']?.toString() ?? node['driverId']?.toString();
+            final String dNameUpper = (node['driver_name'] ?? node['driverName'] ?? 'Driver').toString().trim().toUpperCase();
+            return (dId != null && _genuinelyOnlineDriverIds.contains(dId)) ||
                 _genuinelyOnlineDriverNamesUpper.contains(dNameUpper);
+          },
+        );
 
-            // Driver stays visible during ACTIVE, COLLECTING, IDLE, PAUSED, FULL while logged in
-            // Excluded from Active Collection Fleet once trip is COMPLETED / FINISHED or OFFLINE or LOGGED OUT
-            bool isGenuinelyOnline = isOnlineField &&
-                status != 'OFFLINE' &&
-                status != 'COMPLETED' &&
-                status != 'FINISHED' &&
-                isSessionValid &&
-                isFresh &&
-                isUserAccountOnline;
-
-            if (isGenuinelyOnline) {
-              final resolved = TruckAssignmentService.resolveFleetNode(
-                nodeKey: nodeKey,
-                liveData: truckMap,
-                trucksRegistry: _allTrucksRegistry,
-              );
-
-              truckMap['internal_id'] = nodeKey;
-              truckMap['truck_id'] = resolved.truckId;
-              truckMap['truckNumber'] = resolved.truckNumber;
-              truckMap['plate_number'] = resolved.plateNumber;
-              truckMap['driver_name'] = resolved.driverName;
-              truckMap['isOnline'] = true;
-
-              if (!driverToLatestTruck.containsKey(driverKey)) {
-                driverToLatestTruck[driverKey] = truckMap;
-              } else {
-                final existing = driverToLatestTruck[driverKey]!;
-                final int existingSeen = (existing['lastSeen'] ?? 0) as int;
-                if (lastSeen >= existingSeen) {
-                  driverToLatestTruck[driverKey] = truckMap;
-                }
-              }
-            }
+        final List<Map<dynamic, dynamic>> onlineTrucks = [];
+        // Every connected driver is listed (COMPLETED included, with its COMPLETED badge), so
+        // Fleet Status matches the Online Drivers count; only collecting trucks feed the speed.
+        for (final LiveTruck t in fleet.trucks) {
+          final Map<dynamic, dynamic> truckMap = Map<dynamic, dynamic>.from(t.node);
+          final resolved = TruckAssignmentService.resolveFleetNode(
+            nodeKey: t.nodeKey,
+            liveData: truckMap,
+            trucksRegistry: _allTrucksRegistry,
+          );
+          truckMap['internal_id'] = t.nodeKey;
+          truckMap['truck_id'] = resolved.truckId;
+          truckMap['truckNumber'] = resolved.truckNumber;
+          truckMap['plate_number'] = resolved.plateNumber;
+          truckMap['driver_name'] = resolved.driverName;
+          truckMap['isOnline'] = true;
+          if (t.isCompleted) {
+            truckMap['status'] = 'COMPLETED';
+            truckMap['speed'] = 0; // unloaded/finished: not collecting
           }
-        });
-
-        debugPrint("===============================================");
-
-        final List<Map<dynamic, dynamic>> onlineTrucks = driverToLatestTruck.values.toList();
-        double totalSpeed = 0.0;
-        int activeWithSpeed = 0;
-
-        for (var t in onlineTrucks) {
-          final speed = double.tryParse(t['speed']?.toString() ?? '0') ?? 0.0;
-          if (speed > 0) {
-            totalSpeed += speed;
-            activeWithSpeed++;
-          }
+          onlineTrucks.add(truckMap);
         }
-
-        if (mounted) {
+        // The count includes connected COMPLETED drivers that the fleet list omits, so the
+        // snapshot's own signature must be part of the change check.
+        final String fleetSignature = '${fleet.signature}#' + (onlineTrucks
+                .map((Map<dynamic, dynamic> t) =>
+                    '${t['internal_id']}|${t['driver_id']}|${t['status']}|${t['lastSeen']}|${t['latitude']}|${t['longitude']}|${t['speed']}')
+                .toList()
+              ..sort())
+            .join(';');
+        if (mounted && fleetSignature != _fleetSignature) {
+          _fleetSignature = fleetSignature;
           setState(() {
-            _activeTrucks = onlineTrucks.length;
-            _onlineDriversCount = onlineTrucks.length;
+            _activeTrucks = fleet.activeFleets;
+            _onlineDriversCount = fleet.onlineDrivers;
             _fleetStatus = onlineTrucks;
-            _averageSpeed = activeWithSpeed > 0 ? totalSpeed / activeWithSpeed : 0.0;
           });
         }
+      }
+    };
+    _truckLocationsSubscription?.cancel();
+    _truckLocationsSubscription = TruckLocationsFeed.shared().events.listen((event) {
+      final Object? raw = event.snapshot.value;
+      // An empty/removed node yields an empty map so the fleet clears instead of going stale.
+      _rawTruckLocations = (event.snapshot.exists && raw is Map)
+          ? Map<dynamic, dynamic>.from(raw)
+          : <dynamic, dynamic>{};
+      // Dev-only timing (test mode + GT_TELEMETRY): delivery delay, then S4 = next frame after recompute.
+      final Stopwatch? telemetryClock = TrackingTelemetry.enabled ? (Stopwatch()..start()) : null;
+      TrackingTelemetry.onTruckLocations(raw, source: 'admin_fleet');
+      _recomputeFleet?.call();
+      if (telemetryClock != null) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          TrackingTelemetry.onFleetRendered(source: 'admin_cards', ms: telemetryClock.elapsedMilliseconds);
+        });
       }
     });
 
@@ -563,67 +580,64 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
         data.forEach((key, value) {
           if (value != null && value is Map) {
             total++;
-            if (value['route_status'] == 'COMPLETED' || value['status'] == 'COMPLETED') completed++;
+            // FULL finalizes the collection; COMPLETED only confirms unloading.
+            final String rs = (value['route_status'] ?? value['status'] ?? '').toString().toUpperCase();
+            if (rs == 'COMPLETED' || rs == 'FULL' || value['collection_finalized'] == true) completed++;
           }
         });
         if (mounted) {
           setState(() {
-            _totalRoutesToday = total;
-            _completedRoutesToday = completed;
             _coveragePercent = total > 0 ? (completed / total) * 100 : 0.0;
           });
         }
       }
     });
 
-    _database.ref('complaints').onValue.listen((event) {
-      if (event.snapshot.exists && event.snapshot.value != null) {
-        final Map? data = event.snapshot.value as Map?;
-        if (data == null) return;
-        int pending = 0; int inProgress = 0; int resolved = 0; int total = 0;
-        String normalize(dynamic s) {
-          if (s == null) return 'PENDING';
-          String str = s.toString().toLowerCase().trim();
-          if (str == 'in_progress' || (str.contains('in') && str.contains('progress'))) return 'IN_PROGRESS';
-          if (str == 'resolved' || str == 'completed') return 'RESOLVED';
-          return 'PENDING';
-        }
-        final Map<String, int> areaComplaints = {};
-        data.forEach((key, value) {
-          if (value != null && value is Map) {
-            total++;
-            final status = normalize(value['status']);
-            if (status == 'PENDING') {
-              pending++;
-              if (value['purok'] != null) {
-                final area = value['purok'].toString();
-                areaComplaints[area] = (areaComplaints[area] ?? 0) + 1;
-              }
-            } else if (status == 'IN_PROGRESS') inProgress++;
-            else if (status == 'RESOLVED') resolved++;
-          }
-        });
-        if (mounted) {
-          setState(() {
-            _totalComplaints = total; _resolvedComplaints = resolved;
-            _pendingComplaints = pending; _inProgressComplaints = inProgress;
-            _activeHotspots = areaComplaints.values.where((count) => count > 3).length;
-          });
-        }
-      }
-    });
+    // Complaint counts come ONLY from the MySQL complaints table (get_complaints.php), the same
+    // data the Complaint Management screen shows. The legacy Firebase `complaints` node is not
+    // a source: it used to overwrite these counts with stale values.
 
     _database.ref('notifications').onValue.listen((event) {
-      if (event.snapshot.exists && event.snapshot.value != null) {
-        final Map? data = event.snapshot.value as Map?;
-        if (data == null) return;
-        int unread = 0;
-        data.forEach((key, value) {
-          if (value != null && value is Map && _isNotificationForMe(value) && value['isRead'] == false) unread++;
-        });
-        if (mounted) setState(() => _unreadNotificationsCount = unread);
-      } else { if (mounted) setState(() => _unreadNotificationsCount = 0); }
+      _ensureInbox();
+      _rawNotifications = (event.snapshot.exists && event.snapshot.value is Map) ? event.snapshot.value as Map : null;
+      _recomputeAdminUnread();
+
+      // A new resident complaint was saved: re-read the counts from MySQL.
+      int complaintNotifs = 0;
+      _rawNotifications?.forEach((k, v) {
+        if (v is Map && (v['type'] ?? '').toString() == 'RESIDENT_COMPLAINT') complaintNotifs++;
+      });
+      if (_complaintNotifCount >= 0 && complaintNotifs > _complaintNotifCount) {
+        _fetchComplaints();
+      }
+      _complaintNotifCount = complaintNotifs;
     });
+  }
+
+  int _complaintNotifCount = -1; // -1 until the first snapshot
+
+  void _ensureInbox() {
+    if (_inbox != null || _user == null) return;
+    _inbox = NotificationInbox(db: FirebaseRtdbPort(), role: 'admin', userId: _user!.userId);
+    _inboxSub = _inbox!.watch().listen((InboxState st) {
+      _inboxState = st;
+      _recomputeAdminUnread();
+    });
+  }
+
+  /// Relevant notifications minus what THIS admin dismissed/cleared (shared log untouched).
+  List<Map> _adminVisibleNotifications() {
+    final Map? data = _rawNotifications;
+    final List<Map> relevant = <Map>[];
+    data?.forEach((k, v) {
+      if (v is Map && _isNotificationForMe(v)) relevant.add(<dynamic, dynamic>{...v, 'id': k, 'key': k});
+    });
+    return NotificationInbox.visible(relevant, _inboxState);
+  }
+
+  void _recomputeAdminUnread() {
+    final int unread = NotificationInbox.unreadCount(_adminVisibleNotifications(), _inboxState);
+    if (mounted) setState(() => _unreadNotificationsCount = unread);
   }
 
   bool _isNotificationForMe(Map val) {
@@ -650,18 +664,8 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
         }
         if (mounted) {
           setState(() {
-            _totalComplaints = complaints.length;
-            _resolvedComplaints = complaints.where((c) => normalize(c['status']) == 'RESOLVED').length;
             _pendingComplaints = complaints.where((c) => normalize(c['status']) == 'PENDING').length;
             _inProgressComplaints = complaints.where((c) => normalize(c['status']) == 'IN_PROGRESS').length;
-            final Map<String, int> areaComplaints = {};
-            for (var c in complaints) {
-              if (normalize(c['status']) == 'PENDING' && c['purok'] != null) {
-                final area = c['purok'].toString();
-                areaComplaints[area] = (areaComplaints[area] ?? 0) + 1;
-              }
-            }
-            _activeHotspots = areaComplaints.values.where((count) => count > 3).length;
           });
         }
       }
@@ -724,6 +728,22 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
     return result ?? false;
   }
 
+  /// Screens the Truck Buddy help bot can open.
+  void _handleBotAction(BotAction action) {
+    final int? target = switch (action) {
+      BotAction.track => AdminDestinations.liveMap,
+      BotAction.analytics => AdminDestinations.analytics,
+      BotAction.complaints || BotAction.fileComplaint => AdminDestinations.incidents,
+      BotAction.users => AdminDestinations.users,
+      BotAction.settings => AdminDestinations.settings,
+      BotAction.routeHistory => AdminDestinations.routeHistory,
+      BotAction.routeAssignments => AdminDestinations.routeAssignments,
+      BotAction.collectionStatus || BotAction.routePlan => AdminDestinations.collectionRouteOptimization,
+      BotAction.signIn || BotAction.createAccount || BotAction.downloadApp => null, // public landing page only
+    };
+    if (target != null) setState(() => _selectedIndex = target);
+  }
+
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
@@ -739,7 +759,7 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
 
             if (_selectedIndex > 0) {
               setState(() {
-                _selectedIndex = 0;
+                _selectedIndex = _selectedIndex == AdminDestinations.routeHistory ? _routeReturn.backTarget : 0;
               });
               return;
             }
@@ -758,19 +778,36 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
               children: [
                 if (isDesktop) _buildSidebar(),
                 Expanded(
-                  child: IndexedStack(
+                  child: Stack(children: [
+                  Positioned.fill(child: IndexedStack(
                     index: _selectedIndex,
                     children: [
                       _buildMainDashboard(isMobile, isTablet),
-                      TrackTrucksScreen(isEmbedded: true, onBack: () { _refreshAllStats(); if (mounted) setState(() => _selectedIndex = 0); }),
-                      AnalyticsScreen(isEmbedded: true, onBack: () { _refreshAllStats(); if (mounted) setState(() => _selectedIndex = 0); }, onNavigate: (index) => setState(() => _selectedIndex = index)),
+                      TrackTrucksScreen(isEmbedded: true, onOpenRouteHistory: _openRouteHistory, onBack: () { _refreshAllStats(); if (mounted) setState(() => _selectedIndex = 0); }),
+                      AnalyticsScreen(isEmbedded: true, onOpenRouteHistory: _openRouteHistory, onBack: () { _refreshAllStats(); if (mounted) setState(() => _selectedIndex = 0); }, onNavigate: (index) => setState(() => _selectedIndex = index)),
                       ComplaintsScreen(isEmbedded: true, onBack: () { _refreshAllStats(); if (mounted) setState(() => _selectedIndex = 0); }),
                       UserManagementScreen(isEmbedded: true, onBack: () { _refreshAllStats(); if (mounted) setState(() => _selectedIndex = 0); }),
                       DataManagementScreen(isEmbedded: true, onBack: () { _refreshAllStats(); if (mounted) setState(() => _selectedIndex = 0); }),
                       AdminSettingsScreen(isEmbedded: true, onBack: () { _refreshAllStats(); if (mounted) setState(() => _selectedIndex = 0); }),
-                      RouteHistoryScreen(isEmbedded: true, onBack: () { _refreshAllStats(); if (mounted) setState(() => _selectedIndex = 0); }),
+                      RouteHistoryScreen(key: ValueKey('route-history-$_routeHistoryEpoch'), isEmbedded: true, initialTripId: _routeHistoryTripId, initialTrip: _routeHistoryTrip, onBack: () { _refreshAllStats(); if (mounted) setState(() => _selectedIndex = _routeReturn.backTarget); }),
+                      // Built only when opened, so drivers/areas are not fetched on every dashboard load.
+                      _selectedIndex == AdminDestinations.routeAssignments
+                          ? RouteAssignmentsScreen(isEmbedded: true, onBack: () { if (mounted) setState(() => _selectedIndex = 0); })
+                          : const SizedBox.shrink(),
+                      // Built only when opened (its listeners end when the admin leaves it).
+                      _selectedIndex == AdminDestinations.collectionRouteOptimization
+                          ? CollectionRouteOptimizationScreen(role: 'admin', isEmbedded: true, onBack: () { if (mounted) setState(() => _selectedIndex = 0); })
+                          : const SizedBox.shrink(),
                     ],
+                  )),
+                  // On every admin page; the admin can drag it out of the way.
+                  TruckChatLauncher(
+                    role: 'admin',
+                    onAction: _handleBotAction,
+                    right: isDesktop ? 28 : 16,
+                    bottom: isDesktop ? 120 : 100 + MediaQuery.paddingOf(context).bottom,
                   ),
+                  ]),
                 ),
               ],
             ),
@@ -779,6 +816,28 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
         );
       },
     );
+  }
+
+  /// Shows Route History inside the dashboard content area (sidebar / bottom navigation
+  /// stay in place). The section it was opened from is remembered for Back; every other
+  /// section keeps its state because the IndexedStack is not rebuilt.
+  void _openRouteHistory({String? tripId, DriverTrip? trip}) {
+    if (!mounted) return;
+    setState(() {
+      _routeReturn.enter(_selectedIndex);
+      _routeHistoryTripId = tripId;
+      _routeHistoryTrip = trip;
+      _routeHistoryEpoch++; // re-create the screen with the requested trip + fresh data
+      _selectedIndex = AdminDestinations.routeHistory;
+    });
+  }
+
+  /// Plain navigation to Route History (no trip): remembers where it came from.
+  void _prepareRouteHistoryEntry() {
+    _routeReturn.enter(_selectedIndex);
+    _routeHistoryTripId = null;
+    _routeHistoryTrip = null;
+    _routeHistoryEpoch++;
   }
 
   Widget _buildSidebar() {
@@ -881,21 +940,25 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
                   child: ListView(
                     padding: EdgeInsets.zero,
                     children: [
+                      // Daily operations first, then monitoring, administration, and Settings last. Database
+                      // Center is reached from System Settings → Data Management, not the sidebar.
                       _buildSidebarItem(Icons.dashboard_rounded, "Dashboard Overview", 0),
                       const SizedBox(height: 8),
                       _buildSidebarItem(Icons.map_rounded, "Fleet GIS Tracking", 1),
                       const SizedBox(height: 8),
-                      _buildSidebarItem(Icons.analytics_rounded, "System Analytics", 2),
+                      _buildSidebarItem(Icons.route_rounded, "Driver Route History", 7),
                       const SizedBox(height: 8),
-                      _buildSidebarItem(Icons.chat_bubble_rounded, "Incident Reports", 3),
+                      _buildSidebarItem(Icons.assignment_ind_rounded, "Route Assignments", AdminDestinations.routeAssignments),
+                      const SizedBox(height: 8),
+                      _buildSidebarItem(Icons.alt_route_rounded, "Collection Route Optimization", AdminDestinations.collectionRouteOptimization),
+                      const SizedBox(height: 8),
+                      _buildSidebarItem(Icons.chat_bubble_rounded, "Complaint Management", 3),
+                      const SizedBox(height: 8),
+                      _buildSidebarItem(Icons.analytics_rounded, "System Analytics", 2),
                       const SizedBox(height: 8),
                       _buildSidebarItem(Icons.people_outline_rounded, "User Management", 4),
                       const SizedBox(height: 8),
-                      _buildSidebarItem(Icons.storage_rounded, "Database Center", 5),
-                      const SizedBox(height: 8),
                       _buildSidebarItem(Icons.settings_suggest_rounded, "System Settings", 6),
-                      const SizedBox(height: 8),
-                      _buildSidebarItem(Icons.route_rounded, "Driver Route History", 7),
                     ],
                   ),
                 ),
@@ -957,7 +1020,10 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
     return _HoverZoomCard(
       onTap: () {
         if (index == 0) _refreshAllStats();
-        setState(() => _selectedIndex = index);
+        setState(() {
+          if (index == AdminDestinations.routeHistory) _prepareRouteHistoryEntry();
+          _selectedIndex = index;
+        });
       },
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 200),
@@ -1092,10 +1158,11 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
                     padding: const EdgeInsets.symmetric(horizontal: 16),
                     physics: const BouncingScrollPhysics(),
                     children: [
-                      _buildDrawerItem(Icons.chat_bubble_rounded, "Incident Reports", 3),
-                      _buildDrawerItem(Icons.people_outline_rounded, "User Accounts", 4),
-                      _buildDrawerItem(Icons.storage_rounded, "Data Management", 5),
                       _buildDrawerItem(Icons.route_rounded, "Route History", 7),
+                      _buildDrawerItem(Icons.assignment_ind_rounded, "Route Assignments", AdminDestinations.routeAssignments),
+                      _buildDrawerItem(Icons.alt_route_rounded, "Collection Route Optimization", AdminDestinations.collectionRouteOptimization),
+                      _buildDrawerItem(Icons.chat_bubble_rounded, "Complaint Management", 3),
+                      _buildDrawerItem(Icons.people_outline_rounded, "User Accounts", 4),
                     ],
                   ),
                 ),
@@ -1145,7 +1212,10 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
       onTap: () {
         Navigator.pop(context);
         if (index == 0) _refreshAllStats();
-        setState(() => _selectedIndex = index);
+        setState(() {
+          if (index == AdminDestinations.routeHistory) _prepareRouteHistoryEntry();
+          _selectedIndex = index;
+        });
       },
       leading: Icon(icon, color: isSelected ? const Color(0xFF00695C) : Colors.grey.shade600, size: 22),
       title: Text(
@@ -1242,27 +1312,6 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
                                     const SizedBox(height: 8),
                                     _buildMapWidget(true),
                                     const SizedBox(height: 16),
-                                    Padding(
-                                      padding: const EdgeInsets.only(left: 4),
-                                      child: Column(
-                                        crossAxisAlignment: CrossAxisAlignment.start,
-                                        children: [
-                                          const Text("Quick Stats",
-                                              style: TextStyle(
-                                                  fontSize: 18,
-                                                  fontWeight: FontWeight.w900,
-                                                  color: Color(0xFF1A1A1A))),
-                                          Text("System performance overview",
-                                              style: TextStyle(
-                                                  fontSize: 13,
-                                                  fontWeight: FontWeight.w600,
-                                                  color: Colors.grey.shade600)),
-                                        ],
-                                      ),
-                                    ),
-                                    const SizedBox(height: 8),
-                                    _buildSummarySection(),
-                                    const SizedBox(height: 12),
                                     _buildFleetSection(),
                                     const SizedBox(height: 16),
                                     _buildActivityLogSection(),
@@ -1405,19 +1454,6 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
                             child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  const Text("Quick Stats",
-                                      style: TextStyle(
-                                          fontSize: 20,
-                                          fontWeight: FontWeight.w900,
-                                          color: Color(0xFF1A1A1A))),
-                                  Text("System performance overview",
-                                      style: TextStyle(
-                                          fontSize: 13,
-                                          fontWeight: FontWeight.w600,
-                                          color: Colors.grey.shade600)),
-                                  const SizedBox(height: 12),
-                                  _buildSummarySection(),
-                                  const SizedBox(height: 20),
                                   _buildActivityLogSection(),
                                   const SizedBox(height: 20),
                                   _buildFleetSection()
@@ -2933,103 +2969,41 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
     ]);
   }
 
-  Widget _buildSummarySection() {
-    final bool isMobile = MediaQuery.of(context).size.width < 600;
-    final bool isTablet = MediaQuery.of(context).size.width >= 600 && MediaQuery.of(context).size.width < 1024;
-    final EdgeInsets containerPadding = EdgeInsets.symmetric(
-      horizontal: isMobile ? 16 : (isTablet ? 20 : 24),
-      vertical: isMobile ? 16 : (isTablet ? 20 : 24),
-    );
-
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.white, 
-        borderRadius: BorderRadius.circular(isMobile ? 24 : 32), 
-        boxShadow: AppTheme.balancedPulidongShadow,
-        border: Border.all(color: Colors.white, width: 2)
-      ),
-      padding: containerPadding,
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        const Row(children: [Icon(Icons.insights_rounded, color: Color(0xFF009688), size: 24), SizedBox(width: 12), Text("Performance", style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900, color: Color(0xFF1A1A1A)))]),
-        SizedBox(height: isMobile ? 16 : 24),
-        _buildModernSummaryRow("Collection Progress", "$_completedRoutesToday / $_totalRoutesToday", _totalRoutesToday > 0 ? _completedRoutesToday / _totalRoutesToday : 0.0, const Color(0xFF1E88E5)),
-        SizedBox(height: isMobile ? 14 : 20),
-        _buildModernSummaryRow("Complaint Resolution", "$_resolvedComplaints / $_totalComplaints", _totalComplaints > 0 ? _resolvedComplaints / _totalComplaints : 0.0, const Color(0xFF4CAF50)),
-        SizedBox(height: isMobile ? 16 : 24), const Divider(), SizedBox(height: isMobile ? 8 : 12),
-        _buildModernInfoRow("Average Speed", "${_averageSpeed.toStringAsFixed(1)} km/h"),
-        SizedBox(height: isMobile ? 8 : 12), _buildModernInfoRow("Active Hotspots", "$_activeHotspots Areas"),
-      ]),
-    );
-  }
-
-  Widget _buildModernSummaryRow(String label, String value, double progress, Color color) {
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text(label, style: TextStyle(color: Colors.grey.shade600, fontSize: 13, fontWeight: FontWeight.w700)), Text(value, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 13))]),
-      const SizedBox(height: 10),
-      ClipRRect(borderRadius: BorderRadius.circular(10), child: LinearProgressIndicator(value: progress, backgroundColor: Colors.grey.shade100, valueColor: AlwaysStoppedAnimation<Color>(color), minHeight: 8)),
-    ]);
-  }
-
-  Widget _buildModernInfoRow(String label, String value) {
-    return Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text(label, style: TextStyle(color: Colors.grey.shade600, fontSize: 13, fontWeight: FontWeight.w700)), Text(value, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 14))]);
-  }
-
   Widget _buildAdminActionsGrid(bool isMobile) {
+    // The list lives in utils/admin_quick_actions.dart so Android, Web and both layouts
+    // always show the same actions.
+    final List<Widget> cards = kAdminQuickActions
+        .map((AdminQuickAction a) => _buildModernActionCard(a.title, a.subtitle, a.icon, a.color,
+            onTap: () => setState(() {
+              if (a.targetIndex == AdminDestinations.routeHistory) _prepareRouteHistoryEntry();
+              _selectedIndex = a.targetIndex;
+            })))
+        .toList();
+
+    final Widget header = Padding(
+      padding: EdgeInsets.only(left: 4, bottom: isMobile ? 12 : 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text("Quick Actions",
+              style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900, color: Color(0xFF1A1A1A))),
+          Text("Manage system components and data",
+              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Colors.grey.shade600)),
+        ],
+      ),
+    );
+
     if (isMobile) {
-      return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Padding(
-            padding: const EdgeInsets.only(left: 4, bottom: 12),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text("Quick Actions",
-                    style: TextStyle(
-                        fontSize: 20,
-                        fontWeight: FontWeight.w900,
-                        color: Color(0xFF1A1A1A))),
-                Text("Manage system components and data",
-                    style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                        color: Colors.grey.shade600)),
-              ],
-            )),
-        _buildModernActionCard("Analytics", "View system performance",
-            Icons.bar_chart_rounded, const Color(0xFF1E88E5),
-            onTap: () => setState(() => _selectedIndex = 2)),
-        const SizedBox(height: 10),
-        _buildModernActionCard("Users", "Manage account access",
-            Icons.people_outline_rounded, const Color(0xFF8E24AA),
-            onTap: () => setState(() => _selectedIndex = 4)),
-        const SizedBox(height: 12),
-        _buildModernActionCard("Database Center", "System record management",
-            Icons.storage_rounded, const Color(0xFF009688),
-            onTap: () => setState(() => _selectedIndex = 5)),
-        const SizedBox(height: 12),
-        _buildModernActionCard("Incidents", "Review resident reports",
-            Icons.chat_bubble_rounded, const Color(0xFFE53935),
-            onTap: () => setState(() => _selectedIndex = 3)),
-      ]);
+      final List<Widget> column = <Widget>[header];
+      for (int i = 0; i < cards.length; i++) {
+        if (i > 0) column.add(const SizedBox(height: 12));
+        column.add(cards[i]);
+      }
+      return Column(crossAxisAlignment: CrossAxisAlignment.start, children: column);
     }
 
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Padding(
-          padding: const EdgeInsets.only(left: 4, bottom: 16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text("Quick Actions",
-                  style: TextStyle(
-                      fontSize: 20,
-                      fontWeight: FontWeight.w900,
-                      color: Color(0xFF1A1A1A))),
-              Text("Manage system components and data",
-                  style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                      color: Colors.grey.shade600)),
-            ],
-          )),
+      header,
       GridView.count(
         shrinkWrap: true,
         physics: const NeverScrollableScrollPhysics(),
@@ -3037,20 +3011,7 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
         crossAxisSpacing: 16,
         mainAxisSpacing: 12,
         childAspectRatio: 2.8,
-        children: [
-          _buildModernActionCard("Analytics", "View system performance",
-              Icons.bar_chart_rounded, const Color(0xFF1E88E5),
-              onTap: () => setState(() => _selectedIndex = 2)),
-          _buildModernActionCard("Users", "Manage account access",
-              Icons.people_outline_rounded, const Color(0xFF8E24AA),
-              onTap: () => setState(() => _selectedIndex = 4)),
-          _buildModernActionCard("Database Center", "System record management",
-              Icons.storage_rounded, const Color(0xFF009688),
-              onTap: () => setState(() => _selectedIndex = 5)),
-          _buildModernActionCard("Incidents", "Review resident reports",
-              Icons.chat_bubble_rounded, const Color(0xFFE53935),
-              onTap: () => setState(() => _selectedIndex = 3)),
-        ],
+        children: cards,
       ),
     ]);
   }
@@ -3099,7 +3060,7 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
                         fontSize: 13,
                         color: Colors.grey.shade500,
                         fontWeight: FontWeight.w500),
-                    maxLines: 1,
+                    maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                   ),
                 ],
@@ -3163,7 +3124,10 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
     return _HoverZoomLink(
       onTap: () {
         if (index == 0) _refreshAllStats();
-        setState(() => _selectedIndex = index);
+        setState(() {
+          if (index == AdminDestinations.routeHistory) _prepareRouteHistoryEntry();
+          _selectedIndex = index;
+        });
       },
       child: Center(
         child: AnimatedContainer(
@@ -3199,9 +3163,9 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
     );
   }
 
-  void _handleNotificationClick(Map item) {
+  void _handleNotificationClick(Map item, {bool closePanel = true}) {
     if (!mounted) return;
-    Navigator.pop(context);
+    if (closePanel) Navigator.pop(context);
 
     final String type = (item['type'] ?? '').toString().toUpperCase();
     final String title = (item['title'] ?? '').toString().toUpperCase();
@@ -3239,524 +3203,26 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
              message.contains('MAP')) {
       setState(() => _selectedIndex = 1);
     }
-    // 3 & 4. Complaint or Driver Report -> Incidents Report Page (Index 3)
+    // 3 & 4. Complaint or Driver Report -> Complaint Management (Index 3)
     else {
       setState(() => _selectedIndex = 3);
     }
   }
 
+  /// Shared notification center: swipe to remove, Clear all, Mark all read.
   void _showNotificationsModal(BuildContext context) {
-    // Clear badge immediately when modal opens
-    _markAllAdminNotificationsAsRead();
-
-    final GlobalKey<AnimatedListState> listKey = GlobalKey<AnimatedListState>();
-    List<Map> notifications = [];
-    bool isClearingAll = false;
-
-    // Selection State
-    bool isSelectionMode = false;
-    Set<String> selectedKeys = {};
-    bool isModalLoading = true;
-    bool timerStarted = false;
-
-    showDialog(
-      context: context,
-      builder: (context) {
-        return StatefulBuilder(
-          builder: (context, setModalState) {
-            if (isModalLoading && !timerStarted) {
-              timerStarted = true;
-              Future.delayed(const Duration(milliseconds: 500), () {
-                if (mounted) {
-                  setModalState(() => isModalLoading = false);
-                }
-              });
-            }
-
-            void toggleSelection(String key) {
-              setModalState(() {
-                if (selectedKeys.contains(key)) {
-                  selectedKeys.remove(key);
-                } else {
-                  selectedKeys.add(key);
-                }
-              });
-            }
-
-            void cancelSelection() {
-              setModalState(() {
-                isSelectionMode = false;
-                selectedKeys.clear();
-              });
-            }
-
-            void selectAll() {
-              setModalState(() {
-                for (var n in notifications) {
-                  selectedKeys.add((n['id'] ?? n['key']).toString());
-                }
-              });
-            }
-
-            Future<void> deleteSelected() async {
-              if (selectedKeys.isEmpty) return;
-              bool confirmed = await _showConfirmDialog(
-                title: "Delete Selected?",
-                message: "Remove ${selectedKeys.length} selected alerts permanently?",
-                isDestructive: true,
-              );
-
-              if (confirmed) {
-                setModalState(() => isClearingAll = true);
-                final keysToRemove = List<String>.from(selectedKeys);
-
-                for (String key in keysToRemove) {
-                  int idx = notifications.indexWhere((n) => (n['id'] ?? n['key']).toString() == key);
-                  if (idx != -1) {
-                    final removedItem = notifications[idx];
-                    notifications.removeAt(idx);
-
-                    listKey.currentState?.removeItem(
-                      idx,
-                      (context, animation) => SlideTransition(
-                        position: animation.drive(Tween<Offset>(begin: const Offset(1.5, 0.0), end: Offset.zero)),
-                        child: FadeTransition(
-                          opacity: animation,
-                          child: SizeTransition(
-                            sizeFactor: animation,
-                            axisAlignment: -1.0,
-                            child: _buildNotificationItem(removedItem, const AlwaysStoppedAnimation(1.0)),
-                          ),
-                        ),
-                      ),
-                      duration: const Duration(milliseconds: 300),
-                    );
-                    _database.ref('notifications/$key').remove();
-                    await Future.delayed(const Duration(milliseconds: 80));
-                  }
-                }
-
-                setModalState(() {
-                  selectedKeys.clear();
-                  isSelectionMode = false;
-                  isClearingAll = false;
-                });
-                _showSnackBar("Successfully deleted selected notifications");
-              }
-            }
-
-            return Dialog(
-              backgroundColor: Colors.white,
-              surfaceTintColor: Colors.white,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(32)),
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 300),
-                curve: Curves.easeInOutCubic,
-                clipBehavior: Clip.antiAlias,
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(32),
-                ),
-                constraints: BoxConstraints(
-                  maxWidth: (MediaQuery.of(context).size.width * 0.92).clamp(320.0, 580.0),
-                  maxHeight: isModalLoading
-                      ? 350
-                      : MediaQuery.of(context).size.height * 0.80,
-                ),
-                padding: const EdgeInsets.fromLTRB(0, 16, 0, 24),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 24),
-                      child: Row(
-                        children: [
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  isSelectionMode ? "Select Alerts" : "Notifications",
-                                  style: const TextStyle(
-                                    fontSize: 20,
-                                    fontWeight: FontWeight.w900,
-                                    color: Color(0xFF00695C),
-                                  ),
-                                ),
-                                const SizedBox(height: 4),
-                                Text(
-                                  isSelectionMode
-                                      ? "${selectedKeys.length} alerts selected"
-                                      : "Stay updated with system events and alerts.",
-                                  style: const TextStyle(
-                                    color: Colors.grey,
-                                    fontSize: 13,
-                                    fontWeight: FontWeight.w500,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                          IconButton(
-                            onPressed: () => Navigator.pop(context),
-                            icon: const Icon(Icons.close_rounded, color: Colors.grey),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const Padding(
-                      padding: EdgeInsets.symmetric(horizontal: 24),
-                      child: Divider(height: 24),
-                    ),
-                    if (isModalLoading)
-                      const Expanded(
-                        child: Center(
-                          child: Padding(
-                            padding: EdgeInsets.all(40),
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                CircularProgressIndicator(color: AppColors.tealText),
-                                SizedBox(height: 16),
-                                Text(
-                                  "Loading notifications...",
-                                  style: TextStyle(
-                                    fontSize: 14,
-                                    color: Colors.grey,
-                                    fontWeight: FontWeight.w500,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      )
-                    else
-                      Flexible(
-                        child: StreamBuilder<DatabaseEvent>(
-                          stream: _database.ref('notifications').onValue,
-                          builder: (context, snapshot) {
-                            if (snapshot.connectionState == ConnectionState.waiting && notifications.isEmpty) {
-                              return const Center(
-                                child: Padding(
-                                  padding: EdgeInsets.all(40),
-                                  child: Column(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      CircularProgressIndicator(color: AppColors.tealText),
-                                      SizedBox(height: 16),
-                                      Text(
-                                        "Loading notifications...",
-                                        style: TextStyle(fontSize: 14, color: Colors.grey, fontWeight: FontWeight.w500),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              );
-                            }
-                            if (snapshot.hasData && snapshot.data!.snapshot.exists) {
-                              if (!isClearingAll) {
-                                final Map data = snapshot.data!.snapshot.value as Map;
-                                List<Map> newList = [];
-                                data.forEach((k, v) {
-                                  final val = v as Map;
-                                  if (_isNotificationForMe(val)) {
-                                    newList.add({...val, 'id': k, 'key': k});
-                                  }
-                                });
-
-                                newList.sort((a, b) => (b['timestamp'] ?? 0).compareTo(a['timestamp'] ?? 0));
-                                notifications = newList;
-                              }
-
-                              return Column(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  // Action Toolbar (Only shown in Selection Mode)
-                                  if (isSelectionMode && notifications.isNotEmpty && !isClearingAll)
-                                    Padding(
-                                      padding: const EdgeInsets.fromLTRB(24, 0, 24, 16),
-                                      child: Row(
-                                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                        children: [
-                                          _HoverZoomLink(
-                                            onTap: selectAll,
-                                            child: Text(
-                                              selectedKeys.length == notifications.length ? "All Selected" : "Select All",
-                                              style: const TextStyle(
-                                                color: Color(0xFF00695C),
-                                                fontWeight: FontWeight.w800,
-                                                fontSize: 13,
-                                              ),
-                                            ),
-                                          ),
-                                          Row(
-                                            children: [
-                                              if (selectedKeys.isNotEmpty)
-                                                _HoverZoomLink(
-                                                  onTap: deleteSelected,
-                                                  child: const Text(
-                                                    "Delete",
-                                                    style: TextStyle(
-                                                      color: Colors.red,
-                                                      fontWeight: FontWeight.w900,
-                                                      fontSize: 13,
-                                                    ),
-                                                  ),
-                                                ),
-                                              const SizedBox(width: 16),
-                                              _HoverZoomLink(
-                                                onTap: cancelSelection,
-                                                child: const Text(
-                                                  "Cancel",
-                                                  style: TextStyle(
-                                                    color: Colors.grey,
-                                                    fontWeight: FontWeight.w800,
-                                                    fontSize: 13,
-                                                  ),
-                                                ),
-                                              ),
-                                            ],
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                  if (notifications.isEmpty && !isClearingAll)
-                                    _buildEmptyState()
-                                  else
-                                    Flexible(
-                                      child: Stack(
-                                        children: [
-                                          if (isClearingAll)
-                                            Positioned.fill(child: Center(child: _buildEmptyState())),
-                                          ClipRect(
-                                            child: SingleChildScrollView(
-                                              physics: const BouncingScrollPhysics(),
-                                              clipBehavior: Clip.none,
-                                              padding: const EdgeInsets.symmetric(horizontal: 24),
-                                              child: AnimatedList(
-                                                key: listKey,
-                                                shrinkWrap: true,
-                                                physics: const NeverScrollableScrollPhysics(),
-                                                initialItemCount: notifications.length,
-                                                itemBuilder: (context, index, animation) {
-                                                  if (index >= notifications.length) return const SizedBox();
-                                                  final item = notifications[index];
-                                                  final String key = (item['id'] ?? item['key']).toString();
-                                                  return _buildDismissibleNotification(
-                                                    item,
-                                                    index,
-                                                    listKey,
-                                                    setModalState,
-                                                    isSelectionMode: isSelectionMode,
-                                                    isSelected: selectedKeys.contains(key),
-                                                    onDoubleTap: Responsive.isDesktop(context)
-                                                        ? () {
-                                                            setModalState(() {
-                                                              isSelectionMode = true;
-                                                              selectedKeys.add(key);
-                                                            });
-                                                          }
-                                                        : null,
-                                                    onLongPress: !Responsive.isDesktop(context)
-                                                        ? () {
-                                                            setModalState(() {
-                                                              isSelectionMode = true;
-                                                              selectedKeys.add(key);
-                                                            });
-                                                          }
-                                                        : null,
-                                                    onTap: () {
-                                                      if (isSelectionMode) {
-                                                        toggleSelection(key);
-                                                      } else {
-                                                        _handleNotificationClick(item);
-                                                      }
-                                                    },
-                                                  );
-                                                },
-                                              ),
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                ],
-                              );
-                            }
-                            return _buildEmptyState();
-                          },
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-            );
-          },
-        );
-      },
+    final NotificationInbox? inbox = _inbox;
+    if (inbox == null) return;
+    showNotificationCenter(
+      context,
+      source: _database.ref('notifications').onValue.map((DatabaseEvent e) => e.snapshot.value),
+      isRelevant: _isNotificationForMe,
+      inbox: inbox,
+      onOpen: (Map item) => _handleNotificationClick(item, closePanel: false),
     );
   }
 
-  Widget _buildEmptyState() {
-    return const Column(children: [
-      SizedBox(height: 48),
-      CircleAvatar(radius: 40, backgroundColor: Color(0xFFF5F5F5), child: Icon(Icons.notifications_rounded, size: 40, color: Colors.grey)),
-      SizedBox(height: 16),
-      Text("No alerts found.", style: TextStyle(fontWeight: FontWeight.w900, color: Colors.grey)),
-      SizedBox(height: 48),
-    ]);
-  }
 
-  Widget _buildDismissibleNotification(Map item, int index, GlobalKey<AnimatedListState> listKey, StateSetter setModalState, {bool isSelectionMode = false, bool isSelected = false, VoidCallback? onTap, VoidCallback? onDoubleTap, VoidCallback? onLongPress}) {
-    final bool isMobile = MediaQuery.of(context).size.width < 600;
-    return Padding(
-      padding: EdgeInsets.only(bottom: isMobile ? 8.0 : 10.0),
-      child: Dismissible(
-        key: Key(item['id'].toString()),
-        direction: isSelectionMode ? DismissDirection.none : DismissDirection.horizontal,
-        confirmDismiss: (direction) async {
-          return await _showConfirmDialog(
-            title: "Delete Alert?",
-            message: "This notification will be permanently removed.",
-            isDestructive: true,
-          );
-        },
-        onDismissed: (direction) {
-          final String key = item['id'].toString();
-          _database.ref('notifications/$key').remove();
-          _showSnackBar("Notification deleted successfully");
-        },
-        background: _buildSwipeBackground(Alignment.centerLeft),
-        secondaryBackground: _buildSwipeBackground(Alignment.centerRight),
-        child: _buildNotificationItem(item, const AlwaysStoppedAnimation(1.0), isSelectionMode: isSelectionMode, isSelected: isSelected, onTap: onTap, onDoubleTap: onDoubleTap, onLongPress: onLongPress),
-      ),
-    );
-  }
-
-  Widget _buildSwipeBackground(Alignment alignment) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 0, left: 10, right: 10),
-      padding: const EdgeInsets.symmetric(horizontal: 20),
-      decoration: BoxDecoration(color: Colors.red.shade50, borderRadius: BorderRadius.circular(24)),
-      alignment: alignment,
-      child: Icon(Icons.delete_outline_rounded, color: Colors.red.shade400),
-    );
-  }
-
-  Widget _buildNotificationItem(Map item, Animation<double> animation, {bool isSelectionMode = false, bool isSelected = false, VoidCallback? onTap, VoidCallback? onDoubleTap, VoidCallback? onLongPress}) {
-    final bool isRead = item['isRead'] ?? false;
-    final String type = (item['type'] ?? '').toString();
-
-    final double screenWidth = MediaQuery.of(context).size.width;
-    final bool isMobile = screenWidth < 600;
-    final bool isTablet = screenWidth >= 600 && screenWidth < 1024;
-
-    final double cardRadius = isMobile ? 16.0 : (isTablet ? 18.0 : 20.0);
-    final double contentPaddingH = isMobile ? 12.0 : (isTablet ? 14.0 : 16.0);
-    final double contentPaddingV = isMobile ? 6.0 : (isTablet ? 8.0 : 10.0);
-
-    final double iconBoxPadding = isMobile ? 8.0 : (isTablet ? 9.0 : 10.0);
-    final double iconBoxRadius = isMobile ? 12.0 : 14.0;
-    final double iconSize = isMobile ? 18.0 : (isTablet ? 20.0 : 22.0);
-
-    final double titleFontSize = isMobile ? 13.5 : (isTablet ? 14.5 : 15.0);
-    final double subtitleFontSize = isMobile ? 11.5 : (isTablet ? 12.0 : 12.5);
-    
-    IconData icon = Icons.notifications_rounded;
-    Color iconColor = const Color(0xFF00BFA5);
-    
-    if (type == 'DRIVER_ISSUE') {
-      icon = Icons.error_rounded;
-      iconColor = Colors.red;
-    } else if (type == 'RESIDENT_COMPLAINT') {
-      icon = Icons.warning_rounded;
-      iconColor = Colors.orange;
-    }
-
-    return FadeTransition(
-      opacity: animation,
-      child: SizeTransition(
-        sizeFactor: animation,
-        child: _HoverZoomCard(
-          onTap: onTap,
-          child: GestureDetector(
-            onDoubleTap: onDoubleTap,
-            onLongPress: onLongPress,
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 200),
-              margin: const EdgeInsets.symmetric(horizontal: 2),
-              decoration: BoxDecoration(
-                color: isSelected ? const Color(0xFFE0F2F1) : Colors.white,
-                borderRadius: BorderRadius.circular(cardRadius),
-                border: Border.all(color: isSelected ? const Color(0xFF00796B) : Colors.grey.shade200, width: isSelected ? 2 : 1),
-                boxShadow: [BoxShadow(color: Colors.black.withAlpha(5), blurRadius: 6, offset: const Offset(0, 2))],
-              ),
-              child: Stack(
-                children: [
-                  ListTile(
-                    dense: true,
-                    contentPadding: EdgeInsets.symmetric(horizontal: contentPaddingH, vertical: contentPaddingV),
-                    leading: Container(
-                      padding: EdgeInsets.all(iconBoxPadding),
-                      decoration: BoxDecoration(
-                        color: isSelected ? const Color(0xFF00796B).withOpacity(0.1) : const Color(0xFFF5F5F5),
-                        borderRadius: BorderRadius.circular(iconBoxRadius),
-                      ),
-                      child: Icon(icon, color: iconColor, size: iconSize),
-                    ),
-                    title: Text(
-                      item['title'] ?? 'Alert',
-                      style: TextStyle(
-                        fontWeight: FontWeight.w800,
-                        fontSize: titleFontSize,
-                        color: const Color(0xFF1A1A1A),
-                      ),
-                    ),
-                    subtitle: Padding(
-                      padding: const EdgeInsets.only(top: 2),
-                      child: Text(
-                        item['message'] ?? '',
-                        style: TextStyle(
-                          fontSize: subtitleFontSize,
-                          color: const Color(0xFF666666),
-                          fontWeight: FontWeight.w500,
-                          height: 1.25,
-                        ),
-                      ),
-                    ),
-                  ),
-                  if (isSelectionMode)
-                    Positioned(
-                      top: 6,
-                      right: 6,
-                      child: Icon(
-                        isSelected ? Icons.check_circle_rounded : Icons.radio_button_unchecked_rounded,
-                        color: const Color(0xFF00796B),
-                        size: isMobile ? 18.0 : 20.0,
-                      ),
-                    ),
-                  if (!isRead && !isSelectionMode)
-                    Positioned(
-                      top: 8,
-                      right: 8,
-                      child: Container(
-                        width: isMobile ? 6.0 : 8.0,
-                        height: isMobile ? 6.0 : 8.0,
-                        decoration: const BoxDecoration(
-                          color: Color(0xFF00796B),
-                          shape: BoxShape.circle,
-                        ),
-                      ),
-                    ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
 
   void _showSnackBar(String message) {
     CustomNotification.showTopNotification(context, message, false);
@@ -3814,93 +3280,20 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
     ) ?? false;
   }
 
-  void _markAllAdminNotificationsAsRead() async {
-    try {
-      final snap = await _database.ref('notifications').get();
-      if (snap.exists && snap.value != null) {
-        final Map data = snap.value as Map;
-        final Map<String, dynamic> updates = {};
-        data.forEach((k, v) {
-          if (_isNotificationForMe(v as Map) && v['isRead'] == false) {
-            updates['notifications/$k/isRead'] = true;
-          }
-        });
-        if (updates.isNotEmpty) {
-          await _database.ref().update(updates);
-        }
-      }
-    } catch (e) {
-      debugPrint("Error clearing notification badge: $e");
+
+  Future<void> _showLogoutDialog(BuildContext context) async {
+    final LogoutChoice choice = await showLogoutChoiceDialog(context);
+    if (choice == LogoutChoice.cancel || !mounted) return;
+    await SystemLogger.logEvent("LOGOUT", "Admin session ended");
+    NotificationService.stopListening();
+    await SessionManager.logout(forgetLogin: choice == LogoutChoice.forget, keepSignedIn: choice == LogoutChoice.remember || choice == LogoutChoice.switchAccount);
+    await RoutePersistenceManager.clearLastRoute();
+    if (mounted) {
+      CustomNotification.showTopNotification(context, "Logout successful", false);
+      Navigator.pushNamedAndRemoveUntil(context, '/login', (route) => false);
     }
   }
 
-  void _showLogoutDialog(BuildContext context) {
-    showDialog(
-      context: context,
-      builder: (context) => Dialog(
-        backgroundColor: Colors.white,
-        surfaceTintColor: Colors.white,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(32)),
-        child: Container(
-          constraints: const BoxConstraints(maxWidth: 400),
-          padding: const EdgeInsets.all(32),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.logout_rounded, color: Colors.redAccent, size: 48),
-              const SizedBox(height: 24),
-              const Text("Logout?", style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900)),
-              const SizedBox(height: 16),
-              Text(
-                "Are you sure you want to end your current session?",
-                textAlign: TextAlign.center,
-                style: TextStyle(color: Colors.grey.shade600, fontSize: 14, height: 1.5),
-              ),
-              const SizedBox(height: 32),
-              Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton(
-                      onPressed: () => Navigator.pop(context),
-                      style: OutlinedButton.styleFrom(
-                        side: const BorderSide(color: Colors.grey),
-                        padding: const EdgeInsets.symmetric(vertical: 16),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                      ),
-                      child: const Text("CANCEL", style: TextStyle(color: Colors.grey, fontWeight: FontWeight.w900)),
-                    ),
-                  ),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: ElevatedButton(
-                      onPressed: () async {
-                        await SystemLogger.logEvent("LOGOUT", "Admin session ended");
-                        NotificationService.stopListening();
-                        await SessionManager.logout();
-                        await RoutePersistenceManager.clearLastRoute();
-                        if (mounted) {
-                          CustomNotification.showTopNotification(context, "Logout successful", false);
-                          Navigator.pushNamedAndRemoveUntil(context, '/login', (route) => false);
-                        }
-                      },
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.red,
-                        foregroundColor: Colors.white,
-                        elevation: 0,
-                        padding: const EdgeInsets.symmetric(vertical: 16),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                      ),
-                      child: const Text("LOGOUT", style: TextStyle(fontWeight: FontWeight.w900)),
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
 }
 
 class _HoverZoomCard extends StatefulWidget {

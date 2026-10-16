@@ -46,3 +46,20 @@ app.*.map.json
 
 # Agent Artifacts
 .artifacts/
+
+# Server-only secrets / local data (never commit)
+/backend/auth_config.php
+/backend/approval_config.php
+/backend/backups/
+*.keystore
+*.jks
+key.properties
+local.properties
+/backend/email_credentials.php
+
+# Mapbox build values (public pk. token of the destination account). Never commit; never put an sk. token here.
+/config/mapbox.local.json
+/config/*.local.json
+
+# Release packages produced by scripts/build_release.ps1 (contain the public token).
+/deploy_prep/out/

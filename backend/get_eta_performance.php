@@ -24,7 +24,15 @@ try {
     if ($tripCheck->rowCount() > 0) $hasTripHistory = true;
 
     $notifCheck = $conn->query("SHOW TABLES LIKE 'notifications'");
-    if ($notifCheck->rowCount() > 0) $hasNotifications = true;
+    if ($notifCheck->rowCount() > 0) {
+        // Older production schemas have a notifications table without created_at/message;
+        // only match notifications when both columns exist (otherwise: trip start, 'Auto').
+        $notifCols = [];
+        foreach ($conn->query("DESCRIBE notifications")->fetchAll(PDO::FETCH_ASSOC) as $col) {
+            $notifCols[] = strtolower($col['Field'] ?? '');
+        }
+        $hasNotifications = in_array('created_at', $notifCols, true) && in_array('message', $notifCols, true);
+    }
 
     // 1. Fetch Real Driver Trips
     if ($hasTripHistory) {

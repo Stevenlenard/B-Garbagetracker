@@ -1,0 +1,18 @@
+{
+  "_status": "DRAFT - DO NOT APPLY. Requires (a) every Driver runtime on the new APK and (b) a client change so each live write is ONE transaction (server timestamps inside the transaction); see ROLLOUT_PLAN.md stage 2.",
+  "_note": "Everything not listed here keeps the Stage 1 behaviour. No Firebase Auth is involved, so this stops stale/duplicate runtimes that follow the protocol and ALL clients that do not (older APKs, scripts), but it cannot prove WHO a caller is.",
+  "rules": {
+    "truck_locations": {
+      "$truck": {
+        ".write": "!newData.exists() || (newData.child('owner_epoch').val() === root.child('driver_sessions').child(newData.child('driver_id').val() + '').child('epoch').val() && newData.child('owner_token').val() === root.child('driver_sessions').child(newData.child('driver_id').val() + '').child('token').val() && newData.child('wseq').val() === (data.child('wseq').exists() ? data.child('wseq').val() : 0) + 1) || (newData.child('status').val() === 'OFFLINE' && newData.child('isOnline').val() === false)"
+      }
+    },
+    "users": {
+      "$uid": {
+        "isOnline": {
+          ".write": true
+        }
+      }
+    }
+  }
+}

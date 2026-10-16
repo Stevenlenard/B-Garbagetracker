@@ -1,13 +1,18 @@
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'screens/route_history_entry.dart';
+import 'package:flutter/foundation.dart' show kIsWeb, debugPrint, DebugPrintCallback;
 import 'package:flutter/material.dart';
+import 'utils/app_navigator.dart';
 import 'package:firebase_core/firebase_core.dart';
-import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart' hide Size;
+import 'config/mapbox_config.dart';
+import 'config/app_config.dart';
 import 'utils/app_localizations.dart';
+import 'utils/tracking_telemetry.dart';
 import 'services/notification_service.dart';
 import 'screens/login_screen.dart';
 import 'screens/admin_dashboard.dart';
 import 'screens/resident_dashboard.dart';
 import 'screens/driver_dashboard.dart';
+import 'widgets/role_gate.dart';
 import 'screens/register_choice_screen.dart';
 import 'screens/resident_register.dart';
 import 'screens/driver_register.dart';
@@ -26,19 +31,33 @@ void main() async {
   // Trigger Rebuild
   WidgetsFlutterBinding.ensureInitialized();
 
+  // Explicit test mode (--dart-define=GT_TEST_MODE=true) must be fully configured,
+  // and test overrides are never accepted without it. Otherwise the app refuses to
+  // start: it never silently falls back to production Firebase or Hostinger.
+  final List<String> configProblems = AppConfig.validate();
+  if (configProblems.isNotEmpty) {
+    runApp(_ConfigErrorApp(problems: configProblems));
+    return;
+  }
+
+  if (AppConfig.isTestMode) {
+    // Test sessions never log precise GPS positions, including the app's existing debug output.
+    final DebugPrintCallback original = debugPrint;
+    debugPrint = (String? message, {int? wrapWidth}) =>
+        original(AppConfig.scrubForLogs(message), wrapWidth: wrapWidth);
+  }
+
   // Initialize Localizations
   await AppLocalizations.init();
 
-  // Initialize Notifications
-  await NotificationService.init();
-  NotificationService.startPersistentListening();
-
-  // Set Mapbox Access Token
-  MapboxOptions.setAccessToken("pk.eyJ1IjoicHJpbmNlNjcwMyIsImEiOiJjbW9zeHB2ODIwNDFnMnRwdWxsam9sYWJmIn0.8DQhyf9Z9-yP8lCuP2WS3g");
+  // Mapbox: the destination account's public token from --dart-define (no built-in fallback).
+  MapboxConfig.applyAccessToken();
 
   // Initialize Firebase with the config from google-services.json
+  try {
   await Firebase.initializeApp(
-    options: const FirebaseOptions(
+    // Production options by default (unchanged); the isolated test project only in explicit test mode.
+    options: AppConfig.isTestMode ? AppConfig.testFirebaseOptions : const FirebaseOptions(
       apiKey: "AIzaSyAMvvefK0z-cpBLdWQaNpRvDfGtqv0GFe4",
       appId: "1:410975851749:android:56415852013793e1b2300c", // Using Android App ID for compatibility
       messagingSenderId: "410975851749",
@@ -46,8 +65,55 @@ void main() async {
       databaseURL: "https://garbagesis-78d39-default-rtdb.asia-southeast1.firebasedatabase.app",
     ),
   );
-  
+  } catch (e) {
+    if (!AppConfig.isTestMode) rethrow; // production behaviour unchanged
+    runApp(const _ConfigErrorApp(problems: ['Firebase initialisation failed. Check the GT_FIREBASE_* values.']));
+    return;
+  }
+
+  // In test mode, confirm the initialised app really is the configured test project.
+  if (!AppConfig.firebaseTargetMatches(Firebase.app().options)) {
+    runApp(const _ConfigErrorApp(problems: ['Initialised Firebase project does not match the configured test project.']));
+    return;
+  }
+
+  // Notifications read the Realtime Database, so they start only after Firebase is configured.
+  await NotificationService.init();
+  NotificationService.startPersistentListening();
+  TrackingTelemetry.init(); // no-op unless test mode + GT_TELEMETRY=true
+
   runApp(const MyApp());
+}
+
+/// Shown instead of the app when the build-time configuration is unsafe or incomplete.
+/// Lists the names of the offending keys only, never their values.
+class _ConfigErrorApp extends StatelessWidget {
+  final List<String> problems;
+  const _ConfigErrorApp({required this.problems});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      home: Scaffold(
+        body: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Test configuration error', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                const SizedBox(height: 12),
+                const Text('The app did not start, so no production Firebase or backend was contacted.'),
+                const SizedBox(height: 12),
+                for (final String p in problems) Padding(padding: const EdgeInsets.only(bottom: 6), child: Text('• $p')),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class MyApp extends StatelessWidget {
@@ -59,6 +125,7 @@ class MyApp extends StatelessWidget {
       final String path = Uri.base.path.toLowerCase();
 
       // Honor explicit web requests for authentication or app screens
+      if (fragment.contains('login_new')) return '/login_new'; // fresh sign-in (no saved accounts)
       if (fragment.contains('login') || path.endsWith('/login')) {
         return '/login';
       }
@@ -67,6 +134,9 @@ class MyApp extends StatelessWidget {
       }
       if (fragment.contains('admin_dashboard') || path.endsWith('/admin_dashboard')) {
         return '/admin_dashboard';
+      }
+      if (fragment.contains('route_history') || path.endsWith('/route_history')) {
+        return '/route_history';
       }
       if (fragment.contains('resident_dashboard') || path.endsWith('/resident_dashboard')) {
         return '/resident_dashboard';
@@ -107,11 +177,16 @@ class MyApp extends StatelessWidget {
     return MaterialApp(
       title: 'Garbage Truck Tracker',
       debugShowCheckedModeBanner: false,
+      // Visible ribbon in explicit test mode so a test session is never mistaken for production.
+      builder: (context, child) => AppConfig.isTestMode
+          ? Banner(message: 'TEST', location: BannerLocation.topEnd, child: child ?? const SizedBox.shrink())
+          : (child ?? const SizedBox.shrink()),
       restorationScopeId: 'app',
       theme: ThemeData(
         primarySwatch: Colors.green,
         useMaterial3: true,
       ),
+      navigatorKey: appNavigatorKey, // lets a tapped notification open the dashboard
       initialRoute: _getInitialRoute(),
       onGenerateRoute: (settings) {
         if (settings.name == '/tracking' || settings.name == '/gis' || settings.name == '/web_tracking') {
@@ -126,21 +201,22 @@ class MyApp extends StatelessWidget {
         '/splash': (context) => const SplashScreen(),
         '/': (context) => kIsWeb ? const StandaloneGisWebScreen() : const LoginScreen(),
         '/login': (context) => const LoginScreen(),
+        '/login_new': (context) => const LoginScreen(startFresh: true),
         '/tracking': (context) => const StandaloneGisWebScreen(),
         '/gis': (context) => const StandaloneGisWebScreen(),
         '/web_tracking': (context) => const StandaloneGisWebScreen(),
-        '/admin_dashboard': (context) => const AdminDashboard(),
-        '/resident_dashboard': (context) => const ResidentDashboard(),
-        '/driver_dashboard': (context) => const DriverDashboard(),
+        '/admin_dashboard': (context) => const RoleGate(roles: {'admin'}, child: AdminDashboard()),
+        '/resident_dashboard': (context) => const RoleGate(roles: {'resident'}, child: ResidentDashboard()),
+        '/driver_dashboard': (context) => const RoleGate(roles: {'driver'}, child: DriverDashboard()),
         '/register': (context) => const RegisterChoiceScreen(),
         '/register_resident': (context) => const ResidentRegisterScreen(),
         '/register_driver': (context) => const DriverRegisterScreen(),
-        '/complaints': (context) => const ComplaintsScreen(),
-        '/analytics': (context) => const AnalyticsScreen(),
-        '/user_management': (context) => const UserManagementScreen(),
-        '/route_history': (context) => const RouteHistoryScreen(),
-        '/file_complaint': (context) => const FileComplaintScreen(),
-        '/track_trucks': (context) => const ResidentTrackTruckScreen(),
+        '/complaints': (context) => const RoleGate(roles: {'admin'}, child: ComplaintsScreen()),
+        '/analytics': (context) => const RoleGate(roles: {'admin'}, child: AnalyticsScreen()),
+        '/user_management': (context) => const RoleGate(roles: {'admin'}, child: UserManagementScreen()),
+        '/route_history': (context) => const RoleGate(roles: {'admin', 'driver', 'resident'}, child: RouteHistoryEntry()),
+        '/file_complaint': (context) => const RoleGate(roles: {'resident'}, child: FileComplaintScreen()),
+        '/track_trucks': (context) => const RoleGate(roles: {'admin', 'driver', 'resident'}, child: ResidentTrackTruckScreen()),
         '/forgot_password': (context) => const ForgotPasswordScreen(),
         '/verify_2fa': (context) {
           final args = ModalRoute.of(context)!.settings.arguments;

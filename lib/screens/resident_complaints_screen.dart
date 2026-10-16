@@ -1,9 +1,11 @@
+import '../utils/complaint_flow.dart';
 import 'dart:async';
 import 'dart:ui';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:intl/intl.dart';
+import '../api/api_guard.dart';
 import '../api/api_service.dart';
 import '../utils/app_theme.dart';
 import '../utils/session_manager.dart';
@@ -12,6 +14,7 @@ import '../widgets/fade_slide_entrance.dart';
 import '../utils/responsive.dart';
 import '../widgets/custom_snackbar.dart';
 import '../utils/custom_notification.dart';
+import '../widgets/app_date_range_picker.dart';
 
 class ResidentComplaintsScreen extends StatefulWidget {
   final bool isEmbedded;
@@ -39,6 +42,7 @@ class _ResidentComplaintsScreenState extends State<ResidentComplaintsScreen> wit
   List<dynamic> _complaints = [];
   List<dynamic> _allComplaints = [];
   bool _isLoading = true;
+  String? _loadError; // shown with a Retry instead of an empty history
   String? _localHighlightId;
   bool _showHeaderShadow = true;
 
@@ -51,13 +55,20 @@ class _ResidentComplaintsScreenState extends State<ResidentComplaintsScreen> wit
   String _selectedType = "All Types";
   String _selectedStatus = "All Status";
   DateTime _selectedDate = DateTime.now();
+  DateTime _selectedEndDate = DateTime.now();
   bool _isDateFilterActive = false;
+
+  /// Single day or range chosen in the date filter (inclusive, by calendar day).
+  bool _inDateFilter(DateTime dt) {
+    final DateTime d = DateUtils.dateOnly(dt);
+    return !d.isBefore(DateUtils.dateOnly(_selectedDate)) && !d.isAfter(DateUtils.dateOnly(_selectedEndDate));
+  }
 
   final List<String> _categories = ["All Types", 'Uncollected Garbage', 'Spilled Waste', 'Driver Behavior', 'Schedule Issue', 'Other'];
   final List<String> _statuses = ["All Status", "Pending", "In Progress", "Resolved"];
 
   // View Mode State
-  String _viewMode = "Active"; // "Active" or "Archived"
+  String _viewMode = "Active"; // "Active" (pending + in progress) or "Resolved"
 
   @override
   void initState() {
@@ -195,27 +206,44 @@ class _ResidentComplaintsScreenState extends State<ResidentComplaintsScreen> wit
     if (!isManualRefresh) setState(() => _isLoading = true);
     final user = await SessionManager.getUser();
     try {
-      final response = await _apiService.getComplaints();
-      if (response.data['success'] == true) {
-        final List all = response.data['data'];
-        final List filtered = all
-            .where((c) =>
-                (c['user_id'] ?? c['resident_id']).toString() == user?.userId.toString())
-            .toList();
-        setState(() {
-          _allComplaints = filtered;
-          _applyFilters();
-          _isLoading = false;
-        });
-
+      final Map<String, dynamic> body = ApiGuard.requireSuccess(ApiGuard.jsonMap(await _apiService.getComplaints()),
+          fallback: 'Your complaints could not be loaded.');
+      final Object? data = body['data'];
+      final List all = data is List ? data : const [];
+      final List filtered = all
+          .where((c) =>
+              c is Map && (c['user_id'] ?? c['resident_id']).toString() == user?.userId.toString())
+          .toList();
+      if (!mounted) return;
+      setState(() {
+        _allComplaints = filtered;
+        // Opened from a notification: show the tab (Active / Resolved) that holds the complaint.
         if (_localHighlightId != null) {
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            _scrollToTarget();
-          });
+          final target = filtered.cast<Map>().where((c) => (c['complaint_id'] ?? c['id']).toString() == _localHighlightId);
+          if (target.isNotEmpty) {
+            _viewMode = ComplaintFlow.isResolved(target.first['status']) ? "Resolved" : "Active";
+            _selectedType = "All Types";
+            _selectedStatus = "All Status";
+            _isDateFilterActive = false;
+          }
         }
+        _applyFilters();
+        _loadError = null;
+        _isLoading = false;
+      });
+
+      if (_localHighlightId != null) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _scrollToTarget();
+        });
       }
     } catch (e) {
-      if (mounted) setState(() => _isLoading = false);
+      if (mounted) {
+        setState(() {
+          _loadError = ComplaintFlow.errorMessage(e);
+          _isLoading = false;
+        });
+      }
     }
   }
 
@@ -223,13 +251,11 @@ class _ResidentComplaintsScreenState extends State<ResidentComplaintsScreen> wit
     // 1. Start with full data source
     List<dynamic> results = List.from(_allComplaints);
 
-    // 2. Filter by Age (Archive Logic: 30 days)
-    final DateTime now = DateTime.now();
+    // 2. Active (Pending + In Progress) or Resolved, from the persisted status (same rule as
+    //    the Admin Complaint Center).
     results = results.where((c) {
-      DateTime? dt = DateTime.tryParse(c['created_at'] ?? '');
-      if (dt == null) return _viewMode == "Active";
-      bool isOld = now.difference(dt).inDays >= 30;
-      return _viewMode == "Active" ? !isOld : isOld;
+      final bool resolved = ComplaintFlow.isResolved(c['status']);
+      return _viewMode == "Resolved" ? resolved : !resolved;
     }).toList();
 
     // 3. Filter by Type (Category)
@@ -249,9 +275,7 @@ class _ResidentComplaintsScreenState extends State<ResidentComplaintsScreen> wit
       results = results.where((c) {
         DateTime? dt = DateTime.tryParse(c['created_at'] ?? '');
         if (dt == null) return false;
-        return dt.year == _selectedDate.year &&
-               dt.month == _selectedDate.month &&
-               dt.day == _selectedDate.day;
+        return _inDateFilter(dt);
       }).toList();
     }
 
@@ -261,14 +285,7 @@ class _ResidentComplaintsScreenState extends State<ResidentComplaintsScreen> wit
     });
   }
 
-  String _normalizeStatus(dynamic s) {
-    if (s == null) return 'Pending';
-    String str = s.toString().toUpperCase().trim().replaceAll('_', ' ');
-    if (str == 'PENDING' || str == 'SUBMITTED' || str == '0') return 'Pending';
-    if (str == 'IN PROGRESS' || str == 'UNDER REVIEW' || str.contains('PROGRESS') || str == '1') return 'In Progress';
-    if (str == 'RESOLVED' || str == 'COMPLETED' || str == '2') return 'Resolved';
-    return 'Pending';
-  }
+  String _normalizeStatus(dynamic s) => ComplaintFlow.label(ComplaintFlow.statusOf(s));
 
   void _scrollToTarget() async {
     if (_localHighlightId == null) return;
@@ -321,7 +338,7 @@ class _ResidentComplaintsScreenState extends State<ResidentComplaintsScreen> wit
         final Map notifData = notifSnapshot.value as Map;
         notifData.forEach((key, value) {
           if (value is Map) {
-            if (value['type'] == 'COMPLAINT_RESOLVED' &&
+            if (ComplaintFlow.residentComplaintTypes.contains(value['type']) &&
                 value['relatedId']?.toString() == id.toString()) {
               notifRef.child(key).remove();
             }
@@ -343,7 +360,7 @@ class _ResidentComplaintsScreenState extends State<ResidentComplaintsScreen> wit
         children: [
           _buildTextTabItem("Active", _viewMode == "Active"),
           const SizedBox(width: 28),
-          _buildTextTabItem("Archived", _viewMode == "Archived"),
+          _buildTextTabItem("Resolved", _viewMode == "Resolved"),
         ],
       ),
     );
@@ -450,7 +467,7 @@ class _ResidentComplaintsScreenState extends State<ResidentComplaintsScreen> wit
       statsSource = statsSource.where((c) {
         DateTime? dt = DateTime.tryParse(c['created_at'] ?? '');
         if (dt == null) return false;
-        return dt.year == _selectedDate.year && dt.month == _selectedDate.month && dt.day == _selectedDate.day;
+        return _inDateFilter(dt);
       }).toList();
     }
 
@@ -536,7 +553,7 @@ class _ResidentComplaintsScreenState extends State<ResidentComplaintsScreen> wit
                                                     style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: Color(0xFF1A1A1A))),
                                                 Text(_viewMode == "Active" 
                                                     ? "Manage and track your reported concerns"
-                                                    : "Records older than 30 days are archived here",
+                                                    : "Resolved complaints and the barangay's resolution notes",
                                                     style: const TextStyle(color: Colors.grey, fontSize: 14, fontWeight: FontWeight.w500)),
                                               ],
                                             ),
@@ -710,7 +727,7 @@ class _ResidentComplaintsScreenState extends State<ResidentComplaintsScreen> wit
       statsSource = statsSource.where((c) {
         DateTime? dt = DateTime.tryParse(c['created_at'] ?? '');
         if (dt == null) return false;
-        return dt.year == _selectedDate.year && dt.month == _selectedDate.month && dt.day == _selectedDate.day;
+        return _inDateFilter(dt);
       }).toList();
     }
 
@@ -840,7 +857,7 @@ class _ResidentComplaintsScreenState extends State<ResidentComplaintsScreen> wit
                                             Text(
                                               _viewMode == "Active"
                                                   ? "Manage and track your reported concerns"
-                                                  : "Records older than 30 days are archived here",
+                                                  : "Resolved complaints and the barangay's resolution notes",
                                               style: TextStyle(
                                                   fontSize: 12, 
                                                   color: Colors.grey.shade600, 
@@ -1245,9 +1262,11 @@ class _ResidentComplaintsScreenState extends State<ResidentComplaintsScreen> wit
 
   Widget _buildFilterBar() {
     bool isDesktop = Responsive.isDesktop(context);
-    String dateLabel = _isDateFilterActive
-        ? DateFormat('MMM dd, yyyy').format(_selectedDate)
-        : "All Dates";
+    String dateLabel = !_isDateFilterActive
+        ? "All Dates"
+        : (DateUtils.isSameDay(_selectedDate, _selectedEndDate)
+            ? DateFormat('MMM dd, yyyy').format(_selectedDate)
+            : "${DateFormat('MMM dd').format(_selectedDate)} - ${DateFormat('MMM dd, yyyy').format(_selectedEndDate)}");
 
     if (!isDesktop) {
       return Row(
@@ -1257,7 +1276,7 @@ class _ResidentComplaintsScreenState extends State<ResidentComplaintsScreen> wit
           const SizedBox(width: 8),
           Expanded(child: _buildStatusDropdown()),
           const SizedBox(width: 8),
-          Expanded(child: _filterChip(Icons.calendar_today_rounded, dateLabel, onTap: () => _showSingleDatePicker(context), isActive: _isDateFilterActive)),
+          Expanded(child: _filterChip(Icons.calendar_today_rounded, dateLabel, onTap: () => _showDateFilterPicker(context), isActive: _isDateFilterActive)),
         ],
       );
     }
@@ -1269,7 +1288,7 @@ class _ResidentComplaintsScreenState extends State<ResidentComplaintsScreen> wit
       children: [
         _buildTypeDropdown(),
         _buildStatusDropdown(),
-        _filterChip(Icons.calendar_today_rounded, dateLabel, onTap: () => _showSingleDatePicker(context), isActive: _isDateFilterActive),
+        _filterChip(Icons.calendar_today_rounded, dateLabel, onTap: () => _showDateFilterPicker(context), isActive: _isDateFilterActive),
       ],
     );
   }
@@ -1382,23 +1401,22 @@ class _ResidentComplaintsScreenState extends State<ResidentComplaintsScreen> wit
     );
   }
 
-  Future<void> _showSingleDatePicker(BuildContext context) async {
-    final DateTime? picked = await showDialog<DateTime>(
-      context: context,
-      builder: (context) => Dialog(
-        backgroundColor: Colors.white,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(32)),
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 420),
-          child: _CuteSingleDatePicker(initialDate: _selectedDate),
-        ),
-      ),
+  Future<void> _showDateFilterPicker(BuildContext context) async {
+    final AppDatePick? pick = await showAppDateRangePicker(
+      context,
+      initialRange: _isDateFilterActive ? DateTimeRange(start: _selectedDate, end: _selectedEndDate) : null,
+      lastDate: DateTime.now(),
+      clearable: _isDateFilterActive,
     );
+    if (pick == null) return; // cancelled: keep the current filter
 
-    if (picked != null) {
-      setState(() { _selectedDate = picked; _isDateFilterActive = true; });
+    if (pick.range != null) {
+      setState(() {
+        _selectedDate = pick.range!.start;
+        _selectedEndDate = pick.range!.end;
+        _isDateFilterActive = true;
+      });
     } else {
-      // Logic for clearing: if null is returned, clear the filter directly
       setState(() { _isDateFilterActive = false; });
     }
     _applyFilters();
@@ -1432,6 +1450,23 @@ class _ResidentComplaintsScreenState extends State<ResidentComplaintsScreen> wit
   }
 
   Widget _buildEmptyState() {
+    if (_loadError != null) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 60, horizontal: 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.cloud_off_rounded, size: 48, color: Color(0xFFDC2626)),
+              const SizedBox(height: 12),
+              Text(_loadError!, textAlign: TextAlign.center, style: const TextStyle(fontWeight: FontWeight.w700, color: Color(0xFF991B1B))),
+              const SizedBox(height: 8),
+              TextButton(onPressed: () => _fetchComplaints(), child: const Text("Retry")),
+            ],
+          ),
+        ),
+      );
+    }
     return Center(
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 80),
@@ -1471,9 +1506,15 @@ class _ComplaintItemCardState extends State<ComplaintItemCard> {
 
   @override
   Widget build(BuildContext context) {
-    String status = (widget.complaint['status'] ?? 'PENDING').toString().toUpperCase();
-    Color statusColor = status == 'PENDING' ? Colors.orange : (status == 'RESOLVED' ? Colors.green : Colors.blue);
+    final ComplaintStatus lifecycle = ComplaintFlow.statusOf(widget.complaint['status']);
+    final String status = ComplaintFlow.label(lifecycle).toUpperCase();
+    final Color statusColor = lifecycle == ComplaintStatus.pending
+        ? Colors.orange
+        : (lifecycle == ComplaintStatus.resolved ? Colors.green : Colors.blue);
+    final bool resolved = lifecycle == ComplaintStatus.resolved;
     String adminResponse = (widget.complaint['admin_response'] ?? '').toString().trim();
+    final DateTime? resolvedAt = DateTime.tryParse((widget.complaint['resolved_at'] ?? '').toString().replaceFirst(' ', 'T'));
+    final String complaintNo = ComplaintFlow.displayId(widget.complaint['complaint_id'] ?? widget.complaint['id']);
     final bool isDesktop = Responsive.isDesktop(context);
 
     return MouseRegion(
@@ -1513,7 +1554,7 @@ class _ComplaintItemCardState extends State<ComplaintItemCard> {
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
                       Expanded(
-                        child: Text(widget.complaint['category'] ?? "General",
+                        child: Text("${widget.complaint['category'] ?? "General"}  $complaintNo",
                               style: TextStyle(
                                   fontWeight: FontWeight.w900,
                                   fontSize: isDesktop ? 19 : 16,
@@ -1554,7 +1595,7 @@ class _ComplaintItemCardState extends State<ComplaintItemCard> {
                             children: [
                               Icon(Icons.forum_rounded, size: 16, color: Colors.green.shade800),
                               const SizedBox(width: 10),
-                              Text("OFFICIAL RESPONSE",
+                              Text(resolved ? "RESOLUTION" : "ADMIN NOTE",
                                   style: TextStyle(
                                       fontSize: 11,
                                       fontWeight: FontWeight.w900,
@@ -1569,6 +1610,11 @@ class _ComplaintItemCardState extends State<ComplaintItemCard> {
                                   fontSize: isDesktop ? 15 : 13,
                                   height: 1.5,
                                   fontWeight: FontWeight.w600)),
+                          if (resolved && resolvedAt != null) ...[
+                            const SizedBox(height: 8),
+                            Text("Resolved on ${DateFormat('MMM d, yyyy • h:mm a').format(resolvedAt)}",
+                                style: TextStyle(color: Colors.green.shade800, fontSize: 12, fontWeight: FontWeight.w700)),
+                          ],
                         ],
                       ),
                     ),
@@ -1744,19 +1790,26 @@ class AddComplaintModalState extends State<AddComplaintModal> {
           ),
         ) ?? false;
     if (!confirm) return;
-    setState(() => _isLoading = true);
     final user = await SessionManager.getUser();
+    final String? residentId = ComplaintFlow.residentIdFor(user);
+    if (residentId == null) {
+      // No signed-in resident: never file under id "0".
+      _showSnackBar("Please log in again to submit a complaint.", isError: true);
+      return;
+    }
+    setState(() => _isLoading = true);
     try {
-      final response = await _apiService.fileComplaint(user?.userId.toString() ?? "0", _selectedCategory, desc);
-      if (response.data['success'] == true) {
-        await _database.ref('notifications').push().set({'type': 'RESIDENT_COMPLAINT', 'title': 'New Resident Complaint', 'message': '${user?.name ?? 'A resident'} filed a complaint: $_selectedCategory', 'resident_id': user?.userId, 'timestamp': ServerValue.timestamp, 'isRead': false});
-        if (!mounted) return;
-        Navigator.pop(context);
-        widget.onSuccess();
-        _showSnackBar("Complaint submitted successfully");
-      }
+      final response = await _apiService.fileComplaint(residentId, _selectedCategory, desc);
+      // Throws unless the complaint was saved: a server refusal, an HTML fallback page or
+      // invalid JSON is shown as an error, never as a success.
+      ComplaintFlow.submissionResult(response);
+      // The Admin in-app notification is written once by file_complaint.php.
+      if (!mounted) return;
+      Navigator.pop(context);
+      widget.onSuccess();
+      _showSnackBar("Complaint submitted successfully");
     } catch (e) {
-      if (mounted) _showSnackBar("Error: $e", isError: true);
+      if (mounted) _showSnackBar(ComplaintFlow.errorMessage(e), isError: true);
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -1827,242 +1880,5 @@ class AddComplaintModalState extends State<AddComplaintModal> {
         ),
       ),
     );
-  }
-}
-
-class _CuteSingleDatePicker extends StatefulWidget {
-  final DateTime initialDate;
-  const _CuteSingleDatePicker({required this.initialDate});
-  @override State<_CuteSingleDatePicker> createState() => _CuteSingleDatePickerState();
-}
-
-class _CuteSingleDatePickerState extends State<_CuteSingleDatePicker> {
-  late DateTime _currentMonth;
-  late DateTime _selectedDate;
-  bool _isYearPickerVisible = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _currentMonth = DateTime(widget.initialDate.year, widget.initialDate.month);
-    _selectedDate = widget.initialDate;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.fromLTRB(32, 32, 32, 24),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(32),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              const Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text("Select Date", style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900, color: Color(0xFF00796B))),
-                  SizedBox(height: 4),
-                  Text("Pick a date to filter records.", style: TextStyle(fontSize: 12, color: Colors.grey, fontWeight: FontWeight.w500)),
-                ],
-              ),
-              IconButton(
-                onPressed: () => Navigator.pop(context),
-                icon: const Icon(Icons.close_rounded, color: Colors.grey),
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(),
-              ),
-            ],
-          ),
-          const Divider(height: 48),
-
-          if (!_isYearPickerVisible) ...[
-            // CALENDAR VIEW
-            Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-              GestureDetector(
-                onTap: () => setState(() => _isYearPickerVisible = true),
-                child: MouseRegion(
-                  cursor: SystemMouseCursors.click,
-                  child: Row(
-                    children: [
-                      Text(DateFormat('MMMM yyyy').format(_currentMonth), style: const TextStyle(fontWeight: FontWeight.w900, color: Color(0xFF455A64))),
-                      const Icon(Icons.arrow_drop_down_rounded, color: Colors.grey),
-                    ],
-                  ),
-                ),
-              ),
-              Row(
-                children: [
-                  IconButton(icon: const Icon(Icons.chevron_left_rounded), onPressed: () => setState(() => _currentMonth = DateTime(_currentMonth.year, _currentMonth.month - 1))),
-                  IconButton(icon: const Icon(Icons.chevron_right_rounded), onPressed: () => setState(() => _currentMonth = DateTime(_currentMonth.year, _currentMonth.month + 1))),
-                ],
-              ),
-            ]),
-            const SizedBox(height: 16),
-            const Row(
-              mainAxisAlignment: MainAxisAlignment.spaceAround,
-              children: [
-                Text("S", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
-                Text("M", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
-                Text("T", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
-                Text("W", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
-                Text("T", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
-                Text("F", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
-                Text("S", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
-              ],
-            ),
-            const SizedBox(height: 8),
-            _buildDaysGrid(),
-          ] else ...[
-            // YEAR SELECTION VIEW
-            GestureDetector(
-              onTap: () => setState(() => _isYearPickerVisible = false),
-              child: MouseRegion(
-                cursor: SystemMouseCursors.click,
-                child: Row(
-                  children: [
-                    Text(DateFormat('MMMM yyyy').format(_currentMonth), style: const TextStyle(fontWeight: FontWeight.w900, color: Color(0xFF455A64))),
-                    const Icon(Icons.arrow_drop_up_rounded, color: Colors.grey),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 16),
-            const Divider(height: 1),
-            const SizedBox(height: 24),
-            _buildYearGrid(),
-            const SizedBox(height: 24),
-            const Divider(height: 1),
-          ],
-
-          const SizedBox(height: 32),
-          Row(
-            children: [
-                  Expanded(
-                child: OutlinedButton(
-                  onPressed: () {
-                    // Logic to clear: return a specific value or handle state here
-                    // Since it's a dialog returning value, we can use a special date or null
-                    Navigator.pop(context, null);
-                  },
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: Colors.grey,
-                    side: const BorderSide(color: Colors.grey),
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                  ),
-                  child: const Text("CLEAR", style: TextStyle(fontWeight: FontWeight.w900, letterSpacing: 1.1)),
-                ),
-              ),
-              const SizedBox(width: 16),
-              Expanded(
-                flex: 2,
-                child: ElevatedButton(
-                  onPressed: () => Navigator.pop(context, _selectedDate),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF00897B),
-                    foregroundColor: Colors.white,
-                    elevation: 0,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                  ),
-                  child: const Text("APPLY FILTER", style: TextStyle(fontWeight: FontWeight.w900, fontSize: 13)),
-                ),
-              ),
-            ],
-          ),
-        ]
-      ),
-    );
-  }
-
-  Widget _buildYearGrid() {
-    final List<int> years = List.generate(12, (index) => 2020 + index);
-    return GridView.builder(
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 3,
-        mainAxisSpacing: 20,
-        crossAxisSpacing: 20,
-        childAspectRatio: 2.2,
-      ),
-      itemCount: years.length,
-      itemBuilder: (context, index) {
-        final int year = years[index];
-        final bool isSelected = year == _currentMonth.year;
-        return InkWell(
-          onTap: () {
-            setState(() {
-              _currentMonth = DateTime(year, _currentMonth.month);
-              _isYearPickerVisible = false;
-            });
-          },
-          borderRadius: BorderRadius.circular(20),
-          child: Container(
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: isSelected ? const Color(0xFF00897B) : Colors.transparent,
-              borderRadius: BorderRadius.circular(20),
-            ),
-            child: Text(
-              year.toString(),
-              style: TextStyle(
-                fontSize: 16,
-                fontWeight: isSelected ? FontWeight.w900 : FontWeight.w600,
-                color: isSelected ? Colors.white : const Color(0xFF455A64),
-              ),
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _buildDaysGrid() {
-    final int daysInMonth = DateTime(_currentMonth.year, _currentMonth.month + 1, 0).day;
-    final int firstDayWeekday = DateTime(_currentMonth.year, _currentMonth.month, 1).weekday % 7;
-    return GridView.builder(
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: 7),
-      itemCount: daysInMonth + firstDayWeekday,
-      itemBuilder: (context, index) {
-        if (index < firstDayWeekday) return const SizedBox.shrink();
-        final int day = index - firstDayWeekday + 1;
-        final DateTime date = DateTime(_currentMonth.year, _currentMonth.month, day);
-
-        bool isSelected = date.year == _selectedDate.year && date.month == _selectedDate.month && date.day == _selectedDate.day;
-
-        return InkWell(
-          onTap: () {
-            setState(() {
-              _selectedDate = date;
-            });
-          },
-          child: Container(
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: isSelected ? const Color(0xFF00897B) : null,
-              shape: BoxShape.circle,
-              border: (date.day == DateTime.now().day && date.month == DateTime.now().month && date.year == DateTime.now().year)
-                ? Border.all(color: const Color(0xFF00897B), width: 1)
-                : null,
-            ),
-            child: Text(
-              day.toString(),
-              style: TextStyle(
-                color: isSelected ? Colors.white : Colors.black,
-                fontWeight: isSelected ? FontWeight.w900 : FontWeight.normal,
-              ),
-            ),
-          ),
-        );
-    });
   }
 }

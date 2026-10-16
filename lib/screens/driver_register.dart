@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
-import 'package:firebase_database/firebase_database.dart';
 import '../api/api_service.dart';
 import '../utils/app_theme.dart';
 import '../widgets/legal_agreement_dialog.dart';
@@ -367,18 +366,7 @@ class _DriverRegisterScreenState extends State<DriverRegisterScreen> {
 
           if (response.data['success'] == true) {
             successMsg = response.data['message'] ?? "Registration submitted. Your account is pending administrator approval. You can log in once approved.";
-            try {
-              await FirebaseDatabase.instance.ref('notifications').push().set({
-                "type": "REGISTRATION",
-                "title": AppLocalizations.get('new_driver_reg_title'),
-                "message": AppLocalizations.get('new_driver_reg_notif').replaceFirst('{name}', _fullNameController.text.trim()),
-                "timestamp": ServerValue.timestamp,
-                "isRead": false,
-                "relatedId": _usernameController.text.trim(),
-              });
-            } catch (e) {
-              debugPrint("Firebase Notification Error: $e");
-            }
+            // The Admin notification and e-mail are produced once by register.php.
 
             return true;
           } else {

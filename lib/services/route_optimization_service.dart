@@ -4,14 +4,34 @@ import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter/foundation.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:intl/intl.dart';
+import '../api/api_client.dart';
+import '../config/mapbox_config.dart';
+import 'route_matrix_plan.dart';
 
 class RouteOptimizationService {
-  final String _mapboxToken = "pk.eyJ1IjoicHJpbmNlNjcwMyIsImEiOiJjbW9zeHB2ODIwNDFnMnRwdWxsam9sYWJmIn0.8DQhyf9Z9-yP8lCuP2WS3g";
-  final FirebaseDatabase _database = FirebaseDatabase.instance;
-  final Dio _dio = Dio(BaseOptions(
-    connectTimeout: const Duration(seconds: 8),
-    receiveTimeout: const Duration(seconds: 8),
-  ));
+  RouteOptimizationService({Dio? dio, FirebaseDatabase? database, StopMatrixStore? stopMatrixStore})
+      : _dio = dio ??
+            Dio(BaseOptions(
+              connectTimeout: const Duration(seconds: 8),
+              receiveTimeout: const Duration(seconds: 8),
+            )),
+        _db = database,
+        _stopMatrix = stopMatrixStore ?? PrefsStopMatrixStore();
+
+  final StopMatrixStore _stopMatrix;
+
+  final Dio _dio;
+  final FirebaseDatabase? _db;
+  FirebaseDatabase get _database => _db ?? FirebaseDatabase.instance;
+
+  /// Result returned without any network request while the Matrix API is switched off.
+  static const Map<String, dynamic> disabledResult = {
+    'success': false,
+    'error': 'ROUTE_OPTIMIZATION_DISABLED',
+    'message': 'Route optimization is turned off in this version. Live GPS, collection areas and saved routes are not affected.',
+  };
+
+  static bool get isAvailable => MapboxRequestGuard.isEnabled(MapboxService.matrix);
 
   // In-memory route result cache for the current session
   static String? _cachedConfigHash;
@@ -28,6 +48,11 @@ class RouteOptimizationService {
     required List<Map<String, dynamic>> remainingPuroks,
     String? configHash,
   }) async {
+    // Matrix OFF: no request of any kind (Mapbox, PHP proxy, cache, Firebase) and no retry.
+    if (!isAvailable) {
+      MapboxRequestGuard.acquire(MapboxService.matrix); // counted as blocked (diagnostics)
+      return Map<String, dynamic>.from(disabledResult);
+    }
     final Stopwatch totalStopwatch = Stopwatch()..start();
     debugPrint("[ROUTE OPTIMIZATION START]");
     debugPrint("========== [OPTIMIZER] ROUTE OPTIMIZATION START ==========");
@@ -129,11 +154,12 @@ class RouteOptimizationService {
         configHash: configHash,
       ).timeout(const Duration(seconds: 12));
 
-      if (directResult['success'] == true) {
-        result = directResult;
-      }
+      // Keep a failure too: its message (Mapbox status, network error...) is what the driver
+      // should see instead of the generic "Route optimization failed.".
+      result = directResult;
     } catch (e) {
       debugPrint("[DIRECT MAPBOX TIMEOUT/ERROR] $e. Trying proxy fallback...");
+      result = {'success': false, 'error': 'ROUTING_TIMEOUT', 'message': 'The routing service did not respond in time.'};
     }
 
     // 2. Fallback to Proxy if Direct Mapbox failed
@@ -209,16 +235,27 @@ class RouteOptimizationService {
 
       String coordsString = allCoords.map((c) => "${c[0]},${c[1]}").join(";");
 
-      debugPrint("[ROUTING REQUEST] FULL MATRIX URL & COORDS: $coordsString");
+      // Smallest request: the full matrix only while some stop-to-stop pair is unknown,
+      // otherwise just the truck's row (N elements); stop pairs come from the cache.
+      final MatrixRequestPlan plan = MatrixRequestPlan.create(
+        stopIds: validPuroks.map(stopId).toList(),
+        cache: await _stopMatrix.read(),
+      );
+      final String? matrixBlocked = MapboxRequestGuard.acquire(MapboxService.matrix,
+          coordinates: allCoords.length, elements: plan.elements);
+      if (matrixBlocked != null) {
+        return {'success': false, 'error': 'MATRIX_BLOCKED', 'message': 'Route optimization unavailable ($matrixBlocked).'};
+      }
+      debugPrint("[ROUTING REQUEST] MATRIX ${plan.isRowRequest ? 'ROW' : 'FULL'}: ${allCoords.length} coordinates, ${plan.elements} elements");
       
       final String matrixUrl = "https://api.mapbox.com/directions-matrix/v1/mapbox/driving/$coordsString";
       
-      // Omit sources parameter to get full N x N matrix for optimal 2-Opt TSP sequencing
       final matrixResponse = await _dio.get(
         matrixUrl, 
         queryParameters: {
-          "access_token": _mapboxToken,
-          "annotations": "duration,distance",
+          "access_token": MapboxRequestGuard.accessToken,
+          "annotations": "duration",
+          ...plan.queryParameters,
         },
         options: Options(
           headers: {'Accept': 'application/json'},
@@ -238,7 +275,9 @@ class RouteOptimizationService {
         };
       }
 
-      final List durationsMatrix = matrixResponse.data['durations'];
+      final List rawDurations = matrixResponse.data['durations'];
+      await _stopMatrix.merge(plan.pairsFrom(rawDurations));
+      final List durationsMatrix = plan.assemble(rawDurations);
       
       // Log individual route costs between points
       for (int i = 0; i < durationsMatrix.length; i++) {
@@ -272,15 +311,19 @@ class RouteOptimizationService {
       }
 
       String directionsCoords = routeWaypoints.map((c) => "${c[0]},${c[1]}").join(";");
-      final String directionsUrl = "https://api.mapbox.com/directions/v1/mapbox/driving/$directionsCoords";
+      final String? directionsBlocked = MapboxRequestGuard.acquire(MapboxService.directions);
+      if (directionsBlocked != null) {
+        return {'success': false, 'error': 'DIRECTIONS_BLOCKED', 'message': 'Road route unavailable ($directionsBlocked).'};
+      }
+      final String directionsUrl = "https://api.mapbox.com/directions/v5/mapbox/driving/$directionsCoords";
 
       final dirResponse = await _dio.get(
         directionsUrl, 
         queryParameters: {
-          "access_token": _mapboxToken,
+          "access_token": MapboxRequestGuard.accessToken,
           "geometries": "geojson",
           "overview": "full",
-          "steps": "true",
+          "steps": "false", // legs (duration/distance) and geometry are all that is used
         },
         options: Options(
           headers: {'Accept': 'application/json'},
@@ -464,7 +507,8 @@ class RouteOptimizationService {
       final double effectiveStartLat = startLat ?? currentLat;
       final double effectiveStartLng = startLng ?? currentLng;
 
-      final String proxyUrl = "https://indigo-bear-885857.hostingersite.com/backend/route_optimization.php";
+      // Same URL as before in production; the local stub in explicit test mode.
+      final String proxyUrl = "${ApiClient.baseUrl}route_optimization.php";
       final response = await _dio.post(
         proxyUrl,
         data: {

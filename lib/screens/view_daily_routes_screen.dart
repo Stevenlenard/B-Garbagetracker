@@ -3,6 +3,7 @@ import 'package:firebase_database/firebase_database.dart';
 import 'package:intl/intl.dart';
 import '../models/user.dart';
 import '../utils/app_theme.dart';
+import '../widgets/app_date_range_picker.dart';
 import 'driver_track_truck_screen.dart';
 
 class ViewDailyRoutesScreen extends StatefulWidget {
@@ -77,25 +78,13 @@ class _ViewDailyRoutesScreenState extends State<ViewDailyRoutesScreen> {
   }
 
   Future<void> _selectDate(BuildContext context) async {
-    final DateTime? picked = await showDatePicker(
-      context: context,
+    final DateTime? picked = await showAppSingleDatePicker(
+      context,
       initialDate: _selectedDate,
       firstDate: DateTime(2024),
       lastDate: DateTime.now(),
-      builder: (context, child) {
-        return Theme(
-          data: Theme.of(context).copyWith(
-            colorScheme: const ColorScheme.light(
-              primary: AppColors.tealText,
-              onPrimary: Colors.white,
-              onSurface: Colors.black,
-            ),
-          ),
-          child: child!,
-        );
-      },
     );
-    if (picked != null && picked != _selectedDate) {
+    if (picked != null && !DateUtils.isSameDay(picked, _selectedDate)) {
       _fetchRoutesForDate(picked);
     }
   }

@@ -11,7 +11,11 @@ require 'PHPMailer/Exception.php';
 require 'PHPMailer/PHPMailer.php';
 require 'PHPMailer/SMTP.php';
 
-function trigger_firebase_notification($type, $title, $message) {
+/**
+ * ONE Admin in-app notification per registration (the apps no longer write their own copy).
+ * Returns true when Firebase accepted the write. A failure is logged, never fatal.
+ */
+function trigger_firebase_notification($type, $title, $message, $relatedId = null) {
     $url = "https://garbagesis-78d39-default-rtdb.asia-southeast1.firebasedatabase.app/notifications.json";
     $data = [
         "type" => $type,
@@ -20,6 +24,9 @@ function trigger_firebase_notification($type, $title, $message) {
         "timestamp" => round(microtime(true) * 1000),
         "isRead" => false
     ];
+    if ($relatedId !== null && $relatedId !== '') {
+        $data["relatedId"] = (string)$relatedId;
+    }
 
     $ch = curl_init($url);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
@@ -27,8 +34,101 @@ function trigger_firebase_notification($type, $title, $message) {
     curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
     curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
     curl_setopt($ch, CURLOPT_TIMEOUT, 5); // 5 seconds timeout
-    curl_exec($ch);
+    $out = curl_exec($ch);
     curl_close($ch);
+    $ok = ($out !== false && $out !== '' && strpos((string)$out, '"error"') === false);
+    if (!$ok) {
+        error_log("register.php: admin in-app notification was not accepted by Firebase (type=$type)");
+    }
+    return $ok;
+}
+
+/**
+ * Tries to email the Admin(s) about a pending driver application.
+ *
+ * Returns a status string for the server log only (it is never sent to the client):
+ *   not_configured | no_recipient | smtp_accepted | failed
+ * "smtp_accepted" means the SMTP server accepted the message for delivery. It does NOT prove
+ * the message reached an inbox (spam filtering, bounces and mailbox rules happen afterwards).
+ */
+function gt_send_driver_application_email($conn, $name, $username, $email, $phone, $license) {
+    foreach (['SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS', 'SMTP_FROM'] as $c) {
+        if (!defined($c) || trim((string)constant($c)) === '') {
+            return 'not_configured';
+        }
+    }
+
+    // Every admin who enabled e-mail notifications and has a valid address (max 5).
+    $recipients = [];
+    try {
+        $stmt = $conn->prepare("SELECT email FROM users WHERE role = 'admin' AND email_notifications = 1");
+        $stmt->execute();
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            $addr = trim((string)($row['email'] ?? ''));
+            if ($addr !== '' && filter_var($addr, FILTER_VALIDATE_EMAIL) && !in_array(strtolower($addr), array_map('strtolower', $recipients), true)) {
+                $recipients[] = $addr;
+            }
+            if (count($recipients) >= 5) break;
+        }
+    } catch (Throwable $e) {
+        error_log("register.php: could not read admin e-mail recipients (" . get_class($e) . ")");
+        return 'failed';
+    }
+    if (count($recipients) === 0) {
+        return 'no_recipient';
+    }
+
+    try {
+        $mail = new PHPMailer(true);
+        $mail->isSMTP();
+        $mail->Host       = SMTP_HOST;
+        $mail->SMTPAuth   = true;
+        $mail->Username   = SMTP_USER;
+        $mail->Password   = SMTP_PASS;
+        $mail->SMTPSecure = PHPMailer::ENCRYPTION_STARTTLS;
+        $mail->Port       = SMTP_PORT;
+        $mail->Timeout    = 10;
+        $mail->setFrom(SMTP_FROM, defined('SMTP_NAME') ? SMTP_NAME : 'Garbage Tracker');
+        foreach ($recipients as $addr) {
+            $mail->addAddress($addr);
+        }
+        $mail->isHTML(true);
+        $mail->Subject = 'New Driver Application Pending Approval - Garbage Tracker';
+
+        $timestamp = date("F j, Y, g:i a");
+        $row = function ($label, $value) {
+            return "<tr><td style='padding: 8px; border: 1px solid #eee; font-weight: bold; width: 30%;'>" . $label
+                . "</td><td style='padding: 8px; border: 1px solid #eee;'>" . htmlspecialchars((string)$value) . "</td></tr>";
+        };
+        $mail->Body = "
+            <div style='font-family: Arial, sans-serif; padding: 20px; border: 1px solid #ddd; border-radius: 8px;'>
+                <h2 style='color: #00796B;'>New Driver Application</h2>
+                <p>Hello Admin,</p>
+                <p>A new driver has registered and is awaiting your approval in the system.</p>
+                <table style='width: 100%; border-collapse: collapse; margin-top: 10px;'>"
+                . $row('Driver Name:', $name)
+                . $row('Username:', $username)
+                . $row('Email:', $email)
+                . $row('Phone:', $phone)
+                . $row('License Number:', $license)
+                . $row('Applied At:', $timestamp) . "
+                </table>
+                <p style='margin-top: 20px;'>Please log in to the <strong>Admin Dashboard -> User Management</strong> to review and approve this application.</p>
+                <hr style='border: 0; border-top: 1px solid #eee;'>
+                <p style='font-size: 12px; color: #7f8c8d;'>This is an automated message from the Garbage Tracker System.</p>
+            </div>
+        ";
+
+        $mail->send();
+        return 'smtp_accepted';
+    } catch (Throwable $e) {
+        // Class name only plus a short, credential-scrubbed hint: never the full SMTP transcript.
+        $hint = substr(preg_replace('/\s+/', ' ', (string)$e->getMessage()), 0, 120);
+        if (defined('SMTP_PASS') && SMTP_PASS !== '') $hint = str_replace(SMTP_PASS, '[redacted]', $hint);
+        if (defined('SMTP_USER') && SMTP_USER !== '') $hint = str_replace(SMTP_USER, '[redacted]', $hint);
+        error_log("register.php: driver application e-mail failed (" . get_class($e) . "): " . $hint);
+        return 'failed';
+    }
 }
 
 $data = json_decode(file_get_contents("php://input"));
@@ -50,7 +150,51 @@ if ($termsAccepted !== 1 && $termsAccepted !== '1' && $termsAccepted !== true) {
 }
 
 if (!empty($data->username) && !empty($data->password) && !empty($data->role)) {
+    // Public registration only creates Residents and Drivers. Admin accounts are never
+    // self-registered (they are created by an administrator).
+    $role = strtolower(trim((string)$data->role));
+    if ($role !== 'resident' && $role !== 'driver') {
+        http_response_code(403);
+        echo json_encode(["success" => false, "message" => "This account type cannot be registered here."]);
+        exit;
+    }
+    $data->role = $role;
+    $data->username = trim((string)$data->username);
+
+    if (strlen($data->username) < 3 || strlen($data->username) > 50 || preg_match('/\s/', $data->username)) {
+        echo json_encode(["success" => false, "message" => "Username must be 3-50 characters without spaces."]);
+        exit;
+    }
+    if (strlen((string)$data->password) < 6) {
+        echo json_encode(["success" => false, "message" => "Password must be at least 6 characters."]);
+        exit;
+    }
+    if (!empty($data->email) && !filter_var($data->email, FILTER_VALIDATE_EMAIL)) {
+        echo json_encode(["success" => false, "message" => "Please enter a valid email address."]);
+        exit;
+    }
+
     try {
+        // Duplicate prevention across BOTH account tables (login accepts either table).
+        $dupUser = $conn->prepare("SELECT 1 FROM users WHERE username = ?");
+        $dupUser->execute([$data->username]);
+        $dupRes = $conn->prepare("SELECT 1 FROM residents WHERE username = ?");
+        $dupRes->execute([$data->username]);
+        if ($dupUser->fetch() || $dupRes->fetch()) {
+            echo json_encode(["success" => false, "message" => "That username is already taken."]);
+            exit;
+        }
+        if (!empty($data->email)) {
+            $dupEmailU = $conn->prepare("SELECT 1 FROM users WHERE email = ?");
+            $dupEmailU->execute([$data->email]);
+            $dupEmailR = $conn->prepare("SELECT 1 FROM residents WHERE email = ?");
+            $dupEmailR->execute([$data->email]);
+            if ($dupEmailU->fetch() || $dupEmailR->fetch()) {
+                echo json_encode(["success" => false, "message" => "That email is already registered."]);
+                exit;
+            }
+        }
+
         $hashed_password = password_hash($data->password, PASSWORD_BCRYPT);
         $name = !empty($data->name) ? $data->name : $data->username;
 
@@ -67,17 +211,23 @@ if (!empty($data->username) && !empty($data->password) && !empty($data->role)) {
 
             $stmt->execute([$data->username, $name, $hashed_password, $email, $phone, $purok, $address]);
 
+            // Residents are active immediately: one Admin in-app notification, never an e-mail.
             trigger_firebase_notification(
                 'NEW_REGISTRATION',
                 'New Resident Registered',
-                "$name has registered as a Resident in $purok"
+                "$name has registered as a Resident in $purok",
+                $data->username
             );
 
-            echo json_encode(["success" => true, "message" => "Registration successful. You can now log in."]);
+            echo json_encode([
+                "success" => true,
+                "message" => "Registration successful. You can now log in.",
+                "user_id" => (int)$conn->lastInsertId()
+            ]);
             exit;
         }
 
-        // For drivers/admins
+        // For drivers (admin is rejected above)
         else if ($data->role === 'admin' || $data->role === 'driver') {
             $is_driver = ($data->role === 'driver');
             $is_archived = 0; // Do not use is_archived = 1 to represent pending
@@ -94,79 +244,24 @@ if (!empty($data->username) && !empty($data->password) && !empty($data->role)) {
             $truck = !empty($data->preferred_truck) ? $data->preferred_truck : null;
 
             $stmt->execute([$data->username, $name, $email, $hashed_password, $phone, $license, $truck, $data->role, $is_archived, $approval_status, $account_status]);
+            $new_user_id = (int)$conn->lastInsertId();
 
             if ($is_driver) {
+                // Pending approval: exactly one Admin in-app notification ...
                 trigger_firebase_notification(
                     'NEW_REGISTRATION',
                     'New Driver Application',
-                    "$name has applied for a Driver role"
+                    "$name has applied for a Driver role",
+                    $data->username
                 );
 
-                // Send email notification to Admin if enabled
-                try {
-                    $adminStmt = $conn->prepare("SELECT email, email_notifications FROM users WHERE role = 'admin' LIMIT 1");
-                    $adminStmt->execute();
-                    $admin = $adminStmt->fetch();
-
-                    if ($admin && $admin['email_notifications'] == 1 && !empty($admin['email'])) {
-                        $mail = new PHPMailer(true);
-                        $mail->isSMTP();
-                        $mail->Host       = SMTP_HOST;
-                        $mail->SMTPAuth   = true;
-                        $mail->Username   = SMTP_USER;
-                        $mail->Password   = SMTP_PASS;
-                        $mail->SMTPSecure = PHPMailer::ENCRYPTION_STARTTLS;
-                        $mail->Port       = SMTP_PORT;
-
-                        $mail->setFrom(SMTP_FROM, SMTP_NAME);
-                        $mail->addAddress($admin['email']);
-
-                        $mail->isHTML(true);
-                        $mail->Subject = 'New Driver Application Pending Approval - Garbage Tracker';
-
-                        $timestamp = date("F j, Y, g:i a");
-
-                        $mail->Body = "
-                            <div style='font-family: Arial, sans-serif; padding: 20px; border: 1px solid #ddd; border-radius: 8px;'>
-                                <h2 style='color: #00796B;'>New Driver Application</h2>
-                                <p>Hello Admin,</p>
-                                <p>A new driver has registered and is awaiting your approval in the system.</p>
-                                <table style='width: 100%; border-collapse: collapse; margin-top: 10px;'>
-                                    <tr>
-                                        <td style='padding: 8px; border: 1px solid #eee; font-weight: bold; width: 30%;'>Driver Name:</td>
-                                        <td style='padding: 8px; border: 1px solid #eee;'>$name</td>
-                                    </tr>
-                                    <tr>
-                                        <td style='padding: 8px; border: 1px solid #eee; font-weight: bold;'>Username:</td>
-                                        <td style='padding: 8px; border: 1px solid #eee;'>{$data->username}</td>
-                                    </tr>
-                                    <tr>
-                                        <td style='padding: 8px; border: 1px solid #eee; font-weight: bold;'>Email:</td>
-                                        <td style='padding: 8px; border: 1px solid #eee;'>$email</td>
-                                    </tr>
-                                    <tr>
-                                        <td style='padding: 8px; border: 1px solid #eee; font-weight: bold;'>Phone:</td>
-                                        <td style='padding: 8px; border: 1px solid #eee;'>$phone</td>
-                                    </tr>
-                                    <tr>
-                                        <td style='padding: 8px; border: 1px solid #eee; font-weight: bold;'>License Number:</td>
-                                        <td style='padding: 8px; border: 1px solid #eee;'>$license</td>
-                                    </tr>
-                                    <tr>
-                                        <td style='padding: 8px; border: 1px solid #eee; font-weight: bold;'>Applied At:</td>
-                                        <td style='padding: 8px; border: 1px solid #eee;'>$timestamp</td>
-                                    </tr>
-                                </table>
-                                <p style='margin-top: 20px;'>Please log in to the <strong>Admin Dashboard -> User Management</strong> to review and approve or reject this application.</p>
-                                <hr style='border: 0; border-top: 1px solid #eee;'>
-                                <p style='font-size: 12px; color: #7f8c8d;'>This is an automated message from the Garbage Tracker System.</p>
-                            </div>
-                        ";
-
-                        $mail->send();
-                    }
-                } catch (Exception $e) {
-                    // Suppress email error so registration completes
+                // ... plus one e-mail attempt. The outcome is logged on the server only and
+                // never changes the registration result.
+                $mailStatus = gt_send_driver_application_email($conn, $name, $data->username, $email, $phone, $license);
+                if ($mailStatus === 'smtp_accepted') {
+                    error_log("register.php: driver application e-mail ACCEPTED by the SMTP server (inbox delivery not confirmed)");
+                } else {
+                    error_log("register.php: driver application e-mail not sent: $mailStatus");
                 }
             }
 
@@ -174,12 +269,20 @@ if (!empty($data->username) && !empty($data->password) && !empty($data->role)) {
                 ? "Registration submitted. Your account is pending administrator approval. You can log in once approved."
                 : "Registration successful. You can now log in.";
 
-            echo json_encode(["success" => true, "message" => $msg]);
+            echo json_encode(["success" => true, "message" => $msg, "user_id" => $new_user_id]);
             exit;
         }
 
     } catch (PDOException $e) {
-        echo json_encode(["success" => false, "message" => "Database Error: " . $e->getMessage()]);
+        // A concurrent duplicate that slipped past the pre-check hits the unique key.
+        $isDuplicate = ($e->getCode() === '23000');
+        error_log("register.php: " . $e->getMessage());
+        echo json_encode([
+            "success" => false,
+            "message" => $isDuplicate
+                ? "That username or email is already registered."
+                : "Registration could not be completed. Please try again."
+        ]);
     }
 } else {
     echo json_encode(["success" => false, "message" => "Incomplete data"]);

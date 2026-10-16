@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../api/api_service.dart';
+import '../services/auth_session.dart';
 import '../utils/session_manager.dart';
 import '../utils/app_theme.dart';
 import '../utils/custom_notification.dart';
@@ -9,6 +10,10 @@ import 'dart:async';
 class Verify2FAScreen extends StatefulWidget {
   final Map<String, dynamic> userData;
   const Verify2FAScreen({super.key, required this.userData});
+
+  /// Sign-in choices carried from the login form inside [userData] (removed before saving).
+  static const String rememberAccountKey = '__remember_account';
+  static const String staySignedInKey = '__stay_signed_in';
 
   @override
   State<Verify2FAScreen> createState() => _Verify2FAScreenState();
@@ -49,16 +54,26 @@ class _Verify2FAScreenState extends State<Verify2FAScreen> {
       final email = widget.userData['email'];
       debugPrint("Verifying OTP for: $email with code: $otp");
       
-      final response = await _apiService.verifyOTP(email, otp);
+      final bool remember = widget.userData[Verify2FAScreen.rememberAccountKey] != false;
+      final bool stay = widget.userData[Verify2FAScreen.staySignedInKey] == true;
+      final response = await _apiService.verifyOTP(email, otp,
+          purpose: 'login', extra: AuthSession.instance.loginFields(staySignedIn: stay || remember));
       final data = response.data;
-      
-      debugPrint("Verify Response: $data");
 
       if (data is Map && data['success'] == true) {
-        debugPrint("Verification success! Saving session and navigating...");
         try {
-          await SessionManager.saveUser(widget.userData);
-          debugPrint("Session saved successfully.");
+          final Map<String, dynamic> user = Map<String, dynamic>.from(widget.userData)
+            ..remove(Verify2FAScreen.rememberAccountKey)
+            ..remove(Verify2FAScreen.staySignedInKey);
+          final Object? issued = data['auth_token'];
+          if (issued is String && issued.isNotEmpty) user['auth_token'] = issued;
+          final Object? session = data['session'];
+          await SessionManager.startSession(
+            user,
+            rememberAccount: remember,
+            staySignedIn: stay,
+            session: session is Map ? Map<String, dynamic>.from(session) : null,
+          );
         } catch (sessionError) {
           debugPrint("Session Save Error: $sessionError");
           if (!mounted) return;

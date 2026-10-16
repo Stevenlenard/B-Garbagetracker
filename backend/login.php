@@ -4,6 +4,9 @@ date_default_timezone_set('Asia/Manila');
 require_once 'db_config.php';
 require_once 'auto_backup_checker.php';
 require_once 'email_config.php';
+require_once 'auth_token.php';
+require_once 'auth_session_lib.php';
+@include_once 'approval_config.php';
 
 use PHPMailer\PHPMailer\PHPMailer;
 use PHPMailer\PHPMailer\Exception;
@@ -25,6 +28,66 @@ function log_access($conn, $user_id, $username, $action) {
 // Trigger auto-backup check on login
 if (function_exists('check_and_perform_auto_backup')) {
     check_and_perform_auto_backup($conn);
+}
+
+/**
+ * Registration approval gate.
+ *
+ * `pending` = a driver application awaiting an administrator; `rejected` = declined.
+ * Legacy rows approved before approve_user.php started setting approval_status can
+ * still carry `pending`; those accounts have already logged in successfully, so they
+ * are not locked out (their row is repaired by the next approval/migration).
+ * Missing column or NULL value = approved (older databases).
+ */
+function approval_block_message($conn, $table, $id_col, $id, $role, $username) {
+    try {
+        $st = $conn->prepare("SELECT approval_status FROM $table WHERE $id_col = ?");
+        $st->execute([$id]);
+        $row = $st->fetch(PDO::FETCH_ASSOC);
+        $status = strtolower(trim((string)($row['approval_status'] ?? '')));
+    } catch (PDOException $e) {
+        return null;
+    }
+    if ($status === 'rejected') {
+        return "Your registration was not approved. Please contact the administrator.";
+    }
+    if ($status === 'pending') {
+        // Server-only switch (backend/approval_config.php: define('APPROVAL_LEGACY_GRACE', false);)
+        // to turn the legacy exception OFF once old approvals have been repaired.
+        $graceOn = !(defined('APPROVAL_LEGACY_GRACE') && APPROVAL_LEGACY_GRACE === false);
+        if ($graceOn) try {
+            $lg = $conn->prepare("SELECT 1 FROM access_logs WHERE user_id = ? AND username = ? AND action LIKE 'Successful Login%' LIMIT 1");
+            $lg->execute([$id, $username]);
+            if ($lg->fetch()) return null; // legacy approved account
+        } catch (PDOException $e) {
+            return null;
+        }
+        return ($role === 'driver')
+            ? "Your driver account is pending approval. Please wait for an administrator to activate it."
+            : "Your account is pending approval.";
+    }
+    return null;
+}
+
+/**
+ * Access token for a successful login. Clients that opt in (session_v >= 1) on a server
+ * with the auth_sessions table get a short-lived token plus a revocable session
+ * ("Stay signed in" = persistent, no expiry); everyone else gets the legacy token.
+ * Returns the session block for the response, or null.
+ */
+function gt_login_tokens($conn, $data, $role, $id, $passwordHash, array &$profile) {
+    if (gt_session_requested($data) && gt_sessions_available($conn)) {
+        try {
+            $s = gt_session_start($conn, $role, $id, $passwordHash, !empty($data->stay_signed_in), (($data->client ?? '') === 'web') ? 'web' : 'android');
+            $profile['auth_token'] = $s['access_token'];
+            return $s;
+        } catch (Exception $e) {
+            // Fall through to the legacy token: signing in must not fail because of this.
+        }
+    }
+    $token = gt_issue_token($id, $role);
+    if ($token !== null) $profile['auth_token'] = $token;
+    return null;
 }
 
 $data = json_decode(file_get_contents("php://input"));
@@ -54,6 +117,13 @@ if (!empty($identifier) && !empty($password)) {
                     ? "Your driver account is pending approval. Please wait for an administrator to activate it."
                     : "Your account has been archived. Please contact the administrator.";
                 echo json_encode(["success" => false, "message" => $msg]);
+                exit;
+            }
+
+            $blocked = approval_block_message($conn, 'users', 'user_id', $user['user_id'], $user['role'], $user['username']);
+            if ($blocked !== null) {
+                log_access($conn, $user['user_id'], $user['username'], "Login Attempt (Not Approved)");
+                echo json_encode(["success" => false, "message" => $blocked]);
                 exit;
             }
 
@@ -125,9 +195,13 @@ if (!empty($identifier) && !empty($password)) {
             }
 
             log_access($conn, $user['user_id'], $user['username'], "Successful Login");
+            $pwHash = $user['password_hash'];
             unset($user['password_hash']);
             unset($user['is_archived']);
-            echo json_encode(["success" => true, "message" => "Login successful", "user" => $user]);
+            $session = gt_login_tokens($conn, $data, strtolower($user['role']), $user['user_id'], $pwHash, $user);
+            $resp = ["success" => true, "message" => "Login successful", "user" => $user];
+            if ($session !== null) $resp['session'] = $session;
+            echo json_encode($resp);
             exit;
         }
 
@@ -142,9 +216,19 @@ if (!empty($identifier) && !empty($password)) {
                 echo json_encode(["success" => false, "message" => "Account pending approval"]);
                 exit;
             }
+            $blocked = approval_block_message($conn, 'residents', 'resident_id', $resident['user_id'], 'resident', $resident['username']);
+            if ($blocked !== null) {
+                log_access($conn, $resident['user_id'], $resident['username'], "Login Attempt (Not Approved)");
+                echo json_encode(["success" => false, "message" => $blocked]);
+                exit;
+            }
             log_access($conn, $resident['user_id'], $resident['username'], "Successful Login (Resident)");
+            $pwHash = $resident['password_hash'];
             unset($resident['password_hash']);
-            echo json_encode(["success" => true, "message" => "Login successful", "user" => $resident]);
+            $session = gt_login_tokens($conn, $data, 'resident', $resident['user_id'], $pwHash, $resident);
+            $resp = ["success" => true, "message" => "Login successful", "user" => $resident];
+            if ($session !== null) $resp['session'] = $session;
+            echo json_encode($resp);
             exit;
         }
 

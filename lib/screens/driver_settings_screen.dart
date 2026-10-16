@@ -1,3 +1,4 @@
+import '../widgets/logout_choice_dialog.dart';
 import 'dart:async';
 import 'dart:ui';
 import 'dart:math' as math;
@@ -8,6 +9,7 @@ import 'package:firebase_database/firebase_database.dart';
 import 'package:intl/intl.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:image_picker/image_picker.dart';
+import '../services/driver_session_guard.dart';
 import '../utils/app_theme.dart';
 import '../utils/session_manager.dart';
 import '../models/user.dart';
@@ -475,8 +477,6 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> with Ticker
                                   const SizedBox(height: 32),
                                   
                                   _buildLogoutButton(),
-                                  const SizedBox(height: 16),
-                                  _buildDeleteAccountButton(),
                                   SizedBox(height: Responsive.isDesktop(context) ? 24 : 100),
                                 ],
                               ),
@@ -1393,16 +1393,6 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> with Ticker
     );
   }
 
-  Widget _buildDeleteAccountButton() {
-    return HoverActionButton(
-      text: "Delete Account",
-      loadingText: "Deleting Account...",
-      isLoading: _isNavigating,
-      isDestructive: true,
-      onTap: () => _showDeleteAccountConfirmation(),
-    );
-  }
-
   // --- TRUCK INFORMATION METHODS ---
 
   void _showTruckDetails() async {
@@ -1469,6 +1459,11 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> with Ticker
 
         // VALIDATION: Empty fields
         if (newTruckId.isEmpty || newPlate.isEmpty) {
+          return false;
+        }
+
+        // A replaced runtime must not change the truck assignment or live truck state.
+        if (!DriverSessionGuard.activeCanWrite) {
           return false;
         }
 
@@ -2746,7 +2741,7 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> with Ticker
               final String? targetRole = val['targetRole']?.toString().toLowerCase();
 
               // 1. EXCLUDE Admin-only or Resident-focused types
-              if (['REGISTRATION', 'NEW_REGISTRATION', 'RESIDENT_COMPLAINT', 'COLLECTION_ALERT', 'manual_alert', 'auto_arrival', 'auto_approach', 'COMPLAINT_RESOLVED'].contains(type)) {
+              if (['REGISTRATION', 'NEW_REGISTRATION', 'RESIDENT_COMPLAINT', 'COLLECTION_ALERT', 'manual_alert', 'auto_arrival', 'auto_approach', 'COMPLAINT_RESOLVED', 'COMPLAINT_IN_PROGRESS'].contains(type)) {
                 return;
               }
 
@@ -2852,7 +2847,7 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> with Ticker
       loadingText: "Loading help center...",
       maxHeightMultiplier: 0.85,
       children: [
-        _buildFAQItem("How do I update my route status?", "Use the controls on your main dashboard: 'START' to begin, 'PAUSE' if you are idle, 'FULL' when the truck is at capacity, and 'DONE' when the route is finished."),
+        _buildFAQItem("How do I update my route status?", "Your collection starts automatically when you log in. Use 'PAUSE' only if you must stop collecting, 'FULL' when the truck is at capacity (this ends the collection), and 'COMPLETED' after you have unloaded the garbage."),
         _buildFAQItem("What if I encounter a vehicle issue?", "Go to the 'Truck Information' section in settings and use 'Report Issue' to notify the admin about vehicle problems."),
         _buildFAQItem("How is my performance calculated?", "The system tracks your route completion time, fuel efficiency (if logged), and feedback from the community."),
         _buildFAQItem("Can I change my assigned truck?", "Truck assignments are managed by the administrator. Contact support if you need to be reassigned to a different vehicle."),
@@ -2987,31 +2982,6 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> with Ticker
     }
   }
 
-
-  void _showDeleteAccountConfirmation() async {
-    bool confirmed = await _showConfirmActionDialog(
-      title: "Delete Account?",
-      message: "You will lose all access and your account data will be permanently removed.",
-      confirmText: "Delete",
-      cancelText: "No",
-      isDestructive: true,
-      icon: Icons.no_accounts_rounded,
-    );
-    if (confirmed) {
-      setState(() => _isNavigating = true);
-      try {
-        final res = await _apiService.deleteUser(_user!.userId, _user!.role);
-        if (res.data['success'] == true) {
-           await SessionManager.logout();
-           if (mounted) Navigator.pushNamedAndRemoveUntil(context, '/login', (route) => false);
-        }
-      } catch (e) {
-        CustomNotification.showTopNotification(context, "Delete failed: $e");
-      } finally {
-        if (mounted) setState(() => _isNavigating = false);
-      }
-    }
-  }
 
 
 
@@ -3451,19 +3421,10 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> with Ticker
   }
 
   void _showLogoutDialog(BuildContext context) async {
-    final bool isDesktop = Responsive.isDesktop(context);
-    final Color themeColor = isDesktop ? Colors.red : AppColors.tealText;
-
-    bool confirmed = await _showConfirmActionDialog(
-      title: "Logout?",
-      message: "Are you sure you want to end your current session?",
-      confirmText: "Logout",
-      cancelText: "CANCEL",
-      isDestructive: false,
-      icon: Icons.logout_rounded,
-      iconColor: themeColor,
-    );
-    if (confirmed) {
+    final LogoutChoice choice = await showLogoutChoiceDialog(context);
+    final bool forget = choice == LogoutChoice.forget;
+    final bool keepSignedIn = choice == LogoutChoice.remember || choice == LogoutChoice.switchAccount;
+    if (choice != LogoutChoice.cancel) {
       if (!mounted) return;
       
       // 1. Show immediate loading feedback
@@ -3478,22 +3439,27 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> with Ticker
 
         debugPrint("[DRIVER_SETTINGS_LOGOUT] Setting driver UID $driverIdStr offline and truck $truckId offline");
 
+        // Only the runtime that still owns the driver session may publish OFFLINE; a
+        // replaced runtime logging out must not clobber the newer session's presence.
+        final bool mayWrite = DriverSessionGuard.activeCanWrite;
         await Future.wait([
-          if (driverIdStr.isNotEmpty)
+          if (mayWrite && driverIdStr.isNotEmpty)
             FirebaseDatabase.instance.ref('users/$driverIdStr').update({
               'isOnline': false,
               'status': 'OFFLINE',
               'lastSeen': ServerValue.timestamp,
             }).timeout(const Duration(seconds: 2), onTimeout: () => debugPrint("User presence logout update timed out")),
-          if (truckId != null && truckId != "Unknown" && truckId.isNotEmpty)
+          if (mayWrite && truckId != null && truckId != "Unknown" && truckId.isNotEmpty)
             FirebaseDatabase.instance.ref('truck_locations/$truckId').update({
               'status': 'OFFLINE',
               'isOnline': false,
               'speed': 0,
               'lastSeen': ServerValue.timestamp
             }).timeout(const Duration(seconds: 2), onTimeout: () => debugPrint("Settings logout update timed out")),
-          SessionManager.logout(),
+          SessionManager.logout(forgetLogin: forget, keepSignedIn: keepSignedIn),
         ]);
+        // Release write authority (removes the session record only if still the owner).
+        await DriverSessionGuard.active?.release();
 
         if (mounted) {
           CustomNotification.showTopNotification(context, "Logout successful.", false);
@@ -3501,7 +3467,7 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> with Ticker
         }
       } catch (e) {
         debugPrint("Logout error: $e");
-        await SessionManager.logout();
+        await SessionManager.logout(forgetLogin: forget, keepSignedIn: keepSignedIn);
         if (mounted) navigator.pushNamedAndRemoveUntil('/login', (route) => false);
       } finally {
         if (mounted) setState(() => _isNavigating = false);

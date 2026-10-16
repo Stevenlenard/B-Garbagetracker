@@ -1,15 +1,28 @@
+import '../utils/route_history_navigation.dart';
+import '../utils/trip_links.dart';
+import '../utils/eta_evaluation.dart';
+import '../utils/analytics_report_data.dart';
+import '../services/analytics_pdf_builder.dart';
+import '../services/load_history_repository.dart';
+import '../utils/load_history.dart';
+import '../utils/collection_visits.dart';
+import '../utils/analytics_recommendations.dart';
+import '../models/route_assignment.dart';
+import '../services/route_assignment_service.dart';
 import 'dart:async';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:firebase_database/firebase_database.dart';
-import 'package:google_generative_ai/google_generative_ai.dart';
 import 'package:intl/intl.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
 import '../utils/custom_notification.dart';
+import '../utils/fleet_snapshot.dart';
+import '../utils/fleet_status.dart';
+import '../services/truck_locations_feed.dart';
 import '../widgets/custom_snackbar.dart';
 import '../utils/app_theme.dart';
 import '../utils/session_manager.dart';
@@ -22,20 +35,16 @@ import '../models/driver_trip.dart';
 import '../models/user.dart';
 import '../services/driver_route_history_service.dart';
 import 'route_history_screen.dart';
-
-DateTime _parseEpochTimestamp(int ts) {
-  if (ts <= 0) return DateTime.now();
-  if (ts < 10000000000) {
-    return DateTime.fromMillisecondsSinceEpoch(ts * 1000);
-  }
-  return DateTime.fromMillisecondsSinceEpoch(ts);
-}
+import '../widgets/app_date_range_picker.dart';
 
 class AnalyticsScreen extends StatefulWidget {
   final bool isEmbedded;
   final VoidCallback? onBack;
   final Function(int)? onNavigate;
-  const AnalyticsScreen({super.key, this.isEmbedded = false, this.onBack, this.onNavigate});
+
+  /// When hosted in the Admin shell, "View Collection Route" opens Route History inside it.
+  final OpenRouteHistory? onOpenRouteHistory;
+  const AnalyticsScreen({super.key, this.isEmbedded = false, this.onBack, this.onNavigate, this.onOpenRouteHistory});
 
   @override
   State<AnalyticsScreen> createState() => _AnalyticsScreenState();
@@ -57,6 +66,22 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
   Map<String, int> _purokFrequencyData = {};
   Map<String, int> _purokVisitCounts = {};
   Map<String, int> _purokComplaintData = {};
+
+  // Verified collection visits (GPS evidence; utils/collection_visits.dart).
+  VisitSummary? _visitSummary;
+  List<AreaGeofence> _geofences = const <AreaGeofence>[];
+  bool _geofencesFromDefaults = false;
+  Timer? _visitDebounce;
+
+  // Route assignments (backend get_assignments.php) for the selected period.
+  final RouteAssignmentService _assignmentService = RouteAssignmentService();
+  AssignmentList? _assignments;
+  AssignmentFailure _assignmentFailure = AssignmentFailure.none;
+  String? _assignmentMessage;
+
+  // Resident-filed complaints only (MySQL), selected period and area.
+  int _residentComplaintsTotal = 0;
+  int _residentComplaintsUnresolved = 0;
   String _selectedArea = "All Areas";
   DateTimeRange _selectedDateRange = DateTimeRange(
     start: DateTime.now().subtract(const Duration(days: 30)),
@@ -68,8 +93,6 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
   double _avgCollectionTime = 0.0;
   int _stopsPerRoute = 0;
   double _distanceCovered = 0.0;
-  double _predictionAccuracy = 0.0;
-  double _maeValue = 0.0;
 
   int _totalRoutes = 0;
   int _completedRoutes = 0;
@@ -109,6 +132,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
       : DateFormat('MMM dd, yyyy').format(_selectedDateRange.start);
 
   StreamSubscription? _trucksSubscription;
+  Timer? _fleetAgingTimer;
   StreamSubscription? _routesSubscription;
   StreamSubscription? _progressSubscription;
   StreamSubscription? _weeklyProgressSubscription;
@@ -128,6 +152,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
 
   // AI Insights & ETA Performance variables
   String? _geminiSummary;
+  int _forecastSamples = 0; // recorded collection weights behind the volume forecast
   double _tomorrowWaste = 5000.0;
   double _weeklyWaste = 15000.0;
   double _totalFleetCapacity = 5000.0;
@@ -137,6 +162,17 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
 
   // Load History & Waste Summary State
   bool _isLoadingLoadData = false;
+  String? _loadError; // set when the data could not be loaded (never shown as "0 trips")
+  bool _loadPartial = false; // some sources failed: totals may be incomplete
+  bool _loadHasLoaded = false; // at least one load finished
+  int _loadOngoingCount = 0; // unfinished, recent activity
+  int _loadStaleCount = 0; // unfinished, old or no recorded start (abandoned/legacy)
+  int _loadLegacyCount = 0; // counted loads without a recorded FULL event
+  int _loadUnattributedCount = 0; // loads with no recorded area (not matched by the area filter)
+  int _loadUnfinishedCount = 0; // seen but not counted (collection not finalized)
+  int _lastFinalizedRouteCount = -1;
+  Timer? _loadRefreshDebounce;
+  final LoadHistoryRepository _loadRepository = LoadHistoryRepository.standard();
   int _loadTripsCount = 0;
   double _loadTotalWeightKg = 0.0;
   double _loadTotalWeightTons = 0.0;
@@ -150,16 +186,13 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
   bool _isLoadAiLoading = false;
   double _measuredTodayVolume = 4200.0;
   double _measuredMonthlyVolume = 38600.0;
-  final Map<String, String> _etaEstimates = {};
-  double _etaAvgArrivalError = 3.5;
-  int _etaWithin5MinPct = 100;
-  int _etaEvaluatedVisits = 2;
-  List<_EtaRecord> _etaRecords = [];
-  String _recommendations = "Analyzing fleet...";
-  String _fleetInsight = "Analyzing fleet performance patterns...";
-  String _complaintInsight = "Evaluating resident feedback trends...";
-  String _coverageInsight = "Reviewing area coverage efficiency...";
-  bool _isAiLoading = true;
+  /// Every ETA visit evaluated from the persisted notifications (one authoritative dataset).
+  /// The card and the ETA Performance details both derive from it with the same filter.
+  List<EtaVisit> _etaVisits = [];
+  bool _etaLoaded = false;
+  // Recommendations and insights are derived deterministically from the dashboard metrics
+  // for the selected period and area (see the getters near _generateRuleBasedRecommendations).
+  bool _isAiLoading = false;
 
   bool _expCoverageRoutes = true;
   bool _expCommunityIssues = false;
@@ -204,9 +237,12 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
 
   @override
   void dispose() {
+    _visitDebounce?.cancel();
     _refreshRotationController.dispose();
     _scrollController.dispose();
     _trucksSubscription?.cancel();
+    _fleetAgingTimer?.cancel();
+    _loadRefreshDebounce?.cancel();
     _routesSubscription?.cancel();
     _progressSubscription?.cancel();
     _truckIssuesSubscription?.cancel();
@@ -231,7 +267,6 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
     await Future.wait([
       _calculateAnalytics(),
       _generateAiInsights(),
-      _fetchEtaPerformance(),
       _fetchLoadHistoryData(),
       Future.delayed(const Duration(milliseconds: 1500)),
     ]);
@@ -384,6 +419,8 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
     int residentPending = 0;
     int residentResolved = 0;
     int matchedDrivers = 0;
+    int residentTotalAll = 0;
+    int residentUnresolvedAll = 0;
     final Map<String, double> filteredStatusCounts = {"Pending": 0, "In Progress": 0, "Resolved": 0};
 
     for (var item in normalizedItems) {
@@ -420,9 +457,14 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
         matchedDrivers++;
       }
 
-      // Track per-purok frequency for heatmaps using canonicalized name (e.g. Dos Riles -> Purok 3)
-      String targetPurokKey = canonicalPurok ?? rawPurok ?? "Unknown";
-      purokCounts[targetPurokKey] = (purokCounts[targetPurokKey] ?? 0) + 1;
+      // Complaints by area count RESIDENT complaints only (MySQL). Driver truck issues are not
+      // resident complaints and are reported separately (canonical names, e.g. Dos Riles -> Purok 3).
+      if (item['source'] == 'RESIDENT') {
+        residentTotalAll++;
+        if (status != 'Resolved') residentUnresolvedAll++;
+        final String targetPurokKey = canonicalPurok ?? rawPurok ?? "Unknown";
+        purokCounts[targetPurokKey] = (purokCounts[targetPurokKey] ?? 0) + 1;
+      }
     }
 
     if (mounted) {
@@ -433,6 +475,8 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
         // Use REAL FILTERED counts for the info text breakdown
         _complaintSourceData = {"Residents": matchedResidents.toDouble(), "Drivers": matchedDrivers.toDouble()};
         _purokComplaintData = purokCounts;
+        _residentComplaintsTotal = residentTotalAll;
+        _residentComplaintsUnresolved = residentUnresolvedAll;
 
         _matchedResidents = matchedResidents;
         _matchedDrivers = matchedDrivers;
@@ -519,228 +563,132 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
     debugPrint("- Status Distribution: $filteredStatusCounts");
   }
 
-  String _generateRuleBasedRecommendations() {
-    final StringBuffer recs = StringBuffer();
-    final int pendingCount = (_complaintStatusData['Pending'] ?? 0).toInt();
-    final double activeTrucks = (_truckStatusData['Active'] ?? 0);
-    final double idleTrucks = (_truckStatusData['Idle'] ?? 0);
-
-    if (pendingCount > 0) {
-      recs.writeln("• Priority Focus: $pendingCount pending resident complaint(s) in $_selectedArea requiring attention.");
-    } else {
-      recs.writeln("• Resident Feedback: Area reports high satisfaction with no pending complaints.");
-    }
-
-    if (_tomorrowWaste > (_totalFleetCapacity * 0.85)) {
-      recs.writeln("• Capacity Warning: Tomorrow's forecast (${_tomorrowWaste.toInt()} kg) reaches 85% of active fleet capacity (${_totalFleetCapacity.toInt()} kg). Consider pre-assigning backup trucks.");
-    } else {
-      recs.writeln("• Fleet Allocation: Predicted volume (${_tomorrowWaste.toInt()} kg) is within safe operational capacity (${_totalFleetCapacity.toInt()} kg).");
-    }
-
-    if (idleTrucks > 0) {
-      recs.writeln("• Fleet Optimization: ${idleTrucks.toInt()} truck(s) currently idle. Assign to high-density coverage zones.");
-    } else {
-      recs.writeln("• Fleet Status: Active truck deployment is optimal across collection routes.");
-    }
-
-    return recs.toString().trim();
+  /// Collection areas the trucks serve in the current area selection (sweeping areas excluded).
+  List<String> get _expectedVisitAreas {
+    final bool all = _selectedArea == "All Areas";
+    return _geofences
+        .where((AreaGeofence g) => g.isTruckStop && (all || g.name == _selectedArea))
+        .map((AreaGeofence g) => g.name)
+        .toSet()
+        .toList();
   }
 
+  int get _coverageScaleMax {
+    int m = 0;
+    for (final String a in _purokNames) {
+      m = math.max(m, _purokFrequencyData[a] ?? 0);
+      m = math.max(m, _purokComplaintData[a] ?? 0);
+    }
+    return m <= 4 ? 4 : ((m + 1) ~/ 2) * 2;
+  }
+
+  int get _areasVisitedCount {
+    final Map<String, int> c = _visitSummary?.countByArea() ?? const <String, int>{};
+    return _expectedVisitAreas.where((String a) => (c[a] ?? 0) > 0).length;
+  }
+
+  String get _periodLabel => _isDateRange
+      ? "${DateFormat('yyyy-MM-dd').format(_selectedDateRange.start)} to ${DateFormat('yyyy-MM-dd').format(_selectedDateRange.end)}"
+      : DateFormat('yyyy-MM-dd').format(_selectedDateRange.start);
+
+  List<Recommendation> _buildRecommendations() {
+    final VisitSummary? v = _visitSummary;
+    return AnalyticsRecommendations.build(RecommendationInput(
+      periodLabel: _periodLabel,
+      area: _selectedArea,
+      residentComplaintsByArea: _purokComplaintData,
+      pendingResidentComplaints: _residentComplaintsUnresolved,
+      totalResidentComplaints: _residentComplaintsTotal,
+      visitsByArea: v?.countByArea() ?? const <String, int>{},
+      truckStopAreas: _expectedVisitAreas,
+      unconfirmedPasses: v?.unconfirmedPasses ?? const <String, int>{},
+      tripsConsidered: v?.tripsConsidered ?? 0,
+      tripsWithoutEvidence: v?.tripsWithoutEvidence ?? 0,
+      completedTrips: _loadError == null ? _loadTripsCount : 0,
+      measuredWeightTrips: _loadError == null ? _loadMeasuredCount : 0,
+      collectionDataAvailable: v != null,
+    ));
+  }
+
+  String _generateRuleBasedRecommendations() => AnalyticsRecommendations.asText(_buildRecommendations());
+
+  String get _recommendations => _generateRuleBasedRecommendations();
+
+  String get _fleetInsight {
+    final int active = (_truckStatusData['Active'] ?? 0).toInt();
+    final int idle = (_truckStatusData['Idle'] ?? 0).toInt();
+    final int full = (_truckStatusData['Full'] ?? 0).toInt();
+    return "Current snapshot: $active collecting, $full full and $idle not collecting (paused, offline or completed) "
+        "of ${active + idle + full} registered truck(s). This is live status, not a figure for the selected period.";
+  }
+
+  String get _complaintInsight {
+    if (_residentComplaintsTotal == 0) {
+      return "No resident complaints were filed in $_selectedArea for $_periodLabel. This does not measure resident satisfaction.";
+    }
+    return "$_residentComplaintsTotal resident complaint(s) were filed in $_selectedArea for $_periodLabel: "
+        "$_residentComplaintsUnresolved unresolved and ${_residentComplaintsTotal - _residentComplaintsUnresolved} resolved.";
+  }
+
+  String get _coverageInsight {
+    final VisitSummary? v = _visitSummary;
+    if (v == null) return "Collection visits are still loading.";
+    final List<String> expected = _expectedVisitAreas;
+    final int visited = expected.where((String a) => (v.countByArea()[a] ?? 0) > 0).length;
+    final StringBuffer b = StringBuffer(
+        "${v.visits.length} verified collection visit(s) across $visited of ${expected.length} collection area(s).");
+    if (v.tripsWithoutEvidence > 0) {
+      b.write(" ${v.tripsWithoutEvidence} of ${v.tripsConsidered} trip(s) had no usable GPS points, so their visits cannot be verified.");
+    }
+    return b.toString();
+  }
+
+  /// Volume forecast from RECORDED collection weights only (no AI call). The forecast is
+  /// unavailable when no weights were recorded; it is never validated, so no accuracy or
+  /// confidence is claimed.
+  ///
+  /// The previous client-side Gemini call (with an API key embedded in the app) was removed:
+  /// a key in Flutter Web is public. AI-written text needs a server-side proxy (pending approval).
   Future<void> _generateAiInsights() async {
     if (!mounted) return;
+    final String topArea = _selectedArea;
 
-    setState(() => _isAiLoading = true);
-
-    const apiKey = "AIzaSyCPng8Ef9-AsuUiagku1FAQOowQniZYkOo";
-    final model = GenerativeModel(model: 'gemini-1.5-flash-latest', apiKey: apiKey);
-
-    // Prepare data context for AI
-    StringBuffer stats = StringBuffer("System Data (Balintawak Context):\n");
-    stats.writeln("Area: $_selectedArea");
-    stats.writeln("Date: ${DateFormat('yyyy-MM-dd').format(_selectedDateRange.start)}${_isDateRange ? " to ${DateFormat('yyyy-MM-dd').format(_selectedDateRange.end)}" : ""}");
-    stats.writeln("Routes: $_completedRoutes/$_totalRoutes completed");
-    stats.writeln("Complaints: ${_complaintStatusData['Pending']?.toInt() ?? 0} pending");
-    stats.writeln("Efficiency: ${_avgCollectionTime.toStringAsFixed(2)} hours avg time, $_distanceCovered km covered");
-    stats.writeln("MAE Accuracy: ${_predictionAccuracy.toStringAsFixed(1)}% (MAE: ${_maeValue.toStringAsFixed(2)} mins)");
-
-    String topArea = _selectedArea == "All Areas"
-        ? (_purokFrequencyData.entries.isNotEmpty
-        ? _purokFrequencyData.entries.reduce((a, b) => a.value > b.value ? a : b).key
-        : "Sentro")
-        : _selectedArea;
-
-    // Calculate Dynamic Active Fleet Capacity
-    double activeCapacity = 0.0;
-    if (_truckRegistry.isNotEmpty) {
-      _truckRegistry.forEach((tId, tData) {
-        if (tData is Map) {
-          final status = tData['status']?.toString().toLowerCase() ?? 'active';
-          if (status != 'out_of_service' && status != 'inactive' && status != 'maintenance') {
-            final num? cap = num.tryParse(tData['capacity']?.toString() ?? '') ??
-                num.tryParse(tData['truck_capacity']?.toString() ?? '') ??
-                num.tryParse(tData['maxVolume']?.toString() ?? '');
-            activeCapacity += (cap?.toDouble() ?? 5000.0);
-          }
-        }
-      });
-    }
-    _totalFleetCapacity = activeCapacity > 0 ? activeCapacity : 5000.0;
-
-    // Calculate Historical Weight Averages from Collection Progress
     double totalRecordedKg = 0.0;
     int validSessions = 0;
-    if (_allCollectionProgress.isNotEmpty) {
-      _allCollectionProgress.forEach((sId, progress) {
-        if (progress is Map) {
-          progress.forEach((purokKey, purokData) {
-            if (purokData is Map) {
-              final rawName = purokData['name']?.toString() ?? purokKey.toString();
-              final String? canonical = ServiceAreaService.canonicalizeAreaName(rawName) ?? rawName;
-              if (topArea == "All Areas" || canonical == topArea) {
-                final num? weight = num.tryParse(purokData['weight']?.toString() ?? '') ??
-                    num.tryParse(purokData['volume']?.toString() ?? '') ??
-                    num.tryParse(purokData['actual_weight']?.toString() ?? '');
-                if (weight != null && weight > 0) {
-                  totalRecordedKg += weight.toDouble();
-                  validSessions++;
-                }
+    _allCollectionProgress.forEach((sId, progress) {
+      if (progress is Map) {
+        progress.forEach((purokKey, purokData) {
+          if (purokData is Map) {
+            final rawName = purokData['name']?.toString() ?? purokKey.toString();
+            final String canonical = ServiceAreaService.canonicalizeAreaName(rawName) ?? rawName;
+            if (topArea == "All Areas" || canonical == topArea) {
+              final num? weight = num.tryParse(purokData['weight']?.toString() ?? '') ??
+                  num.tryParse(purokData['volume']?.toString() ?? '') ??
+                  num.tryParse(purokData['actual_weight']?.toString() ?? '');
+              if (weight != null && weight > 0) {
+                totalRecordedKg += weight.toDouble();
+                validSessions++;
               }
-            }
-          });
-        }
-      });
-    }
-    double? histAvgKg = validSessions > 0 ? (totalRecordedKg / validSessions) : null;
-
-    double predictedVol = PredictionEngine.predictWasteVolume(topArea, stopCount: _stopsPerRoute, historicalAvgKg: histAvgKg);
-    double weeklyVol = PredictionEngine.predictWeeklyVolume(topArea, avgStops: _stopsPerRoute, historicalAvgKg: histAvgKg);
-
-    // Dynamic GPS-based ETA calculation
-    _etaEstimates.clear();
-    final List<String> targetPuroks = _selectedArea == "All Areas"
-        ? _purokNames
-        : [_selectedArea];
-
-    const Map<String, List<double>> purokCoordinates = {
-      'Ayala Highway': [13.9415, 121.1632],
-      'Brixton Homes': [13.9480, 121.1685],
-      'Central (Purok 1)': [13.9430, 121.1620],
-      'Purok 2': [13.9450, 121.1640],
-      'Purok 3': [13.9470, 121.1660],
-      'Purok 4 / El Pueblo': [13.9490, 121.1690],
-      'Purok Paraiso': [13.9420, 121.1650],
-      'Riverside': [13.9400, 121.1610],
-      'San Nicolas': [13.9380, 121.1590],
-      'T.M. Kalaw Street': [13.9440, 121.1630],
-    };
-
-    for (var p in targetPuroks) {
-      bool foundActiveGps = false;
-      final targetCoords = purokCoordinates[p];
-
-      if (targetCoords != null && _allTruckLocations.isNotEmpty) {
-        _allTruckLocations.forEach((truckId, liveData) {
-          if (!foundActiveGps && liveData is Map) {
-            final double? lat = num.tryParse(liveData['latitude']?.toString() ?? '')?.toDouble();
-            final double? lng = num.tryParse(liveData['longitude']?.toString() ?? '')?.toDouble();
-            final double speed = num.tryParse(liveData['speed']?.toString() ?? '')?.toDouble() ?? 20.0;
-            final bool isOnline = liveData['isOnline'] == true || liveData['status']?.toString().toLowerCase() == 'collecting';
-
-            if (lat != null && lng != null && isOnline) {
-              double distKm = PredictionEngine.calculateHaversineDistance(lat, lng, targetCoords[0], targetCoords[1]);
-              double mins = PredictionEngine.calculateLiveEtaMinutes(distKm, speed, remainingStops: 2);
-              DateTime arrival = DateTime.now().add(Duration(minutes: mins.toInt()));
-              _etaEstimates[p] = DateFormat('h:mm a').format(arrival);
-              foundActiveGps = true;
             }
           }
         });
       }
-
-      if (!foundActiveGps) {
-        double avgSysSpeed = (_avgCollectionTime > 0 && _distanceCovered > 0)
-            ? (_distanceCovered / _avgCollectionTime)
-            : 20.0;
-        double dist = (_purokNames.indexOf(p) + 1) * 0.8;
-        double mins = PredictionEngine.estimateArrivalTime(dist, [avgSysSpeed, avgSysSpeed * 0.9]);
-        DateTime arrival = DateTime.now().add(Duration(minutes: mins.toInt()));
-        _etaEstimates[p] = DateFormat('h:mm a').format(arrival);
-      }
-    }
+    });
+    final double? histAvgKg = validSessions > 0 ? (totalRecordedKg / validSessions) : null;
 
     if (mounted) {
       setState(() {
-        _tomorrowWaste = predictedVol;
-        _weeklyWaste = weeklyVol;
+        _forecastSamples = validSessions;
+        if (histAvgKg != null) {
+          _tomorrowWaste = PredictionEngine.predictWasteVolume(topArea, stopCount: _stopsPerRoute, historicalAvgKg: histAvgKg);
+          _weeklyWaste = PredictionEngine.predictWeeklyVolume(topArea, avgStops: _stopsPerRoute, historicalAvgKg: histAvgKg);
+        } else {
+          _tomorrowWaste = 0;
+          _weeklyWaste = 0;
+        }
+        _geminiSummary = null;
+        _isAiLoading = false;
       });
-    }
-
-    if (_selectedArea == "All Areas") {
-      _purokFrequencyData.forEach((key, value) {
-        stats.writeln("$key: $value visits this month");
-      });
-    }
-
-    final prompt = """
-        You are the Garbage Tracking System AI (Gemini 1.5 Flash) for the Municipality of Balintawak. 
-        Analyze this collection and system performance data to provide a professional, detailed executive report.
-        
-        DATA CONTEXT:
-        - Focus Area: $_selectedArea
-        - Report Date: ${DateFormat('yyyy-MM-dd').format(_selectedDateRange.start)}${_isDateRange ? " to ${DateFormat('yyyy-MM-dd').format(_selectedDateRange.end)}" : ""}
-        - $stats
-        
-        INSTRUCTIONS:
-        1. Provide a long and detailed analytical summary of the performance.
-        2. Identify bottlenecks or exceptional performance areas.
-        3. Provide data-driven predictions for volume and arrival ETAs.
-        4. Give 3-5 strategic recommendations for the fleet manager.
-
-        RESPONSE FORMAT (STRICT):
-        FLEET_INSIGHT: [Detailed 2-3 sentence analysis of truck status and efficiency]
-        COMPLAINT_INSIGHT: [Detailed 2-3 sentence analysis of resident complaints and resolution rates]
-        COVERAGE_INSIGHT: [Detailed 2-3 sentence analysis of area visits and coverage frequency]
-        WASTE_VOLUME: Predicted: ${predictedVol.toStringAsFixed(0)}kg for $topArea
-        ARRIVAL: ETA: ${(_avgCollectionTime * 60 * 0.8).toStringAsFixed(0)} mins for 2km
-        RECOMMENDATIONS: [Strategic bullet points]
-        OVERALL_CONCLUSION: [Final executive summary]
-    """;
-
-    try {
-      final content = [Content.text(prompt)];
-      final response = await model.generateContent(content);
-      final text = response.text ?? "";
-
-      if (mounted) {
-        setState(() {
-          if (text.contains("FLEET_INSIGHT:")) _fleetInsight = text.split("FLEET_INSIGHT:")[1].split("COMPLAINT_INSIGHT:")[0].trim();
-          if (text.contains("COMPLAINT_INSIGHT:")) _complaintInsight = text.split("COMPLAINT_INSIGHT:")[1].split("COVERAGE_INSIGHT:")[0].trim();
-          if (text.contains("COVERAGE_INSIGHT:")) _coverageInsight = text.split("COVERAGE_INSIGHT:")[1].split("WASTE_VOLUME:")[0].trim();
-
-          if (text.contains("RECOMMENDATIONS:")) {
-            _recommendations = text.split("RECOMMENDATIONS:")[1].split("OVERALL_CONCLUSION:")[0].trim();
-          } else {
-            _recommendations = _generateRuleBasedRecommendations();
-          }
-
-          if (_recommendations.trim().isEmpty || _recommendations == "Analyzing fleet...") {
-            _recommendations = _generateRuleBasedRecommendations();
-          }
-
-          if (text.contains("OVERALL_CONCLUSION:")) {
-            _geminiSummary = text.split("OVERALL_CONCLUSION:")[1].trim();
-          }
-          _isAiLoading = false;
-        });
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _isAiLoading = false;
-          _recommendations = _generateRuleBasedRecommendations();
-          _geminiSummary = "Unable to generate real-time AI insights. Showing rule-based system recommendations.";
-        });
-      }
     }
   }
 
@@ -764,10 +712,10 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
       'format': 'xls',
       'start_date': dateStr,
       'end_date': endDateStr,
-      'res_rate': "${_coveragePercent.toInt()}%",
+      'res_rate': _residentComplaintsTotal == 0 ? "N/A" : "${((_residentComplaintsTotal - _residentComplaintsUnresolved) * 100 / _residentComplaintsTotal).round()}%",
       'avg_time': "${_avgCollectionTime.toStringAsFixed(1)} hours",
-      'coverage': "${_coveragePercent.toInt()}%",
-      'routes_done': "$_completedRoutes/$_totalRoutes",
+      'coverage': "$_areasVisitedCount of ${_expectedVisitAreas.length} areas with a verified visit",
+      'routes_done': "$_loadTripsCount full loads",
       'active_count': "${_truckStatusData['Active']?.toInt() ?? 0}",
       'collecting_count': "${_truckStatusData['Active']?.toInt() ?? 0}",
       'full_count': "${_truckStatusData['Full']?.toInt() ?? 0}",
@@ -906,305 +854,182 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
     );
   }
 
-  Future<void> _exportToNativePdf(String category) async {
-    final pdf = pw.Document();
-    final dateStr = DateFormat('MMMM dd, yyyy').format(_selectedDateRange.start);
-    final rangeStr = _isDateRange ? " to ${DateFormat('MMMM dd, yyyy').format(_selectedDateRange.end)}" : "";
-    final genTime = DateFormat('MMM dd, yyyy HH:mm').format(DateTime.now());
-    final primaryColor = PdfColor.fromHex('#00BFA5');
-    final textColor = PdfColor.fromHex('#2C3E50');
-
-    pdf.addPage(
-      pw.MultiPage(
-        pageFormat: PdfPageFormat.a4,
-        margin: const pw.EdgeInsets.all(40),
-        header: (pw.Context context) => pw.Column(
-          children: [
-            pw.Row(
-              mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-              crossAxisAlignment: pw.CrossAxisAlignment.start,
-              children: [
-                pw.Column(
-                  crossAxisAlignment: pw.CrossAxisAlignment.start,
-                  children: [
-                    pw.Text("GARBAGE TRACKING SYSTEM", style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold, color: primaryColor)),
-                    pw.Text("Official Analytics & Performance Report", style: pw.TextStyle(fontSize: 9, color: PdfColors.grey600, fontStyle: pw.FontStyle.italic)),
-                  ],
-                ),
-                pw.Column(
-                  crossAxisAlignment: pw.CrossAxisAlignment.end,
-                  children: [
-                    pw.Text("Area: $_selectedArea", style: pw.TextStyle(fontSize: 9, fontWeight: pw.FontWeight.bold)),
-                    pw.Text("Period: $dateStr$rangeStr", style: pw.TextStyle(fontSize: 9, fontWeight: pw.FontWeight.bold)),
-                    pw.Text("Generated: $genTime", style: pw.TextStyle(fontSize: 8, color: PdfColors.grey)),
-                  ],
-                ),
-              ],
-            ),
-            pw.SizedBox(height: 8),
-            pw.Divider(color: primaryColor, thickness: 1),
-            pw.SizedBox(height: 20),
-          ],
-        ),
-        footer: (pw.Context context) => pw.Column(
-          children: [
-            pw.Divider(color: PdfColors.grey300),
-            pw.Row(
-              mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-              children: [
-                pw.Text("GarbageBiz System | Confidential Performance Data", style: const pw.TextStyle(fontSize: 8, color: PdfColors.grey)),
-                pw.Text("Page ${context.pageNumber} of ${context.pagesCount}", style: const pw.TextStyle(fontSize: 8, color: PdfColors.grey)),
-              ],
-            ),
-          ],
-        ),
-        build: (pw.Context context) => [
-          pw.Text("1. Introduction", style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold, color: textColor)),
-          pw.SizedBox(height: 10),
-          pw.Text(
-            "This document provides a comprehensive summary of the garbage collection system's performance.",
-            style: pw.TextStyle(fontSize: 10, color: textColor, lineSpacing: 1.5),
-          ),
-          pw.SizedBox(height: 25),
-          pw.Text("2. Fleet Performance & Visual Analytics", style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold, color: textColor)),
-          pw.SizedBox(height: 15),
-          pw.Row(
-            children: [
-              _buildPdfAnalysisCard("Truck Status Distribution", _truckStatusData, [PdfColors.green, PdfColors.amber, PdfColors.grey400], ["Active", "Full", "Idle"]),
-              pw.SizedBox(width: 15),
-              _buildPdfAnalysisCard("Complaint Status Overview", _complaintStatusData, [PdfColors.red, PdfColors.blue, PdfColors.green], ["Pending", "In Progress", "Resolved"]),
-            ],
-          ),
-          pw.SizedBox(height: 15),
-          _buildPdfInsightBox("Fleet Performance Analysis", _fleetInsight, primaryColor),
-          pw.SizedBox(height: 30),
-          pw.Text("3. Resident Feedback & Complaints Analysis", style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold, color: textColor)),
-          pw.SizedBox(height: 15),
-          _buildPdfInsightBox("Complaints Documentation", _complaintInsight, PdfColors.red),
-          pw.SizedBox(height: 15),
-          pw.Table(
-            border: pw.TableBorder.all(color: PdfColors.grey300, width: 0.5),
-            children: [
-              _buildPdfTableRow("Issue Type", "Distribution", isHeader: true),
-              _buildPdfTableRow("Pending Complaints", "${_complaintStatusData['Pending']?.toInt() ?? 0}"),
-              _buildPdfTableRow("Resolved Issues", "${_complaintStatusData['Resolved']?.toInt() ?? 0}"),
-              _buildPdfTableRow("Active Investigations", "${_complaintStatusData['In Progress']?.toInt() ?? 0}"),
-            ],
-          ),
-          pw.SizedBox(height: 30),
-          pw.Text("4. Area Coverage & Frequency", style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold, color: textColor)),
-          pw.SizedBox(height: 15),
-          pw.Container(
-            height: 180,
-            padding: const pw.EdgeInsets.only(left: 10, right: 10, bottom: 20),
-            decoration: pw.BoxDecoration(border: pw.Border.all(color: PdfColors.grey100), borderRadius: pw.BorderRadius.circular(4)),
-            child: _buildPdfBarChart(),
-          ),
-          pw.SizedBox(height: 15),
-          _buildPdfInsightBox("Geospatial Coverage Analysis", _coverageInsight, PdfColors.blue),
-          pw.SizedBox(height: 30),
-          pw.Text("5. Performance Forecasts", style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold, color: textColor)),
-          pw.SizedBox(height: 15),
-          pw.Table(
-            border: pw.TableBorder.all(color: PdfColors.grey300, width: 0.5),
-            children: [
-              _buildPdfTableRow("Forecasting Metric", "Calculated Value", isHeader: true),
-              _buildPdfTableRow("Tomorrow's Predicted Volume", "${_tomorrowWaste.toInt()} kg"),
-              _buildPdfTableRow("Weekly Volume Projection", "${_weeklyWaste.toInt()} kg"),
-              _buildPdfTableRow("Avg Stop Duration", "${_avgCollectionTime.toStringAsFixed(1)} hours"),
-              _buildPdfTableRow("Prediction Confidence", "${_predictionAccuracy.toStringAsFixed(1)}%"),
-            ],
-          ),
-          pw.SizedBox(height: 30),
-          pw.Text("6. Strategic Recommendations", style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold, color: textColor)),
-          pw.SizedBox(height: 10),
-          pw.Container(
-            width: double.infinity,
-            padding: const pw.EdgeInsets.all(12),
-            decoration: pw.BoxDecoration(border: pw.Border.all(color: PdfColors.grey200), borderRadius: pw.BorderRadius.circular(6)),
-            child: pw.Text(_recommendations, style: pw.TextStyle(fontSize: 10, color: textColor, lineSpacing: 1.6)),
-          ),
-          pw.SizedBox(height: 30),
-          pw.Text("7. Final Executive Conclusion", style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold, color: textColor)),
-          pw.SizedBox(height: 15),
-          pw.Container(
-            padding: const pw.EdgeInsets.all(15),
-            decoration: pw.BoxDecoration(color: PdfColor.fromHex('#E0F2F1'), borderRadius: pw.BorderRadius.circular(8)),
-            child: pw.Text(
-              _geminiSummary ?? "Based on the metrics above, the system is performing within expected operational boundaries.",
-              style: pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold, color: primaryColor, lineSpacing: 1.5),
-            ),
-          ),
-        ],
-      ),
+  /// Snapshot of exactly what the dashboard shows for the selected range and area. The PDF only
+  /// formats this object, so the report cannot disagree with itself or with the dashboard.
+  AnalyticsReportData _collectReportData() {
+    final DateTime nowManila = LoadHistory.manila(DateTime.now());
+    final ReportMeta meta = ReportMeta(
+      start: _selectedDateRange.start,
+      end: _selectedDateRange.end,
+      area: _selectedArea,
+      generatedAtManila: nowManila,
     );
 
+    // Fleet: same live definition as the dashboard (FleetSnapshot), registered trucks only.
+    ReportFleet fleet;
+    if (_truckRegistry.isEmpty) {
+      fleet = const ReportFleet.unavailable('the truck registry has not loaded');
+    } else {
+      final FleetSnapshot snap = FleetSnapshot.derive(_allTruckLocations, includeCompleted: true);
+      final Map<String, LiveTruck> live = <String, LiveTruck>{for (final LiveTruck t in snap.trucks) t.nodeKey: t};
+      final Map<String, int> counts = <String, int>{'Active': 0, 'Paused': 0, 'Full': 0, 'Completed': 0, 'Offline': 0};
+      _truckRegistry.forEach((Object? id, Object? _) {
+        final LiveTruck? t = live[id.toString()];
+        if (t == null) {
+          counts['Offline'] = counts['Offline']! + 1;
+        } else if (t.isCompleted) {
+          counts['Completed'] = counts['Completed']! + 1;
+        } else {
+          final String st = FleetStatus.collectionState(t.node);
+          if (st == 'FULL') {
+            counts['Full'] = counts['Full']! + 1;
+          } else if (st.contains('IDLE') || st.contains('PAUSED')) {
+            counts['Paused'] = counts['Paused']! + 1;
+          } else {
+            counts['Active'] = counts['Active']! + 1;
+          }
+        }
+      });
+      fleet = ReportFleet.available(counts);
+    }
+
+    // Waste / load history: the same period loads the Waste Collection Summary card uses.
+    ReportWaste waste;
+    if (_loadError != null) {
+      waste = const ReportWaste.unavailable('collection data could not be loaded');
+    } else if (!_loadHasLoaded) {
+      waste = const ReportWaste.unavailable('collection data has not finished loading');
+    } else {
+      waste = ReportWaste.available(
+        rows: _loadTrips
+            .map((DriverTrip t) => ReportLoadRow(
+                  tripId: t.tripId,
+                  driver: t.driverName,
+                  truck: t.truckId,
+                  fullAtManila: LoadHistory.manila(LoadHistory.eventTime(t)),
+                  kg: t.weightKg,
+                  measured: t.isMeasured,
+                  status: t.routeStatus,
+                ))
+            .toList(),
+        partial: _loadPartial,
+        ongoingUnfinished: _loadOngoingCount,
+        staleUnfinished: _loadStaleCount,
+      );
+    }
+
+    // Coverage: the same verified visits as the Purok Coverage chart and the Areas visited card.
+    ReportCoverage coverage;
+    final VisitSummary? vs = _visitSummary;
+    if (vs == null) {
+      coverage = const ReportCoverage.unavailable('collection visits have not loaded');
+    } else {
+      final Map<String, int> counts = vs.countByArea();
+      final List<String> expected = _expectedVisitAreas;
+      coverage = ReportCoverage.available(
+        rows: <ReportCoverageRow>[
+          for (final String area in expected)
+            ReportCoverageRow(area: area, visits: counts[area] ?? 0, unconfirmed: vs.unconfirmedPasses[area] ?? 0),
+        ],
+        areasVisited: _areasVisitedCount,
+        expectedAreas: expected.length,
+        tripsWithoutEvidence: vs.tripsWithoutEvidence,
+      );
+    }
+
+    // ETA: the same filtered visits and summary as the ETA card and its details.
+    ReportEta eta;
+    if (!_etaLoaded) {
+      eta = const ReportEta.unavailable('ETA notifications have not loaded');
+    } else {
+      final List<EtaVisit> visits = _etaFilteredVisits;
+      final EtaSummary es = EtaEvaluation.summarize(visits);
+      String label(EtaVisit v) {
+        switch (v.status) {
+          case EtaVisitStatus.evaluated:
+            return 'Evaluated';
+          case EtaVisitStatus.awaiting:
+            return 'Awaiting arrival';
+          case EtaVisitStatus.noArrival:
+            return 'No arrival recorded';
+          case EtaVisitStatus.withdrawn:
+            return 'Withdrawn';
+          case EtaVisitStatus.noEstimate:
+            return 'No ETA stated';
+        }
+      }
+      eta = ReportEta.available(
+        rows: visits
+            .map((EtaVisit v) => ReportEtaRow(
+                  area: v.area,
+                  truck: v.truckId,
+                  tripId: v.tripId ?? 'not recorded',
+                  sentAt: EtaEvaluation.manila(v.sentMs),
+                  etaMinutes: v.predictedMinutes,
+                  predictedAt: v.predictedArrivalMs == null ? null : EtaEvaluation.manila(v.predictedArrivalMs!),
+                  actualAt: v.arrivalMs == null ? null : EtaEvaluation.manila(v.arrivalMs!),
+                  signedErrorMin: v.signedErrorMin,
+                  status: label(v),
+                ))
+            .toList(),
+        evaluated: es.evaluatedVisits,
+        awaiting: es.awaitingVisits,
+        noArrival: es.noArrivalVisits,
+        withdrawn: es.withdrawnVisits,
+        noEstimate: es.noEstimateVisits,
+        avgAbsErrorMin: es.avgAbsErrorMin,
+        within5Pct: es.within5Pct,
+        totalVisits: es.visits,
+      );
+    }
+
+    final ReportComplaints complaints = ReportComplaints.available(
+      counts: <String, int>{
+        'Pending': (_complaintStatusData['Pending'] ?? 0).toInt(),
+        'In Progress': (_complaintStatusData['In Progress'] ?? 0).toInt(),
+        'Resolved': (_complaintStatusData['Resolved'] ?? 0).toInt(),
+      },
+      byArea: Map<String, int>.from(_purokComplaintData),
+    );
+
+    // A volume forecast only exists when it is derived from recorded collection weights.
+    final ReportForecast forecast = _forecastSamples > 0
+        ? ReportForecast.available(tomorrowKg: _tomorrowWaste, weeklyKg: _weeklyWaste, samples: _forecastSamples)
+        : const ReportForecast.unavailable('no recorded collection weights exist to base a forecast on');
+
+    return AnalyticsReportData(
+      meta: meta,
+      fleet: fleet,
+      waste: waste,
+      coverage: coverage,
+      eta: eta,
+      complaints: complaints,
+      forecast: forecast,
+      aiNarrative: _geminiSummary,
+    );
+  }
+
+  Future<void> _exportToNativePdf(String category) async {
     try {
+      // Refresh the period loads so the report reflects the selected range right now.
+      await _fetchLoadHistoryData();
+      final AnalyticsReportData data = _collectReportData();
+      final pw.Document pdf = AnalyticsPdfBuilder.build(data);
       final bytes = await pdf.save();
       await Printing.sharePdf(
         bytes: bytes,
-        filename: "GarbageBiz_Report_${DateFormat('yyyyMMdd').format(_selectedDateRange.start)}.pdf",
+        filename: "Analytics_Report_${DateFormat('yyyyMMdd').format(_selectedDateRange.start)}_"
+            "${DateFormat('yyyyMMdd').format(_selectedDateRange.end)}.pdf",
       );
       await SystemLogger.logEvent("EXPORT", "Generated PDF Report for $_selectedArea");
     } catch (e) {
       debugPrint("PDF Error: $e");
+      if (mounted) {
+        CustomNotification.showTopNotification(context, "The PDF report could not be generated.", true);
+      }
     }
   }
 
-  pw.TableRow _buildPdfTableRow(String label, String value, {bool isHeader = false}) {
-    return pw.TableRow(
-      children: [
-        pw.Padding(
-          padding: const pw.EdgeInsets.all(8),
-          child: pw.Text(label, style: pw.TextStyle(fontWeight: isHeader ? pw.FontWeight.bold : pw.FontWeight.normal, fontSize: 10)),
-        ),
-        pw.Padding(
-          padding: const pw.EdgeInsets.all(8),
-          child: pw.Text(value, style: pw.TextStyle(fontWeight: isHeader ? pw.FontWeight.bold : pw.FontWeight.normal, fontSize: 10)),
-        ),
-      ],
-    );
-  }
-
-  pw.Widget _buildPdfDonutChart(Map<String, double> data, List<PdfColor> colors) {
-    final values = data.values.toList();
-    final total = values.fold(0.0, (a, b) => a + b);
-    if (total == 0) return pw.Text("No Data");
-
-    return pw.Container(
-      width: 100,
-      height: 100,
-      child: pw.Chart(
-        grid: pw.PieGrid(),
-        datasets: List.generate(values.length, (index) {
-          return pw.PieDataSet(
-            value: values[index],
-            color: colors[index % colors.length],
-            drawSurface: true,
-            innerRadius: 0.5,
-          );
-        }),
-      ),
-    );
-  }
-
-  pw.Widget _buildPdfAnalysisCard(String title, Map<String, double> data, List<PdfColor> colors, List<String> labels) {
-    return pw.Expanded(
-      child: pw.Container(
-        padding: const pw.EdgeInsets.all(15),
-        decoration: pw.BoxDecoration(
-          color: PdfColor.fromHex('#F8F9FA'),
-          borderRadius: pw.BorderRadius.circular(12),
-          border: pw.Border.all(color: PdfColors.grey200, width: 0.5),
-        ),
-        child: pw.Column(
-          children: [
-            pw.Text(title, style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 10)),
-            pw.SizedBox(height: 20),
-            pw.Center(child: _buildPdfDonutChart(data, colors)),
-            pw.SizedBox(height: 20),
-            pw.Wrap(
-              spacing: 12,
-              children: List.generate(labels.length, (i) => _buildPdfLegendItem("${labels[i]} (${data[labels[i]]?.toInt()})", colors[i])),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  pw.Widget _buildPdfBarChart() {
-    final Map<String, int> freqData = _purokFrequencyData.isNotEmpty
-        ? _purokFrequencyData
-        : {"Ayala Highway": 0, "Brixton Area": 0, "Central": 12, "Purok 2": 0, "Purok 3": 6, "Purok 4": 0, "San Isidro": 0};
-    
-    final List<String> areas = freqData.keys.toList();
-    if (areas.isEmpty) return pw.Text("No Frequency Data");
-
-    final datasets = List.generate(areas.length, (index) {
-      final count = (freqData[areas[index]] ?? 0).toDouble();
-      return pw.BarDataSet(
-        color: PdfColors.teal,
-        width: 8,
-        data: [pw.PointChartValue(index.toDouble(), count)],
-      );
-    });
-
-    return pw.Column(
-      crossAxisAlignment: pw.CrossAxisAlignment.start,
-      children: [
-        pw.SizedBox(
-          height: 160,
-          child: pw.Chart(
-            grid: pw.CartesianGrid(
-              xAxis: pw.FixedAxis(
-                List.generate(areas.length, (i) => i.toDouble()),
-                format: (v) => areas[v.toInt()],
-                textStyle: const pw.TextStyle(fontSize: 6),
-                ticks: true,
-              ),
-              yAxis: pw.FixedAxis([0, 10, 20, 30, 40], ticks: true),
-            ),
-            datasets: datasets,
-          ),
-        ),
-        pw.SizedBox(height: 10),
-        pw.Text("Area & Purok Frequency Reference:", style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 8)),
-        pw.SizedBox(height: 4),
-        pw.Table(
-          border: pw.TableBorder.all(color: PdfColors.grey300, width: 0.5),
-          children: [
-            pw.TableRow(
-              decoration: const pw.BoxDecoration(color: PdfColors.grey200),
-              children: [
-                pw.Padding(padding: const pw.EdgeInsets.all(4), child: pw.Text("Area / Purok Name", style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 7))),
-                pw.Padding(padding: const pw.EdgeInsets.all(4), child: pw.Text("Frequency Count", style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 7))),
-              ],
-            ),
-            ...areas.map((area) {
-              final count = freqData[area] ?? 0;
-              return pw.TableRow(
-                children: [
-                  pw.Padding(padding: const pw.EdgeInsets.all(4), child: pw.Text(area, style: const pw.TextStyle(fontSize: 7))),
-                  pw.Padding(padding: const pw.EdgeInsets.all(4), child: pw.Text("$count", style: const pw.TextStyle(fontSize: 7))),
-                ],
-              );
-            }),
-          ],
-        ),
-      ],
-    );
-  }
-
-  pw.Widget _buildPdfLegendItem(String label, PdfColor color) {
-    return pw.Row(
-      mainAxisSize: pw.MainAxisSize.min,
-      children: [
-        pw.Container(width: 8, height: 8, decoration: pw.BoxDecoration(color: color, borderRadius: pw.BorderRadius.circular(2))),
-        pw.SizedBox(width: 4),
-        pw.Text(label, style: const pw.TextStyle(fontSize: 7)),
-      ],
-    );
-  }
-
-  pw.Widget _buildPdfInsightBox(String title, String content, PdfColor themeColor) {
-    return pw.Container(
-      width: double.infinity,
-      padding: const pw.EdgeInsets.all(12),
-      decoration: pw.BoxDecoration(
-        color: PdfColors.white,
-        border: pw.Border(left: pw.BorderSide(color: themeColor, width: 3)),
-      ),
-      child: pw.Column(
-        crossAxisAlignment: pw.CrossAxisAlignment.start,
-        children: [
-          pw.Text("AI Insight: $title", style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 9, color: themeColor)),
-          pw.SizedBox(height: 6),
-          pw.Text(content, style: const pw.TextStyle(fontSize: 9, lineSpacing: 1.4)),
-        ],
-      ),
-    );
-  }
 
   Future<void> _calculateAnalytics() async {
     final startStr = DateFormat('yyyy-MM-dd').format(_selectedDateRange.start);
@@ -1265,8 +1090,6 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
         _avgCollectionTime = durationSessions > 0 ? (totalDuration / durationSessions) / 60 : 0.0;
         _distanceCovered = totalDist;
         _stopsPerRoute = stopsCount;
-        _maeValue = _avgCollectionTime > 0 ? (_avgCollectionTime * 0.08) * 60 : 1.2;
-        _predictionAccuracy = PredictionEngine.calculateAccuracyPercentage(_maeValue, _avgCollectionTime * 60);
       });
     }
 
@@ -1295,152 +1118,75 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
     if (!mounted) return;
     setState(() => _isLoadingLoadData = true);
 
-    DateTime now = DateTime.now();
-    DateTime? start;
-    DateTime? end;
-    int calculatedDays = 30;
+    // The Analytics date range is the authoritative selection for the Waste Collection Summary.
+    final DateTime now = DateTime.now();
+    final DateTime start = _selectedDateRange.start;
+    final DateTime end = _selectedDateRange.end;
+    final int calculatedDays = DateTime(end.year, end.month, end.day)
+            .difference(DateTime(start.year, start.month, start.day))
+            .inDays +
+        1;
 
-    if (_selectedPeriodSummary == "Last 7 days") {
-      start = now.subtract(const Duration(days: 7));
-      end = now;
-      calculatedDays = 7;
-    } else if (_selectedPeriodSummary == "This month") {
-      start = DateTime(now.year, now.month, 1);
-      end = now;
-      calculatedDays = now.difference(start).inDays + 1;
-    } else if (_selectedPeriodSummary == "Today") {
-      start = DateTime(now.year, now.month, now.day, 0, 0, 0);
-      end = DateTime(now.year, now.month, now.day, 23, 59, 59);
-      calculatedDays = 1;
-    } else if (_selectedPeriodSummary == "Custom range") {
-      start = _selectedDateRange.start;
-      end = _selectedDateRange.end;
-      calculatedDays = end.difference(start).inDays + 1;
-    } else if (_selectedPeriodSummary == "Last 30 days") {
-      start = now.subtract(const Duration(days: 30));
-      end = now;
-      calculatedDays = 30;
-    } else {
-      // "All time"
-      start = null;
-      end = null;
-      calculatedDays = 30;
-    }
-
-    final String? startStr = start != null ? DateFormat('yyyy-MM-dd').format(start) : null;
-    final String? endStr = end != null ? DateFormat('yyyy-MM-dd').format(end) : null;
+    final String startStr = DateFormat('yyyy-MM-dd').format(start);
+    final String endStr = DateFormat('yyyy-MM-dd').format(end);
 
     try {
-      final response = await _apiService.getLoadHistory(
-        startDate: startStr,
-        endDate: endStr,
-      );
+      // ONE repository for every Load History consumer: the Waste Collection Summary,
+      // its yearly chart and the Load History dialog all start from this same
+      // finalized, de-duplicated list.
+      final LoadHistoryResult result = await _loadRepository.load(start: start, end: end);
 
-      List<DriverTrip> fetchedTrips = [];
-      if (response.data != null && response.data['success'] == true) {
-        final summary = response.data['summary'] ?? {};
-        final period = response.data['selected_period'] ?? {};
-        final yearly = response.data['yearly_chart'] ?? {};
-        final rawTrips = response.data['trips'] as List? ?? [];
-
-        _loadSelectedYear = period['selected_year'] ?? now.year;
-        _loadYearlyMonths = List<Map<String, dynamic>>.from(yearly['months'] ?? []);
-        fetchedTrips = rawTrips.map((json) => DriverTrip.fromJson(Map<String, dynamic>.from(json))).toList();
-      }
-
-      // Sync with Driver Route History service (pass null dates to fetch ALL Firebase trips)
-      try {
-        final routeHistoryTrips = await DriverRouteHistoryService.fetchRouteHistory(
-          currentUser: UserData(userId: 0, name: 'Admin', email: '', role: 'Admin', approvalStatus: 'APPROVED'),
-          startDate: null,
-          endDate: null,
-          includeAllTrips: false,
-        );
-
-        final Set<String> existingIds = fetchedTrips.map((t) => t.tripId).toSet();
-        for (var rhTrip in routeHistoryTrips) {
-          if (!existingIds.contains(rhTrip.tripId)) {
-            existingIds.add(rhTrip.tripId);
-            fetchedTrips.add(rhTrip);
-          }
+      if (result.isError) {
+        // Every source failed: say so instead of reporting "0 trips".
+        if (mounted) {
+          setState(() => _loadError = "Collection data could not be loaded. Check the connection and try again.");
         }
-      } catch (e) {
-        debugPrint("[ROUTE_HISTORY_SYNC] Error syncing with route history: $e");
-      }
+      } else {
+        _loadSelectedYear = start.year;
+        _loadYearlyMonths = LoadHistory.monthly(result.loads, _loadSelectedYear);
 
-      // Sync with persistent Firebase load_history node
-      try {
-        final loadSnap = await FirebaseDatabase.instance.ref('load_history').get();
-        if (loadSnap.exists && loadSnap.value is Map) {
-          final Map loadMap = loadSnap.value as Map;
-          final Set<String> existingIds = fetchedTrips.map((t) => t.tripId).toSet();
-          loadMap.forEach((key, val) {
-            if (val is Map) {
-              final Map<String, dynamic> jsonMap = Map<String, dynamic>.from(val);
-              jsonMap['trip_id'] = key.toString();
-              final trip = DriverTrip.fromJson(jsonMap);
-              if (!existingIds.contains(trip.tripId)) {
-                existingIds.add(trip.tripId);
-                fetchedTrips.add(trip);
-              }
-            }
+        // Date (Asia/Manila FULL day) then area, with the SAME shared functions Load History uses.
+        final ({List<DriverTrip> matched, int unattributed}) byArea = LoadHistory.forArea(
+          LoadHistory.inRange(result.loads, start, end),
+          _selectedArea,
+          canonicalize: ServiceAreaService.canonicalizeAreaName,
+        );
+        final List<DriverTrip> periodTrips = byArea.matched;
+        periodTrips.sort((a, b) => LoadHistory.eventTime(b).compareTo(LoadHistory.eventTime(a)));
+        final LoadTotals totals = LoadHistory.totals(periodTrips);
+        final ({List<DriverTrip> ongoing, List<DriverTrip> stale}) unfinishedSplit =
+            LoadHistory.splitUnfinished(LoadHistory.inRange(result.unfinished, start, end), now);
+        final int legacyInPeriod = periodTrips.where((DriverTrip t) => !LoadHistory.isGenuineFull(t)).length;
+
+        if (mounted) {
+          setState(() {
+            _loadError = null;
+            _loadPartial = result.isPartial;
+            _loadDaysSelected = calculatedDays;
+            _loadTrips = periodTrips;
+            _loadTripsCount = totals.trips;
+            _loadTotalWeightKg = totals.weightKg;
+            _loadTotalWeightTons = totals.weightTons;
+            _loadMeasuredCount = totals.measuredCount;
+            _loadEstimatedCount = totals.estimatedCount;
+            _loadUnfinishedCount = unfinishedSplit.ongoing.length + unfinishedSplit.stale.length;
+            _loadOngoingCount = unfinishedSplit.ongoing.length;
+            _loadStaleCount = unfinishedSplit.stale.length;
+            _loadLegacyCount = legacyInPeriod;
+            _loadUnattributedCount = byArea.unattributed;
           });
         }
-      } catch (e) {
-        debugPrint("[LOAD_HISTORY_FIREBASE] Error syncing load_history node: $e");
-      }
-
-      // Filter trips client-side strictly according to the selected date range & exclude zero-distance stubs
-      List<DriverTrip> periodTrips = fetchedTrips;
-      if (start != null && end != null) {
-        final DateTime startBound = DateTime(start.year, start.month, start.day, 0, 0, 0);
-        final DateTime endBound = DateTime(end.year, end.month, end.day, 23, 59, 59, 999);
-        periodTrips = fetchedTrips.where((t) {
-          final DateTime tripTime = t.fullTime ?? t.endTime ?? t.startTime;
-          bool inDate = (tripTime.isAfter(startBound) || tripTime.isAtSameMomentAs(startBound)) &&
-                        (tripTime.isBefore(endBound) || tripTime.isAtSameMomentAs(endBound));
-          bool hasDist = t.totalDistanceKm >= 0.015 || t.points.length >= 2;
-          return inDate && hasDist;
-        }).toList();
-      } else {
-        periodTrips = fetchedTrips.where((t) => t.totalDistanceKm >= 0.015 || t.points.length >= 2).toList();
-      }
-
-      // Sort trips descending (newest first)
-      periodTrips.sort((a, b) {
-        final DateTime tA = a.fullTime ?? a.endTime ?? a.startTime;
-        final DateTime tB = b.fullTime ?? b.endTime ?? b.startTime;
-        return tB.compareTo(tA);
-      });
-
-      // Recalculate Period Totals
-      double totalKg = 0.0;
-      int measuredCount = 0;
-      int estimatedCount = 0;
-      for (var t in periodTrips) {
-        totalKg += t.weightKg;
-        if (t.isMeasured) {
-          measuredCount++;
-        } else {
-          estimatedCount++;
-        }
-      }
-
-      if (mounted) {
-        setState(() {
-          _loadDaysSelected = calculatedDays;
-          _loadTrips = periodTrips;
-          _loadTripsCount = periodTrips.length;
-          _loadTotalWeightKg = totalKg;
-          _loadTotalWeightTons = totalKg / 1000.0;
-          _loadMeasuredCount = measuredCount;
-          _loadEstimatedCount = estimatedCount;
-        });
       }
     } catch (e) {
       debugPrint("Error fetching load history: $e");
+      if (mounted) setState(() => _loadError = "Collection data could not be loaded. Please try again.");
     } finally {
-      if (mounted) setState(() => _isLoadingLoadData = false);
+      if (mounted) {
+        setState(() {
+          _isLoadingLoadData = false;
+          _loadHasLoaded = true;
+        });
+      }
     }
 
     _fetchAiLoadSummary(startStr, endStr);
@@ -1582,7 +1328,87 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
     );
   }
 
+  AreaGeofence _toGeofence(ServiceArea a) => AreaGeofence(
+        name: ServiceAreaService.canonicalizeAreaName(a.name) ?? a.name,
+        lat: a.entranceLat,
+        lng: a.entranceLng,
+        radiusM: a.radius,
+        polygon: a.boundaryGeometry,
+        isTruckStop: a.isTruckStop && a.verificationStatus.toUpperCase() == 'VERIFIED',
+      );
+
+  /// Reads the configured service areas (read-only). Falls back to the documented default
+  /// areas only when none can be read, and says so on the chart.
+  Future<void> _loadGeofences() async {
+    final List<AreaGeofence> list = <AreaGeofence>[];
+    try {
+      final DataSnapshot snap = await _database.ref('puroks').get().timeout(const Duration(seconds: 10));
+      if (snap.exists && snap.value is Map) {
+        (snap.value as Map).forEach((k, v) {
+          if (v is! Map) return;
+          try {
+            final Map<String, dynamic> m = Map<String, dynamic>.from(v);
+            m['id'] ??= k.toString();
+            list.add(_toGeofence(ServiceArea.fromJson(m)));
+          } catch (e) {
+            debugPrint("[VISITS] Skipping malformed area $k: $e");
+          }
+        });
+      }
+    } catch (e) {
+      debugPrint("[VISITS] Service areas could not be read: $e");
+    }
+    final bool defaults = list.isEmpty;
+    if (defaults) list.addAll(ServiceAreaService.defaultServiceAreas.map(_toGeofence));
+    if (!mounted) return;
+    setState(() {
+      _geofences = list;
+      _geofencesFromDefaults = defaults;
+      _applyVisitSummary();
+    });
+  }
+
+  /// Recomputes verified visits for the selected period and area (no setState).
+  void _applyVisitSummary() {
+    if (_geofences.isEmpty) return;
+    final VisitSummary v = CollectionVisits.detect(
+      trips: _allDriverRoutes,
+      areas: _geofences,
+      start: _selectedDateRange.start,
+      end: _selectedDateRange.end,
+      areaFilter: _selectedArea,
+    );
+    final Map<String, int> counts = v.countByArea();
+    _visitSummary = v;
+    _purokFrequencyData = <String, int>{for (final String a in _purokNames) a: counts[a] ?? 0};
+    _purokVisitCounts = Map<String, int>.from(_purokFrequencyData);
+  }
+
+  /// driver_routes changes with every GPS point while trucks are out: recompute at most
+  /// once every 2 seconds.
+  void _scheduleVisitRecompute() {
+    _visitDebounce?.cancel();
+    _visitDebounce = Timer(const Duration(seconds: 2), () {
+      if (mounted) setState(_applyVisitSummary);
+    });
+  }
+
+  Future<void> _loadAssignments() async {
+    final AssignmentResult<AssignmentList> r = await _assignmentService.list(
+      startDate: DateFormat('yyyy-MM-dd').format(_selectedDateRange.start),
+      endDate: DateFormat('yyyy-MM-dd').format(_selectedDateRange.end),
+    );
+    if (!mounted) return;
+    setState(() {
+      _assignmentFailure = r.failure;
+      _assignmentMessage = r.message;
+      _assignments = r.isOk ? r.value : null;
+    });
+  }
+
   void _fetchChartData() {
+    _loadGeofences();
+    _loadAssignments();
     _trucksSubscription?.cancel();
     _routesSubscription?.cancel();
     _progressSubscription?.cancel();
@@ -1597,18 +1423,36 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
       }
     });
 
-    _trucksSubscription = _database.ref('truck_locations').onValue.listen((event) {
-      if (event.snapshot.exists && event.snapshot.value != null) {
-        _allTruckLocations = event.snapshot.value as Map;
-        _updateTruckStatusData();
-      }
+    _trucksSubscription = TruckLocationsFeed.shared().events.listen((event) {
+      _allTruckLocations = (event.snapshot.exists && event.snapshot.value is Map)
+          ? event.snapshot.value as Map
+          : <dynamic, dynamic>{};
+      _updateTruckStatusData();
     });
+    // Freshness changes without any event (a crashed driver writes nothing).
+    _fleetAgingTimer?.cancel();
+    _fleetAgingTimer = Timer.periodic(const Duration(seconds: 15), (_) => _updateTruckStatusData());
 
     _routesSubscription = _database.ref('driver_routes').onValue.listen((event) {
       if (event.snapshot.exists && event.snapshot.value != null) {
         _allDriverRoutes = event.snapshot.value as Map;
         _recalculateRoutesMetrics();
         _calculateAnalytics();
+
+        // A newly finalized collection (FULL) must show up in Load History and the
+        // Waste Collection Summary: reload once, debounced, only when the number of
+        // finalized collections actually changed (no polling).
+        int finalized = 0;
+        _allDriverRoutes.forEach((_, v) {
+          if (v is Map && v['collection'] is Map && (v['collection'] as Map)['finalized_at_ms'] != null) finalized++;
+        });
+        if (_lastFinalizedRouteCount >= 0 && finalized != _lastFinalizedRouteCount) {
+          _loadRefreshDebounce?.cancel();
+          _loadRefreshDebounce = Timer(const Duration(seconds: 2), () {
+            if (mounted) _fetchLoadHistoryData();
+          });
+        }
+        _lastFinalizedRouteCount = finalized;
       }
     });
 
@@ -1670,36 +1514,31 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
 
   void _updateTruckStatusData() {
     final Map<String, double> counts = {"Active": 0, "Idle": 0, "Full": 0};
-    final int now = DateTime.now().millisecondsSinceEpoch;
+
+    // Same live definition as the Admin/Resident cards and the live maps
+    // (FleetSnapshot): online flag, not OFFLINE/COMPLETED/FINISHED, fresh within
+    // FleetStatus.freshnessWindowMs, one entry per driver.
+    final FleetSnapshot fleet = FleetSnapshot.derive(_allTruckLocations);
+    final Map<String, Map> liveByNode = <String, Map>{
+      for (final LiveTruck t in fleet.trucks) t.nodeKey: t.node,
+    };
 
     // Iterate over the official registry to ensure we only count valid trucks
     _truckRegistry.forEach((truckId, registryData) {
-      // Find current live status from truck_locations
-      final liveData = _allTruckLocations[truckId.toString()];
-
-      if (liveData is Map) {
-        String status = liveData['status']?.toString().toLowerCase() ?? 'idle';
-        bool isOnlineField = liveData['isOnline'] == true;
-        final dynamic lastSeenRaw = liveData['lastSeen'];
-        final int lastSeen = lastSeenRaw is num ? lastSeenRaw.toInt() : 0;
-        
-        // 2-minute freshness window
-        final bool isFresh = lastSeen > 0 && (now - lastSeen).abs() < 120000;
-        final bool isGenuinelyOnline = isOnlineField && isFresh;
-
-        if (!isGenuinelyOnline) {
-          counts['Idle'] = counts['Idle']! + 1;
-        } else if (status == 'active' || status == 'collecting') {
-          counts['Active'] = counts['Active']! + 1;
-        } else if (status == 'full') {
-          counts['Full'] = counts['Full']! + 1;
-        } else {
-          // Other online statuses count as active for this chart context
-          counts['Active'] = counts['Active']! + 1;
-        }
-      } else {
-        // Truck exists in registry but has no live location/status record
+      final Map? live = liveByNode[truckId.toString()];
+      if (live == null) {
+        // Offline, stale, completed, or no live record: not in service.
         counts['Idle'] = counts['Idle']! + 1;
+        return;
+      }
+      final String status = FleetStatus.collectionState(live);
+      if (status == 'FULL') {
+        counts['Full'] = counts['Full']! + 1;
+      } else if (status.contains('IDLE') || status.contains('PAUSED')) {
+        // Connected but paused: not collecting.
+        counts['Idle'] = counts['Idle']! + 1;
+      } else {
+        counts['Active'] = counts['Active']! + 1;
       }
     });
 
@@ -1732,25 +1571,9 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
         _completedRoutes = currentMetrics['completed'] as int;
         _coveragePercent = _totalRoutes > 0 ? (_completedRoutes / _totalRoutes) * 100 : 0.0;
 
-        final Map<String, int> freq = {};
-        final Map<String, int> visitCounts = {};
-        if (currentMetrics['purokCompleted'] != null) {
-          final Map<String, int> purokCompletedMap = currentMetrics['purokCompleted'] as Map<String, int>;
-          final Map<String, int> purokExpectedMap = currentMetrics['purokExpected'] as Map<String, int>;
-          for (var area in _purokNames) {
-            int completed = purokCompletedMap[area] ?? 0;
-            int total = purokExpectedMap[area] ?? 1;
-            visitCounts[area] = area == "San Nicolas" ? 0 : completed;
-            freq[area] = (area == "San Nicolas" || total == 0) ? 0 : ((completed / total) * 100).toInt();
-          }
-        } else {
-          for (var area in _purokNames) {
-            visitCounts[area] = 0;
-            freq[area] = 0;
-          }
-        }
-        _purokFrequencyData = freq;
-        _purokVisitCounts = visitCounts;
+        // Purok Coverage shows VERIFIED VISIT COUNTS (not a percentage of a synthetic
+        // days x areas denominator). Debounced: this runs on every new GPS point.
+        _scheduleVisitRecompute();
 
         // Calculate Trends
         int prevCompleted = prevMetrics['completed'] as int? ?? 0;
@@ -2088,9 +1911,9 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
                                               children: [
                                                 Expanded(
                                                   child: _buildCompactMobileMetricCard(
-                                                    title: "Routes done",
-                                                    value: _totalRoutes > 0 ? "$_completedRoutes" : "N/A",
-                                                    subtitle: _totalRoutes > 0 ? "of $_totalRoutes scheduled" : "No schedule data",
+                                                    title: "Full loads",
+                                                    value: _loadError != null ? "N/A" : (_loadHasLoaded ? "$_loadTripsCount" : "..."),
+                                                    subtitle: "Trips that reached FULL",
                                                     icon: Icons.local_shipping_rounded,
                                                     cardBgColor: const Color(0xFFF3F9F3),
                                                     borderColor: const Color(0xFFE2F0E2),
@@ -2102,9 +1925,9 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
                                                 const SizedBox(width: 8),
                                                 Expanded(
                                                   child: _buildCompactMobileMetricCard(
-                                                    title: "Completion",
-                                                    value: _totalRoutes > 0 ? "${_routeCompletionRate.toStringAsFixed(0)}%" : "N/A",
-                                                    subtitle: _totalRoutes > 0 ? "$_completedRoutes of $_totalRoutes routes" : "No schedule data",
+                                                    title: "Areas visited",
+                                                    value: _visitSummary == null ? "..." : "$_areasVisitedCount/${_expectedVisitAreas.length}",
+                                                    subtitle: "Verified by GPS",
                                                     icon: Icons.map_rounded,
                                                     cardBgColor: const Color(0xFFF0F6FE),
                                                     borderColor: const Color(0xFFE1EDFE),
@@ -2140,12 +1963,12 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
                                               children: [
                                                 Expanded(
                                                   child: _buildMetricCard(
-                                                    title: "Routes done",
-                                                    value: _totalRoutes > 0 ? "$_completedRoutes" : "N/A",
-                                                    subtitle: _totalRoutes > 0 ? "of $_totalRoutes scheduled" : "No schedule data",
+                                                    title: "Full loads",
+                                                    value: _loadError != null ? "N/A" : (_loadHasLoaded ? "$_loadTripsCount" : "..."),
+                                                    subtitle: "collection trips that reached FULL capacity",
                                                     icon: Icons.local_shipping_rounded,
                                                     color: const Color(0xFF4CAF50),
-                                                    trendText: _routeTrend ?? "N/A",
+                                                    trendText: "N/A",
                                                     isPositive: _routeTrendPositive,
                                                     onTap: () => _showInsightDialog("routes_done"),
                                                   ),
@@ -2153,12 +1976,12 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
                                                 const SizedBox(width: 16),
                                                 Expanded(
                                                   child: _buildMetricCard(
-                                                    title: "Route completion",
-                                                    value: _totalRoutes > 0 ? "${_routeCompletionRate.toStringAsFixed(0)}%" : "N/A",
-                                                    subtitle: _totalRoutes > 0 ? "$_completedRoutes completed / $_totalRoutes scheduled" : "No schedule data",
+                                                    title: "Areas visited",
+                                                    value: _visitSummary == null ? "..." : "$_areasVisitedCount/${_expectedVisitAreas.length}",
+                                                    subtitle: "collection areas with a verified visit",
                                                     icon: Icons.map_rounded,
                                                     color: const Color(0xFF2196F3),
-                                                    trendText: _routeCompletionTrendText ?? "N/A",
+                                                    trendText: "N/A",
                                                     isPositive: _routeCompletionTrendPositive,
                                                     onTap: () => _showInsightDialog("route_completion"),
                                                   ),
@@ -2566,22 +2389,13 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
   }
 
   Future<void> _showDateRangePicker(BuildContext context) async {
-    DateTimeRange? picked = await showDialog<DateTimeRange>(
-      context: context,
-      builder: (context) => Dialog(
-        backgroundColor: Colors.white,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(32)),
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 420),
-          child: _CuteDateRangePicker(initialRange: _selectedDateRange),
-        ),
-      ),
-    );
+    final AppDatePick? pick = await showAppDateRangePicker(context, initialRange: _selectedDateRange, clearable: true);
+    if (pick == null) return; // cancelled: keep the current period
 
-    if (picked != null) {
-      setState(() { _selectedDateRange = picked!; _isDateRange = true; });
+    if (pick.range != null) {
+      setState(() { _selectedDateRange = pick.range!; _isDateRange = true; });
     } else {
-      // CLEAR button was pressed (returns null)
+      // Clear: back to the default last 30 days
       setState(() {
         _selectedDateRange = DateTimeRange(
           start: DateTime.now().subtract(const Duration(days: 30)),
@@ -2827,58 +2641,13 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
     VoidCallback onAction;
 
     if (metricType == "routes_done") {
-      title = "Routes done";
+      title = "Full loads";
       icon = Icons.local_shipping_rounded;
       color = const Color(0xFF4CAF50);
-      actionLabel = "View route records →";
+      actionLabel = "View load history →";
       onAction = () {
         Navigator.pop(context);
-        widget.onNavigate?.call(1);
-      };
-
-      int uncompleted = _totalRoutes > _completedRoutes ? _totalRoutes - _completedRoutes : 0;
-      content = Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.baseline,
-            textBaseline: TextBaseline.alphabetic,
-            children: [
-              Text(
-                "$_completedRoutes",
-                style: const TextStyle(fontSize: 36, fontWeight: FontWeight.w900, color: Color(0xFF1A1A1A)),
-              ),
-              const SizedBox(width: 8),
-              Text(
-                "of $_totalRoutes scheduled",
-                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: Colors.grey.shade600),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          Text(
-            uncompleted > 0
-                ? "Scheduled routes were completed in this period. Confirm status of uncompleted routes before marking them missed."
-                : "All scheduled routes in this period have been successfully completed.",
-            style: TextStyle(fontSize: 13, color: Colors.grey.shade700, height: 1.4),
-          ),
-          const SizedBox(height: 20),
-          _buildDialogRow("Completed", "$_completedRoutes"),
-          const Divider(height: 24),
-          _buildDialogRow("Scheduled", "$_totalRoutes"),
-          const Divider(height: 24),
-          _buildDialogRow("Previous period", "${_prevCompletedRoutes}"),
-        ],
-      );
-    } else if (metricType == "route_completion") {
-      title = "Route completion";
-      icon = Icons.map_rounded;
-      color = const Color(0xFF2196F3);
-      actionLabel = "View route records →";
-      onAction = () {
-        Navigator.pop(context);
-        widget.onNavigate?.call(1);
+        _showLoadHistoryModal(context);
       };
 
       content = Column(
@@ -2886,20 +2655,58 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
         mainAxisSize: MainAxisSize.min,
         children: [
           Text(
-            _totalRoutes > 0 ? "${_routeCompletionRate.toStringAsFixed(0)}%" : "N/A",
+            _loadError != null ? "N/A" : "$_loadTripsCount",
             style: const TextStyle(fontSize: 36, fontWeight: FontWeight.w900, color: Color(0xFF1A1A1A)),
           ),
           const SizedBox(height: 12),
           Text(
-            "Completion changed from ${_prevRouteCompletionRate.toStringAsFixed(0)}% to ${_routeCompletionRate.toStringAsFixed(0)}%. This measures completion of scheduled routes, not geographic coverage.",
+            _loadError ??
+                "Distinct collection trips that reached FULL capacity in this period, counted once per trip ID. "
+                    "FULL stops collection; the trip is finalized later when the driver marks it COMPLETED. "
+                    "The same records as Load History and the Waste Collection Summary.",
             style: TextStyle(fontSize: 13, color: Colors.grey.shade700, height: 1.4),
           ),
           const SizedBox(height: 20),
-          _buildDialogRow("Current period", "$_completedRoutes / $_totalRoutes"),
+          _buildDialogRow("Full loads", "$_loadTripsCount"),
           const Divider(height: 24),
-          _buildDialogRow("Previous period", "$_prevCompletedRoutes / $_prevTotalRoutes"),
+          _buildDialogRow("Ongoing (not finished)", "$_loadOngoingCount"),
           const Divider(height: 24),
-          _buildDialogRow("Change", _routeCompletionTrendText ?? "N/A"),
+          _buildDialogRow("Stale unfinished (excluded)", "$_loadStaleCount"),
+        ],
+      );
+    } else if (metricType == "route_completion") {
+      title = "Areas visited";
+      icon = Icons.map_rounded;
+      color = const Color(0xFF2196F3);
+      actionLabel = "Close";
+      onAction = () => Navigator.pop(context);
+
+      final VisitSummary? v = _visitSummary;
+      final Map<String, int> counts = v?.countByArea() ?? const <String, int>{};
+      final List<String> expected = _expectedVisitAreas;
+      content = Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            v == null ? "..." : "$_areasVisitedCount of ${expected.length}",
+            style: const TextStyle(fontSize: 36, fontWeight: FontWeight.w900, color: Color(0xFF1A1A1A)),
+          ),
+          const SizedBox(height: 12),
+          Text(
+            "Collection areas with at least one verified visit in this period. A visit needs at least 3 accurate "
+            "GPS fixes inside the area over at least 60 seconds while the trip is ACTIVE (paused, full and completed "
+            "travel is excluded), counted once per trip and area. It shows the truck was there to collect, not that "
+            "every household was serviced. There is no schedule data, so no completion rate is shown.",
+            style: TextStyle(fontSize: 13, color: Colors.grey.shade700, height: 1.4),
+          ),
+          const SizedBox(height: 20),
+          for (final String area in expected) ...<Widget>[
+            _buildDialogRow(area, "${counts[area] ?? 0} visit(s)"),
+            const Divider(height: 20),
+          ],
+          if (v != null && v.tripsWithoutEvidence > 0)
+            _buildDialogRow("Trips without usable GPS", "${v.tripsWithoutEvidence} of ${v.tripsConsidered}"),
         ],
       );
     } else {
@@ -3158,7 +2965,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
                 children: [
                   const Text("Purok Coverage", style: TextStyle(fontWeight: FontWeight.w900, fontSize: 16, color: Color(0xFF1A1A1A))),
                   const SizedBox(height: 2),
-                  Text("Collection frequency & resident complaints", style: TextStyle(fontSize: 12, color: Colors.grey.shade600, fontWeight: FontWeight.w500)),
+                  Text("Verified collection visits & resident complaints", style: TextStyle(fontSize: 12, color: Colors.grey.shade600, fontWeight: FontWeight.w500)),
                 ],
               ),
               Container(
@@ -3176,7 +2983,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
             children: [
               Container(width: 10, height: 10, decoration: BoxDecoration(color: const Color(0xFF8E24AA), borderRadius: BorderRadius.circular(2))),
               const SizedBox(width: 6),
-              const Text("Collection frequency (Visits)", style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: Color(0xFF2C3E50))),
+              const Text("Verified visits", style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: Color(0xFF2C3E50))),
               const SizedBox(width: 24),
               Container(width: 10, height: 10, decoration: BoxDecoration(color: const Color(0xFF2196F3), borderRadius: BorderRadius.circular(2))),
               const SizedBox(width: 6),
@@ -3185,7 +2992,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
           ),
           const SizedBox(height: 20),
 
-          // Scale Header
+          // Scale Header (same scale on both sides, from the largest value shown)
           Row(
             children: [
               const Expanded(flex: 3, child: SizedBox()),
@@ -3193,14 +3000,9 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
                 flex: 4,
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: const [
-                    Text("10", style: TextStyle(fontSize: 10, color: Colors.grey, fontWeight: FontWeight.w700)),
-                    Text("8", style: TextStyle(fontSize: 10, color: Colors.grey, fontWeight: FontWeight.w700)),
-                    Text("0", style: TextStyle(fontSize: 10, color: Colors.grey, fontWeight: FontWeight.w900)),
-                    Text("5", style: TextStyle(fontSize: 10, color: Colors.grey, fontWeight: FontWeight.w700)),
-                    Text("8", style: TextStyle(fontSize: 10, color: Colors.grey, fontWeight: FontWeight.w700)),
-                    Text("10", style: TextStyle(fontSize: 10, color: Colors.grey, fontWeight: FontWeight.w700)),
-                  ],
+                  children: <String>["$_coverageScaleMax", "${(_coverageScaleMax / 2).round()}", "0", "${(_coverageScaleMax / 2).round()}", "$_coverageScaleMax"]
+                      .map((String t) => Text(t, style: const TextStyle(fontSize: 10, color: Colors.grey, fontWeight: FontWeight.w700)))
+                      .toList(),
                 ),
               ),
             ],
@@ -3212,7 +3014,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
             int visits = _purokFrequencyData[area] ?? 0;
             int complaints = (_purokComplaintData[area] ?? 0).toInt();
 
-            double maxScale = 10.0;
+            final double maxScale = _coverageScaleMax.toDouble();
             double visitRatio = (visits / maxScale).clamp(0.0, 1.0);
             double complaintRatio = (complaints / maxScale).clamp(0.0, 1.0);
 
@@ -3298,10 +3100,31 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
           const SizedBox(height: 16),
           const Center(
             child: Text(
-              "San Nicolas: stationary sweeping area",
+              "San Nicolas: stationary sweeping area (not serviced by truck, no visits counted)",
               style: TextStyle(fontSize: 11, fontStyle: FontStyle.italic, color: Colors.grey, fontWeight: FontWeight.w500),
             ),
           ),
+          const SizedBox(height: 10),
+          Text(
+            "A verified visit = one trip with at least 3 accurate GPS fixes inside the area over at least 60 seconds while "
+            "ACTIVE, counted once per trip and area. Paused, full and completed travel is excluded. It does not prove every "
+            "household was serviced. Complaints = resident complaints filed in the period.",
+            style: TextStyle(fontSize: 10.5, color: Colors.grey.shade600, height: 1.4),
+          ),
+          if (_visitSummary != null && _visitSummary!.tripsWithoutEvidence > 0) ...<Widget>[
+            const SizedBox(height: 6),
+            Text(
+              "${_visitSummary!.tripsWithoutEvidence} of ${_visitSummary!.tripsConsidered} trip(s) in this period had no usable GPS points, so their visits cannot be verified.",
+              style: const TextStyle(fontSize: 10.5, color: Color(0xFFB45309), fontWeight: FontWeight.w600, height: 1.4),
+            ),
+          ],
+          if (_geofencesFromDefaults) ...<Widget>[
+            const SizedBox(height: 6),
+            const Text(
+              "Configured service areas could not be read; the documented default area boundaries were used.",
+              style: TextStyle(fontSize: 10.5, color: Color(0xFFB45309), fontWeight: FontWeight.w600, height: 1.4),
+            ),
+          ],
           const SizedBox(height: 24),
           Center(
             child: TextButton(
@@ -3336,7 +3159,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
             ),
             child: _EtaPerformanceModal(
               scrollController: scrollController,
-              initialRecords: _etaRecords,
+              initialVisits: _etaVisits,
               initialArea: _selectedArea,
               selectedDateRange: _selectedDateRange,
               purokNames: _purokNames,
@@ -3354,7 +3177,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 880, maxHeight: 820),
             child: _EtaPerformanceModal(
-              initialRecords: _etaRecords,
+              initialVisits: _etaVisits,
               initialArea: _selectedArea,
               selectedDateRange: _selectedDateRange,
               purokNames: _purokNames,
@@ -3455,40 +3278,94 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
   }
 
   void _showLoadHistoryModal(BuildContext context) {
-    final double width = MediaQuery.of(context).size.width;
-    final widgetContent = _LoadHistoryDialogModal(
-      isMobile: width < 600,
+    showLoadHistoryDialog(
+      context,
+      date: _selectedDateRange.end,
       onDataUpdated: () => _fetchLoadHistoryData(),
-    );
+      onOpenRouteHistory: widget.onOpenRouteHistory,
+    ).whenComplete(() {
+      // Reopening the summary after the dialog keeps both views on the same data.
+      if (mounted) _fetchLoadHistoryData();
+    });
+  }
 
-    if (width < 600) {
-      showGeneralDialog(
-        context: context,
-        barrierDismissible: true,
-        barrierLabel: "Load History",
-        barrierColor: Colors.black54,
-        transitionDuration: const Duration(milliseconds: 200),
-        pageBuilder: (context, anim1, anim2) => SafeArea(
-          child: Scaffold(
-            backgroundColor: const Color(0xFFF8FAFC),
-            body: widgetContent,
-          ),
-        ),
-      );
-    } else {
-      showDialog(
-        context: context,
-        builder: (context) => Dialog(
-          backgroundColor: Colors.white,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-          insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 20),
-          child: ConstrainedBox(
-            constraints: BoxConstraints(maxWidth: math.min(width - 40, 720), maxHeight: 720),
-            child: widgetContent,
-          ),
-        ),
+  /// Scheduled Route Completion (operational) and Assigned-Area Coverage (verified GPS visits),
+  /// shown only when real assignments exist for the period. Historical trips without an
+  /// assignment are never given an invented schedule.
+  Widget _buildScheduledRoutesCard() {
+    final AssignmentList? data = _assignments;
+    if (data == null || _assignmentFailure != AssignmentFailure.none) {
+      // Unavailable (server not configured / not set up / no access): say so briefly, once.
+      if (_assignmentFailure == AssignmentFailure.none || _assignmentFailure == AssignmentFailure.notSetUp ||
+          _assignmentFailure == AssignmentFailure.notConfigured) {
+        return const SizedBox.shrink();
+      }
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 16),
+        child: Text("Scheduled routes: ${_assignmentMessage ?? 'unavailable'}", style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
       );
     }
+    final List<RouteAssignment> items =
+        data.items.where((RouteAssignment a) => AssignedAreaCoverage.includesArea(a, _selectedArea)).toList();
+    if (items.isEmpty) return const SizedBox.shrink();
+    final AssignmentSummary s = AssignmentSummary.fromItems(items, data.today);
+
+    // Verified visits per trip: the SAME visit summary as Purok Coverage (period + area filter).
+    final Map<String, Set<String>> visitedByTrip = <String, Set<String>>{};
+    for (final CollectionVisit x in _visitSummary?.visits ?? const <CollectionVisit>[]) {
+      (visitedByTrip[x.tripId] ??= <String>{}).add(x.area);
+    }
+    final AssignedAreaCoverage cov = AssignedAreaCoverage.compute(items, visitedByTrip, areaFilter: _selectedArea);
+
+    Widget metric(String label, String value, String note) => Expanded(
+          child: Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(color: const Color(0xFFF8F9FA), borderRadius: BorderRadius.circular(14)),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
+              Text(label, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: Colors.grey.shade700)),
+              const SizedBox(height: 4),
+              Text(value, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w900, color: Color(0xFF1A1A1A))),
+              const SizedBox(height: 2),
+              Text(note, style: TextStyle(fontSize: 10.5, color: Colors.grey.shade600)),
+            ]),
+          ),
+        );
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16),
+      child: Container(
+        padding: const EdgeInsets.all(20),
+        decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(24), boxShadow: AppTheme.balancedPulidongShadow),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
+          const Row(children: <Widget>[
+            Icon(Icons.assignment_turned_in_rounded, color: Color(0xFF3949AB), size: 20),
+            SizedBox(width: 8),
+            Text("Scheduled Routes", style: TextStyle(fontWeight: FontWeight.w900, fontSize: 16, color: Color(0xFF1A1A1A))),
+          ]),
+          const SizedBox(height: 12),
+          Row(children: <Widget>[
+            metric(
+              "Scheduled route completion",
+              s.completionRate == null ? "Not available" : "${s.completionRate!.toStringAsFixed(0)}%",
+              s.due == 0 ? "No assignments due yet" : "${s.completed} of ${s.due} due assignment(s) completed",
+            ),
+            const SizedBox(width: 10),
+            metric(
+              "Assigned-area coverage",
+              cov.percent == null ? "Not available" : "${cov.percent!.toStringAsFixed(0)}%",
+              cov.assignedAreas == 0 ? "No started assignments" : "${cov.verifiedAreas} of ${cov.assignedAreas} assigned area(s) with a verified visit",
+            ),
+          ]),
+          const SizedBox(height: 10),
+          Text(
+            "Pending ${s.pending} · In progress ${s.inProgress} · Completed ${s.completed} · Missed ${s.missed} · Cancelled ${s.cancelled}. "
+            "Completion is operational (trip COMPLETED); a FULL trip stays in progress. Coverage counts only assigned areas "
+            "with a verified GPS visit by the assignment's own trips. Trips without an assignment are not included.",
+            style: TextStyle(fontSize: 10.5, color: Colors.grey.shade600, height: 1.4),
+          ),
+        ]),
+      ),
+    );
   }
 
   Widget _buildInsightsSection(bool isMobile) {
@@ -3499,6 +3376,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
         const SizedBox(height: 16),
         _buildRedesignedEtaPerformanceCard(isMobile),
         const SizedBox(height: 16),
+        _buildScheduledRoutesCard(),
         _buildPredictionCard("Recommendations", [
           Text(
             _recommendations,
@@ -3532,6 +3410,100 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
         ),
       ],
     );
+  }
+
+  // ---- Waste Collection Summary display state (loading / error / value) ----
+  bool get _loadShowsPlaceholder => _loadError != null || (_isLoadingLoadData && !_loadHasLoaded);
+
+  String _summaryTripsText() {
+    if (_loadError != null) return "—";
+    if (_isLoadingLoadData && !_loadHasLoaded) return "…";
+    return "$_loadTripsCount";
+  }
+
+  String _summaryTonsText() {
+    if (_loadError != null) return "—";
+    if (_isLoadingLoadData && !_loadHasLoaded) return "…";
+    return LoadTotals(
+      trips: _loadTripsCount,
+      weightKg: _loadTotalWeightKg,
+      measuredCount: _loadMeasuredCount,
+      estimatedCount: _loadEstimatedCount,
+    ).tonsLabel;
+  }
+
+  String _summaryFormulaText() {
+    if (_loadShowsPlaceholder) return "Waiting for collection data";
+    if (_loadEstimatedCount > 0 && _loadMeasuredCount > 0) {
+      return "$_loadEstimatedCount estimated × 5 tons (hypothetical, not measured) + $_loadMeasuredCount measured trips";
+    }
+    final String legacy = _loadLegacyCount > 0 ? " ($_loadLegacyCount legacy completed without a FULL event)" : "";
+    return "$_loadTripsCount FULL trips$legacy × 5 tons each: hypothetical estimate, not measured waste";
+  }
+
+  Widget _buildLoadStatusBanner() {
+    if (_loadError != null) {
+      return Container(
+        width: double.infinity,
+        margin: const EdgeInsets.only(bottom: 14),
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: const Color(0xFFFEF2F2),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: const Color(0xFFFECACA)),
+        ),
+        child: Row(
+          children: [
+            const Icon(Icons.error_outline_rounded, color: Color(0xFFDC2626), size: 20),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(_loadError!, style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: Color(0xFF991B1B))),
+            ),
+            TextButton(onPressed: _fetchLoadHistoryData, child: const Text("Retry")),
+          ],
+        ),
+      );
+    }
+    final List<Widget> notes = <Widget>[];
+    if (_isLoadingLoadData) {
+      notes.add(const Padding(
+        padding: EdgeInsets.only(bottom: 10),
+        child: LinearProgressIndicator(minHeight: 2),
+      ));
+    }
+    if (_loadPartial) {
+      notes.add(const Padding(
+        padding: EdgeInsets.only(bottom: 8),
+        child: Text(
+          "Some collection sources could not be reached; totals may be incomplete.",
+          style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Color(0xFFB45309)),
+        ),
+      ));
+    }
+    if (_loadUnfinishedCount > 0 && !_loadShowsPlaceholder) {
+      final List<String> parts = <String>[];
+      if (_loadOngoingCount > 0) parts.add("$_loadOngoingCount ongoing");
+      if (_loadStaleCount > 0) parts.add("$_loadStaleCount stale or legacy (no FULL, no recent activity)");
+      notes.add(Padding(
+        padding: const EdgeInsets.only(bottom: 8),
+        child: Text(
+          "Not counted until the truck is marked FULL: ${parts.join(', ')}.",
+          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: Color(0xFF64748B)),
+        ),
+      ));
+    }
+    if (_loadUnattributedCount > 0 && !_loadShowsPlaceholder) {
+      notes.add(Padding(
+        padding: const EdgeInsets.only(bottom: 8),
+        child: Text(
+          "$_loadUnattributedCount trip${_loadUnattributedCount == 1 ? '' : 's'} in this period record no area and "
+          "${_loadUnattributedCount == 1 ? 'is' : 'are'} not matched by the $_selectedArea filter.",
+          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: Color(0xFF64748B)),
+        ),
+      ));
+    }
+    if (notes.isEmpty) return const SizedBox.shrink();
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: notes);
   }
 
   Widget _buildWasteCollectionSummaryCard(bool isMobile) {
@@ -3579,6 +3551,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
             ],
           ),
           const SizedBox(height: 20),
+          _buildLoadStatusBanner(),
 
           // 2 Metric Cards: Trips & Estimated Waste
           if (!isMobile)
@@ -3601,7 +3574,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
                         const Text("Trips", style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Color(0xFF64748B))),
                         const SizedBox(height: 4),
                         Text(
-                          "$_loadTripsCount",
+                          _summaryTripsText(),
                           style: const TextStyle(fontSize: 28, fontWeight: FontWeight.w900, color: Color(0xFF0F172A)),
                         ),
                       ],
@@ -3625,18 +3598,18 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
                         const Icon(Icons.scale_outlined, size: 22, color: Color(0xFF0F766E)),
                         const SizedBox(height: 12),
                         Text(
-                          _loadMeasuredCount > 0 ? "Total waste" : "Estimated waste",
+                          _loadEstimatedCount == 0 && _loadMeasuredCount > 0 ? "Total waste" : "Estimated waste",
                           style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Color(0xFF64748B)),
                         ),
                         const SizedBox(height: 4),
                         Text(
-                          "${_loadTotalWeightTons.toInt()} tons",
+                          _summaryTonsText(),
                           style: const TextStyle(fontSize: 28, fontWeight: FontWeight.w900, color: Color(0xFF0F172A)),
                         ),
-                        if (_loadMeasuredCount == 0) ...[
+                        if (_loadEstimatedCount > 0 || _loadShowsPlaceholder) ...[
                           const SizedBox(height: 2),
                           Text(
-                            "$_loadTripsCount FULL trips × 5 tons default estimate",
+                            _summaryFormulaText(),
                             style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w500, color: Color(0xFF94A3B8)),
                           ),
                         ],
@@ -3664,7 +3637,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
                         const SizedBox(height: 8),
                         const Text("Trips", style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Color(0xFF64748B))),
                         const SizedBox(height: 2),
-                        Text("$_loadTripsCount", style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: Color(0xFF0F172A))),
+                        Text(_summaryTripsText(), style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: Color(0xFF0F172A))),
                       ],
                     ),
                   ),
@@ -3685,7 +3658,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
                         const SizedBox(height: 8),
                         Text(_loadMeasuredCount > 0 ? "Total waste" : "Estimated waste", style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Color(0xFF64748B))),
                         const SizedBox(height: 2),
-                        Text("${_loadTotalWeightTons.toInt()} tons", style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: Color(0xFF0F172A))),
+                        Text(_summaryTonsText(), style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: Color(0xFF0F172A))),
                       ],
                     ),
                   ),
@@ -3720,7 +3693,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        "$_loadTripsCount FULL trips × 5 tons default estimate",
+                        _summaryFormulaText(),
                         style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w800, color: Color(0xFF0369A1)),
                       ),
                       const SizedBox(height: 2),
@@ -4103,172 +4076,39 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
   void _listenToFirebaseEtaNotifications() {
     _etaNotifSubscription?.cancel();
     _etaNotifSubscription = _database.ref('notifications').onValue.listen((event) {
-      if (!event.snapshot.exists || event.snapshot.value == null) {
-        _fetchEtaPerformance();
-        return;
-      }
-
-      final Map<dynamic, dynamic> notifsMap = (event.snapshot.value as Map);
-      final List<Map<String, dynamic>> approachList = [];
-      final List<Map<String, dynamic>> arrivalList = [];
-
-      notifsMap.forEach((key, val) {
-        if (val is Map) {
-          final String type = (val['type'] ?? val['category'] ?? '').toString();
-          final String purok = (val['purok'] ?? val['area'] ?? val['location'] ?? '').toString();
-          final String msg = (val['message'] ?? val['description'] ?? '').toString();
-          final int ts = num.tryParse(val['timestamp']?.toString() ?? '')?.toInt() ?? 0;
-
-          if (purok.isNotEmpty) {
-            if (type == 'auto_approach' || msg.contains('approaching') || msg.contains('on the way')) {
-              approachList.add({
-                'key': key,
-                'purok': ServiceAreaService.canonicalizeAreaName(purok) ?? purok,
-                'timestamp': ts,
-                'message': msg,
-                'source': (type.contains('manual') || msg.contains('manual')) ? 'Manual' : 'Auto',
-              });
-            } else if (type == 'auto_arrival' || msg.contains('arrived')) {
-              arrivalList.add({
-                'key': key,
-                'purok': ServiceAreaService.canonicalizeAreaName(purok) ?? purok,
-                'timestamp': ts,
-                'message': msg,
-              });
-            }
-          }
-        }
-      });
-
-      if (approachList.isEmpty) {
-        _fetchEtaPerformance();
-        return;
-      }
-
-      final List<_EtaRecord> records = [];
-
-      for (var approach in approachList) {
-        final String area = approach['purok'];
-        final int approachTs = approach['timestamp'];
-        final String source = approach['source'];
-
-        int estimatedMins = 5;
-        final match = RegExp(r'(\d+)\s*min').firstMatch(approach['message']);
-        if (match != null) {
-          estimatedMins = int.tryParse(match.group(1) ?? '5') ?? 5;
-        }
-
-        final DateTime notifiedTime = _parseEpochTimestamp(approachTs);
-        final DateTime targetEtaTime = notifiedTime.add(Duration(minutes: estimatedMins));
-        final String notifiedEtaStr = DateFormat('MMM d, h:mm a').format(targetEtaTime);
-
-        final arrival = arrivalList.firstWhere(
-          (arr) => arr['purok'].toString().toLowerCase() == area.toLowerCase() && arr['timestamp'] >= approachTs,
-          orElse: () => {},
-        );
-
-        if (arrival.isNotEmpty) {
-          final int arrivalTs = arrival['timestamp'];
-          final DateTime actualEntryTime = _parseEpochTimestamp(arrivalTs);
-          final String gpsEntryStr = DateFormat('MMM d, h:mm a').format(actualEntryTime);
-          int diffMinutes = (actualEntryTime.difference(targetEtaTime).inSeconds / 60).round();
-          if (diffMinutes.abs() > 720) {
-            diffMinutes = (diffMinutes > 0 ? 1 : -1) * (diffMinutes.abs() % 15);
-          }
-
-          records.add(_EtaRecord(
-            area: area,
-            source: source,
-            notifiedEta: notifiedEtaStr,
-            gpsEntry: gpsEntryStr,
-            status: 'completed',
-            diffMinutes: diffMinutes,
-            date: notifiedTime,
-          ));
-        } else {
-          records.add(_EtaRecord(
-            area: area,
-            source: source,
-            notifiedEta: notifiedEtaStr,
-            gpsEntry: '—',
-            status: 'awaiting',
-            date: notifiedTime,
-          ));
-        }
-      }
-
-      final evaluated = records.where((r) => r.status == 'completed' && r.diffMinutes != null).toList();
-      final int evalCount = evaluated.length;
-      double avgErr = 0.0;
-      int within5 = 0;
-
-      if (evalCount > 0) {
-        final double totalAbs = evaluated.fold(0.0, (sum, r) => sum + r.diffMinutes!.abs());
-        avgErr = double.parse((totalAbs / evalCount).toStringAsFixed(1));
-        within5 = evaluated.where((r) => r.diffMinutes!.abs() <= 5).length;
-      }
-      final int within5Pct = evalCount > 0 ? ((within5 / evalCount) * 100).round() : 100;
-
+      final List<EtaVisit> visits = _buildEtaVisits(event.snapshot.exists ? event.snapshot.value : null);
       if (mounted) {
         setState(() {
-          _etaAvgArrivalError = avgErr;
-          _etaWithin5MinPct = within5Pct;
-          _etaEvaluatedVisits = evalCount;
-          _etaRecords = records;
+          _etaVisits = visits;
+          _etaLoaded = true;
         });
       }
+    }, onError: (Object e) {
+      debugPrint('ETA notifications listener error: $e');
     });
   }
 
-  Future<void> _fetchEtaPerformance() async {
-    try {
-      final String startStr = DateFormat('yyyy-MM-dd').format(_selectedDateRange.start);
-      final String endStr = DateFormat('yyyy-MM-dd').format(_selectedDateRange.end);
-      final response = await _apiService.getEtaPerformance(
-        area: _selectedArea,
-        startDate: startStr,
-        endDate: endStr,
-      );
-      if (response.statusCode == 200 && response.data != null && response.data['success'] == true) {
-        final summary = response.data['summary'];
-        if (summary != null) {
-          final double avgError = (summary['avg_arrival_error_min'] as num?)?.toDouble() ?? 3.5;
-          final int within5Pct = (summary['within_5min_pct'] as num?)?.toInt() ?? 100;
-          final int evalVisits = (summary['evaluated_visits'] as num?)?.toInt() ?? 2;
-
-          if (mounted) {
-            setState(() {
-              _etaAvgArrivalError = avgError;
-              _etaWithin5MinPct = within5Pct;
-              _etaEvaluatedVisits = evalVisits;
-            });
-          }
-        }
-
-        final list = response.data['records'] as List?;
-        if (list != null && list.isNotEmpty) {
-          final records = list.map((item) => _EtaRecord(
-            area: item['area']?.toString() ?? '',
-            source: item['source']?.toString() ?? 'Auto',
-            notifiedEta: item['notified_eta']?.toString() ?? '',
-            gpsEntry: item['gps_entry']?.toString() ?? '',
-            status: item['status']?.toString() ?? 'completed',
-            diffMinutes: item['diff_minutes'] != null ? (item['diff_minutes'] as num).toInt() : null,
-            note: item['note']?.toString(),
-            date: item['created_at'] != null ? DateTime.tryParse(item['created_at'].toString()) : null,
-          )).toList();
-
-          if (mounted) {
-            setState(() {
-              _etaRecords = records;
-            });
-          }
-        }
-      }
-    } catch (e) {
-      debugPrint("Error fetching ETA performance in analytics: $e");
-    }
+  /// The visits the card shows: the same filter the details use (area + Asia/Manila date range).
+  /// Measured ETA error (first notified ETA vs GPS-confirmed arrival). Replaces a former
+  /// formula-derived "MAE" (8% of the average collection time) that was not a measurement.
+  String get _etaMaeText {
+    final EtaSummary s = EtaEvaluation.summarize(_etaFilteredVisits);
+    return s.avgAbsErrorMin == null
+        ? 'Not available (no evaluated arrivals yet)'
+        : '${s.avgAbsErrorMin!.toStringAsFixed(1)} min over ${s.evaluatedVisits} evaluated visit(s)';
   }
+
+  String get _etaWithin5Text {
+    final int? pct = EtaEvaluation.summarize(_etaFilteredVisits).within5Pct;
+    return pct == null ? 'Not available' : '$pct% within ±5 min';
+  }
+
+  List<EtaVisit> get _etaFilteredVisits => EtaEvaluation.filter(
+        _etaVisits,
+        area: _selectedArea,
+        start: _selectedDateRange.start,
+        end: _selectedDateRange.end,
+      );
 
   Map<String, String> _formatEtaErrorValueAndUnit(double minutes) {
     if (minutes >= 1440) {
@@ -4281,7 +4121,16 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
   }
 
   Widget _buildRedesignedEtaPerformanceCard(bool isMobile) {
-    final etaFormatted = _formatEtaErrorValueAndUnit(_etaAvgArrivalError);
+    final EtaSummary etaSummary = EtaEvaluation.summarize(_etaFilteredVisits);
+    final Map<String, String> etaFormatted = etaSummary.hasEvaluated
+        ? _formatEtaErrorValueAndUnit(etaSummary.avgAbsErrorMin!)
+        : <String, String>{'value': _etaLoaded ? '\u2014' : '...', 'unit': ''};
+    final String etaWithinText = etaSummary.within5Pct == null ? '\u2014' : '${etaSummary.within5Pct}%';
+    final String etaFooterText = etaSummary.hasEvaluated
+        ? 'First notified ETA vs GPS-confirmed arrival. ${etaSummary.awaitingVisits} awaiting arrival.'
+        : (_etaLoaded
+            ? 'No GPS-confirmed arrivals to evaluate yet (${etaSummary.awaitingVisits} awaiting arrival).'
+            : 'Loading ETA records...');
 
     return Container(
       width: double.infinity,
@@ -4406,7 +4255,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          "$_etaWithin5MinPct%",
+                          etaWithinText,
                           style: const TextStyle(
                             fontSize: 36,
                             fontWeight: FontWeight.w900,
@@ -4441,7 +4290,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          "$_etaEvaluatedVisits",
+                          "${etaSummary.evaluatedVisits}",
                           style: const TextStyle(
                             fontSize: 36,
                             fontWeight: FontWeight.w900,
@@ -4513,7 +4362,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            "$_etaWithin5MinPct%",
+                            etaWithinText,
                             style: const TextStyle(
                               fontSize: 26,
                               fontWeight: FontWeight.w900,
@@ -4547,7 +4396,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              "$_etaEvaluatedVisits",
+                              "${etaSummary.evaluatedVisits}",
                               style: const TextStyle(
                                 fontSize: 26,
                                 fontWeight: FontWeight.w900,
@@ -4582,8 +4431,8 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                const Text(
-                  "Based on matched notifications and GPS area entry.",
+                Text(
+                  etaFooterText,
                   style: TextStyle(
                     fontSize: 12,
                     color: Color(0xFF94A3B8),
@@ -4622,8 +4471,8 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
             Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text(
-                  "Based on matched notifications and GPS area entry.",
+                Text(
+                  etaFooterText,
                   style: TextStyle(
                     fontSize: 11,
                     color: Color(0xFF94A3B8),
@@ -4671,7 +4520,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
     final int pendingComplaints = (_complaintStatusData['Pending'] ?? 0).toInt();
     final int resolvedComplaints = (_complaintStatusData['Resolved'] ?? 0).toInt();
     final int inProgressComplaints = (_complaintStatusData['In Progress'] ?? 0).toInt();
-    final bool hasLimitedActivity = _completedRoutes == 0;
+    final bool hasLimitedActivity = _loadTripsCount == 0;
 
     final String dateStr = "${DateFormat('MMM dd').format(_selectedDateRange.start)} - ${DateFormat('MMM dd, yyyy').format(_selectedDateRange.end)}";
 
@@ -4826,7 +4675,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
 
           _buildExpandableSection(
             title: "Coverage & routes",
-            subtitle: "${_completedRoutes} of $_totalRoutes scheduled routes completed (${_coveragePercent.toStringAsFixed(1)}%)",
+            subtitle: _visitSummary == null ? "Loading verified visits..." : "$_areasVisitedCount of ${_expectedVisitAreas.length} collection areas had a verified visit",
             isExpanded: _expCoverageRoutes,
             onToggle: () => setState(() => _expCoverageRoutes = !_expCoverageRoutes),
             content: Column(
@@ -4834,8 +4683,8 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
               children: [
                 Text(_coverageInsight, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Color(0xFF2C3E50), height: 1.5)),
                 const SizedBox(height: 10),
-                _detailBullet("Total Scheduled Routes: $_totalRoutes"),
-                _detailBullet("Successfully Completed: $_completedRoutes"),
+                _detailBullet("Verified visits: ${_visitSummary?.visits.length ?? 0}"),
+                _detailBullet("Full loads: $_loadTripsCount"),
                 _detailBullet("Distance Covered: ${_distanceCovered.toStringAsFixed(1)} km"),
               ],
             ),
@@ -4863,7 +4712,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
 
           _buildExpandableSection(
             title: "Fleet & prediction quality",
-            subtitle: "Prediction accuracy: ${_predictionAccuracy.toStringAsFixed(1)}% | Avg time: ${_avgCollectionTime.toStringAsFixed(1)}h",
+            subtitle: "ETA: $_etaWithin5Text | Avg time: ${_avgCollectionTime.toStringAsFixed(1)}h",
             isExpanded: _expFleetPrediction,
             onToggle: () => setState(() => _expFleetPrediction = !_expFleetPrediction),
             content: Column(
@@ -4871,8 +4720,8 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
               children: [
                 Text(_fleetInsight, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Color(0xFF2C3E50), height: 1.5)),
                 const SizedBox(height: 10),
-                _detailBullet("Prediction Accuracy: ${_predictionAccuracy.toStringAsFixed(1)}%"),
-                _detailBullet("Mean Absolute Error (MAE): ${_maeValue.toStringAsFixed(2)} mins"),
+                _detailBullet("ETA accuracy (measured): $_etaWithin5Text"),
+                _detailBullet("ETA Mean Absolute Error (measured): $_etaMaeText"),
                 _detailBullet("Average Collection Duration: ${_avgCollectionTime.toStringAsFixed(1)} hours"),
                 _detailBullet("Active Fleet Units: ${(_truckStatusData['Active'] ?? 0).toInt()} active, ${(_truckStatusData['Full'] ?? 0).toInt()} full, ${(_truckStatusData['Idle'] ?? 0).toInt()} idle"),
               ],
@@ -4950,11 +4799,11 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
   Widget _buildOperationalSummaryBlock() {
     final int pendingComplaints = (_complaintStatusData['Pending'] ?? 0).toInt();
     final int resolvedComplaints = (_complaintStatusData['Resolved'] ?? 0).toInt();
-    final bool hasLimitedActivity = _completedRoutes == 0;
+    final bool hasLimitedActivity = _loadTripsCount == 0;
 
     String dynamicFallback = hasLimitedActivity
-        ? "No completed routes recorded for $_selectedArea during this period. $pendingComplaints pending complaint(s) and $resolvedComplaints resolved issue(s) tracked. Verify log completeness."
-        : "$pendingComplaints complaint(s) remain pending. $resolvedComplaints complaint(s) were resolved during this period. $_completedRoutes route(s) successfully completed in $_selectedArea.";
+        ? "No full loads recorded for $_selectedArea during this period. $pendingComplaints pending and $resolvedComplaints resolved complaint(s)/issue(s) tracked. Verify log completeness."
+        : "$pendingComplaints complaint(s)/issue(s) remain pending and $resolvedComplaints were resolved during this period. $_loadTripsCount full load(s) were recorded in $_selectedArea.";
 
     return Container(
       padding: const EdgeInsets.all(20),
@@ -4994,7 +4843,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
 
   Widget _buildRecommendedChecksBlock() {
     final int pendingComplaints = (_complaintStatusData['Pending'] ?? 0).toInt();
-    final bool hasLimitedActivity = _completedRoutes == 0;
+    final bool hasLimitedActivity = _loadTripsCount == 0;
 
     String check1Title = pendingComplaints > 0
         ? "Review $pendingComplaints pending complaint(s)"
@@ -5008,7 +4857,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
         : "Monitor fleet collection pace";
     String check2Sub = hasLimitedActivity
         ? "Confirm completed trips for selected period."
-        : "$_completedRoutes route(s) completed successfully.";
+        : "$_loadTripsCount full load(s) recorded.";
 
     return Container(
       padding: const EdgeInsets.all(20),
@@ -5388,7 +5237,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
         const Divider(height: 16),
         _insightRow("Distance Covered", "${_distanceCovered.toStringAsFixed(1)}km"),
         const Divider(height: 16),
-        _insightRow("Prediction Accuracy", "${_predictionAccuracy.toStringAsFixed(1)}%", isSuccess: _predictionAccuracy > 90),
+        _insightRow("ETA accuracy (measured)", _etaWithin5Text, isSuccess: (EtaEvaluation.summarize(_etaFilteredVisits).within5Pct ?? 0) > 90),
       ]),
     );
   }
@@ -5665,569 +5514,6 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
           onChanged: onChanged
         )
       )
-    );
-  }
-}
-
-class _CuteDateRangePicker extends StatefulWidget {
-  final DateTimeRange initialRange;
-  const _CuteDateRangePicker({required this.initialRange});
-  @override State<_CuteDateRangePicker> createState() => _CuteDateRangePickerState();
-}
-
-class _CuteDateRangePickerState extends State<_CuteDateRangePicker> {
-  late DateTime _currentMonth; 
-  DateTime? _rangeStart; 
-  DateTime? _rangeEnd;
-  bool _isYearPickerVisible = false;
-
-  bool _isFirstTap = true;
-
-  @override 
-  void initState() { 
-    super.initState(); 
-    _currentMonth = DateTime(widget.initialRange.start.year, widget.initialRange.start.month); 
-    _rangeStart = widget.initialRange.start; 
-    _rangeEnd = widget.initialRange.end; 
-    _isFirstTap = false;
-  }
-
-  void _onDayTapped(DateTime date) {
-    final DateTime startOfDay = DateTime(date.year, date.month, date.day, 0, 0, 0);
-    final DateTime endOfDay = DateTime(date.year, date.month, date.day, 23, 59, 59);
-
-    setState(() {
-      if (_isFirstTap || _rangeStart == null) {
-        _rangeStart = startOfDay;
-        _rangeEnd = endOfDay;
-        _isFirstTap = false;
-      } else {
-        if (date.isBefore(_rangeStart!)) {
-          _rangeStart = startOfDay;
-          _isFirstTap = false;
-        } else if (isSameDay(date, _rangeStart!)) {
-          _rangeEnd = endOfDay;
-          _isFirstTap = true;
-        } else {
-          _rangeEnd = endOfDay;
-          _isFirstTap = true;
-        }
-      }
-    });
-  }
-
-  bool isSameDay(DateTime a, DateTime b) {
-    return a.year == b.year && a.month == b.month && a.day == b.day;
-  }
-
-  @override 
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.fromLTRB(32, 32, 32, 24),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(32),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text("Select Date", style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900, color: Color(0xFF00796B))),
-                  const SizedBox(height: 4),
-                  const Text("Pick a date range to filter analytics.", style: TextStyle(fontSize: 12, color: Colors.grey, fontWeight: FontWeight.w500)),
-                ],
-              ),
-              IconButton(
-                onPressed: () => Navigator.pop(context),
-                icon: const Icon(Icons.close_rounded, color: Colors.grey),
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(),
-              ),
-            ],
-          ),
-          const Divider(height: 48),
-          
-          if (!_isYearPickerVisible) ...[
-            // CALENDAR VIEW
-            Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-              GestureDetector(
-                onTap: () => setState(() => _isYearPickerVisible = true),
-                child: MouseRegion(
-                  cursor: SystemMouseCursors.click,
-                  child: Row(
-                    children: [
-                      Text(DateFormat('MMMM yyyy').format(_currentMonth), style: const TextStyle(fontWeight: FontWeight.w900, color: Color(0xFF455A64))),
-                      const Icon(Icons.arrow_drop_down_rounded, color: Colors.grey),
-                    ],
-                  ),
-                ),
-              ),
-              Row(
-                children: [
-                  IconButton(icon: const Icon(Icons.chevron_left_rounded), onPressed: () => setState(() => _currentMonth = DateTime(_currentMonth.year, _currentMonth.month - 1))),
-                  IconButton(icon: const Icon(Icons.chevron_right_rounded), onPressed: () => setState(() => _currentMonth = DateTime(_currentMonth.year, _currentMonth.month + 1))),
-                ],
-              ),
-            ]),
-            const SizedBox(height: 16),
-            const Row(
-              mainAxisAlignment: MainAxisAlignment.spaceAround,
-              children: [
-                Text("S", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
-                Text("M", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
-                Text("T", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
-                Text("W", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
-                Text("T", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
-                Text("F", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
-                Text("S", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
-              ],
-            ),
-            const SizedBox(height: 8),
-            _buildDaysGrid(),
-          ] else ...[
-            // YEAR SELECTION VIEW
-            GestureDetector(
-              onTap: () => setState(() => _isYearPickerVisible = false),
-              child: MouseRegion(
-                cursor: SystemMouseCursors.click,
-                child: Row(
-                  children: [
-                    Text(DateFormat('MMMM yyyy').format(_currentMonth), style: const TextStyle(fontWeight: FontWeight.w900, color: Color(0xFF455A64))),
-                    const Icon(Icons.arrow_drop_up_rounded, color: Colors.grey),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 16),
-            const Divider(height: 1),
-            const SizedBox(height: 24),
-            _buildYearGrid(),
-            const SizedBox(height: 24),
-            const Divider(height: 1),
-          ],
-          
-          const SizedBox(height: 32),
-          Row(
-            children: [
-              Expanded(
-                child: OutlinedButton(
-                  onPressed: () => Navigator.pop(context, null),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: Colors.grey,
-                    side: const BorderSide(color: Colors.grey),
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                  ),
-                  child: const Text("CLEAR", style: TextStyle(fontWeight: FontWeight.w900, letterSpacing: 1.1)),
-                ),
-              ),
-              const SizedBox(width: 16),
-              Expanded(
-                flex: 2,
-                child: ElevatedButton(
-                  onPressed: () => Navigator.pop(context, DateTimeRange(start: _rangeStart ?? DateTime.now(), end: _rangeEnd ?? _rangeStart ?? DateTime.now())),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF00897B),
-                    foregroundColor: Colors.white,
-                    elevation: 0,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                  ),
-                  child: const Text("APPLY FILTER", style: TextStyle(fontWeight: FontWeight.w900, fontSize: 13)),
-                ),
-              ),
-            ],
-          ),
-        ]
-      ),
-    );
-  }
-
-  Widget _buildYearGrid() {
-    final List<int> years = List.generate(12, (index) => 2020 + index); 
-    return GridView.builder(
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 3,
-        mainAxisSpacing: 20,
-        crossAxisSpacing: 20,
-        childAspectRatio: 2.2,
-      ),
-      itemCount: years.length,
-      itemBuilder: (context, index) {
-        final int year = years[index];
-        final bool isSelected = year == _currentMonth.year;
-        return InkWell(
-          onTap: () {
-            setState(() {
-              _currentMonth = DateTime(year, _currentMonth.month);
-              _isYearPickerVisible = false;
-            });
-          },
-          borderRadius: BorderRadius.circular(20),
-          child: Container(
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: isSelected ? const Color(0xFF00897B) : Colors.transparent,
-              borderRadius: BorderRadius.circular(20),
-            ),
-            child: Text(
-              year.toString(),
-              style: TextStyle(
-                fontSize: 16,
-                fontWeight: isSelected ? FontWeight.w900 : FontWeight.w600,
-                color: isSelected ? Colors.white : const Color(0xFF455A64),
-              ),
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _buildDaysGrid() {
-    final int daysInMonth = DateTime(_currentMonth.year, _currentMonth.month + 1, 0).day;
-    final int firstDayWeekday = DateTime(_currentMonth.year, _currentMonth.month, 1).weekday % 7;
-    return GridView.builder(
-      shrinkWrap: true, 
-      physics: const NeverScrollableScrollPhysics(), 
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: 7), 
-      itemCount: daysInMonth + firstDayWeekday, 
-      itemBuilder: (context, index) {
-        if (index < firstDayWeekday) return const SizedBox.shrink();
-        final int day = index - firstDayWeekday + 1; 
-        final DateTime date = DateTime(_currentMonth.year, _currentMonth.month, day);
-        
-        bool isRangeStart = _rangeStart != null && date.year == _rangeStart!.year && date.month == _rangeStart!.month && date.day == _rangeStart!.day;
-        bool isRangeEnd = _rangeEnd != null && date.year == _rangeEnd!.year && date.month == _rangeEnd!.month && date.day == _rangeEnd!.day;
-        bool isInRange = _rangeStart != null && _rangeEnd != null && date.isAfter(_rangeStart!) && date.isBefore(_rangeEnd!);
-        bool isSelected = isRangeStart || isRangeEnd;
-
-        return InkWell(
-          onTap: () => _onDayTapped(date),
-          child: Container(
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: isSelected ? const Color(0xFF00897B) : (isInRange ? const Color(0xFFE0F2F1) : null), 
-              shape: BoxShape.circle,
-              border: (date.day == DateTime.now().day && date.month == DateTime.now().month && date.year == DateTime.now().year)
-                ? Border.all(color: const Color(0xFF00897B), width: 1)
-                : null,
-            ),
-            child: Text(
-              day.toString(),
-              style: TextStyle(
-                color: isSelected ? Colors.white : (isInRange ? const Color(0xFF00897B) : Colors.black),
-                fontWeight: isSelected ? FontWeight.w900 : FontWeight.normal,
-              ),
-            ),
-          ),
-        );
-    });
-  }
-}
-
-class _CuteSingleDatePicker extends StatefulWidget {
-  final DateTime initialDate;
-  const _CuteSingleDatePicker({required this.initialDate});
-
-  @override
-  State<_CuteSingleDatePicker> createState() => _CuteSingleDatePickerState();
-}
-
-class _CuteSingleDatePickerState extends State<_CuteSingleDatePicker> {
-  late DateTime _selectedDate;
-  late DateTime _currentMonth;
-  bool _isYearPickerVisible = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _selectedDate = widget.initialDate;
-    _currentMonth = DateTime(_selectedDate.year, _selectedDate.month);
-  }
-
-  void _onDayTapped(DateTime date) {
-    setState(() {
-      _selectedDate = date;
-    });
-  }
-
-  bool _isSameDay(DateTime a, DateTime b) {
-    return a.year == b.year && a.month == b.month && a.day == b.day;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final double screenWidth = MediaQuery.of(context).size.width;
-    final bool isMobile = screenWidth < 600;
-
-    return Container(
-      width: isMobile ? double.infinity : 420,
-      padding: const EdgeInsets.fromLTRB(28, 28, 28, 24),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(28),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: const [
-                  Text(
-                    "Select Date",
-                    style: TextStyle(
-                      fontSize: 20,
-                      fontWeight: FontWeight.w900,
-                      color: Color(0xFF00796B),
-                    ),
-                  ),
-                  SizedBox(height: 4),
-                  Text(
-                    "Pick a date to filter records.",
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: Color(0xFF64748B),
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                ],
-              ),
-              IconButton(
-                onPressed: () => Navigator.pop(context),
-                icon: const Icon(Icons.close_rounded, color: Color(0xFF94A3B8)),
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(),
-              ),
-            ],
-          ),
-          const Divider(height: 36, color: Color(0xFFF1F5F9)),
-
-          if (!_isYearPickerVisible) ...[
-            // MONTH & NAVIGATION
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                GestureDetector(
-                  onTap: () => setState(() => _isYearPickerVisible = true),
-                  child: MouseRegion(
-                    cursor: SystemMouseCursors.click,
-                    child: Row(
-                      children: [
-                        Text(
-                          DateFormat('MMMM yyyy').format(_currentMonth),
-                          style: const TextStyle(
-                            fontWeight: FontWeight.w900,
-                            color: Color(0xFF334155),
-                            fontSize: 16,
-                          ),
-                        ),
-                        const Icon(Icons.arrow_drop_down_rounded, color: Color(0xFF64748B)),
-                      ],
-                    ),
-                  ),
-                ),
-                Row(
-                  children: [
-                    IconButton(
-                      icon: const Icon(Icons.chevron_left_rounded, color: Color(0xFF475569)),
-                      onPressed: () => setState(() => _currentMonth = DateTime(_currentMonth.year, _currentMonth.month - 1)),
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.chevron_right_rounded, color: Color(0xFF475569)),
-                      onPressed: () => setState(() => _currentMonth = DateTime(_currentMonth.year, _currentMonth.month + 1)),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-
-            // CALENDAR GRID
-            _buildDaysGrid(),
-          ] else ...[
-            // YEAR GRID
-            GestureDetector(
-              onTap: () => setState(() => _isYearPickerVisible = false),
-              child: MouseRegion(
-                cursor: SystemMouseCursors.click,
-                child: Row(
-                  children: [
-                    Text(
-                      DateFormat('MMMM yyyy').format(_currentMonth),
-                      style: const TextStyle(
-                        fontWeight: FontWeight.w900,
-                        color: Color(0xFF334155),
-                        fontSize: 16,
-                      ),
-                    ),
-                    const Icon(Icons.arrow_drop_up_rounded, color: Color(0xFF64748B)),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 16),
-            const Divider(height: 1, color: Color(0xFFF1F5F9)),
-            const SizedBox(height: 20),
-            _buildYearGrid(),
-            const SizedBox(height: 20),
-            const Divider(height: 1, color: Color(0xFFF1F5F9)),
-          ],
-
-          const SizedBox(height: 28),
-          Row(
-            children: [
-              Expanded(
-                child: OutlinedButton(
-                  onPressed: () => Navigator.pop(context, null),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: const Color(0xFF64748B),
-                    side: const BorderSide(color: Color(0xFFCBD5E1)),
-                    padding: const EdgeInsets.symmetric(vertical: 14),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-                  ),
-                  child: const Text("CLEAR", style: TextStyle(fontWeight: FontWeight.w900, letterSpacing: 1.1)),
-                ),
-              ),
-              const SizedBox(width: 14),
-              Expanded(
-                flex: 2,
-                child: ElevatedButton(
-                  onPressed: () => Navigator.pop(context, _selectedDate),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF00897B),
-                    foregroundColor: Colors.white,
-                    elevation: 0,
-                    padding: const EdgeInsets.symmetric(vertical: 14),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-                  ),
-                  child: const Text("APPLY FILTER", style: TextStyle(fontWeight: FontWeight.w900, fontSize: 13)),
-                ),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildDaysGrid() {
-    final DateTime firstDayOfMonth = DateTime(_currentMonth.year, _currentMonth.month, 1);
-    final int daysInMonth = DateTime(_currentMonth.year, _currentMonth.month + 1, 0).day;
-    final int startingWeekday = firstDayOfMonth.weekday % 7; // Sunday = 0
-
-    return Column(
-      children: [
-        const Row(
-          mainAxisAlignment: MainAxisAlignment.spaceAround,
-          children: [
-            Text("S", style: TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF94A3B8))),
-            Text("M", style: TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF94A3B8))),
-            Text("T", style: TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF94A3B8))),
-            Text("W", style: TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF94A3B8))),
-            Text("T", style: TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF94A3B8))),
-            Text("F", style: TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF94A3B8))),
-            Text("S", style: TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF94A3B8))),
-          ],
-        ),
-        const SizedBox(height: 10),
-        GridView.builder(
-          shrinkWrap: true,
-          physics: const NeverScrollableScrollPhysics(),
-          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: 7,
-            mainAxisSpacing: 6,
-            crossAxisSpacing: 6,
-          ),
-          itemCount: startingWeekday + daysInMonth,
-          itemBuilder: (context, index) {
-            if (index < startingWeekday) {
-              return const SizedBox.shrink();
-            }
-            final int dayNumber = index - startingWeekday + 1;
-            final DateTime dayDate = DateTime(_currentMonth.year, _currentMonth.month, dayNumber);
-            final bool isSelected = _isSameDay(dayDate, _selectedDate);
-            final bool isToday = _isSameDay(dayDate, DateTime.now());
-
-            return InkWell(
-              onTap: () => _onDayTapped(dayDate),
-              borderRadius: BorderRadius.circular(12),
-              child: Container(
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  color: isSelected ? const Color(0xFF00897B) : Colors.transparent,
-                  borderRadius: BorderRadius.circular(12),
-                  border: isToday && !isSelected
-                      ? Border.all(color: const Color(0xFF00897B), width: 1.5)
-                      : null,
-                ),
-                child: Text(
-                  "$dayNumber",
-                  style: TextStyle(
-                    fontWeight: isSelected ? FontWeight.w900 : FontWeight.w600,
-                    color: isSelected ? Colors.white : const Color(0xFF1E293B),
-                  ),
-                ),
-              ),
-            );
-          },
-        ),
-      ],
-    );
-  }
-
-  Widget _buildYearGrid() {
-    final List<int> years = List.generate(12, (index) => 2020 + index);
-    return GridView.builder(
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 3,
-        mainAxisSpacing: 12,
-        crossAxisSpacing: 12,
-        childAspectRatio: 2.2,
-      ),
-      itemCount: years.length,
-      itemBuilder: (context, index) {
-        final int year = years[index];
-        final bool isSelected = year == _currentMonth.year;
-        return InkWell(
-          onTap: () {
-            setState(() {
-              _currentMonth = DateTime(year, _currentMonth.month);
-              _isYearPickerVisible = false;
-            });
-          },
-          borderRadius: BorderRadius.circular(14),
-          child: Container(
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: isSelected ? const Color(0xFF00897B) : const Color(0xFFF8FAFC),
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: isSelected ? const Color(0xFF00897B) : const Color(0xFFE2E8F0)),
-            ),
-            child: Text(
-              "$year",
-              style: TextStyle(
-                fontWeight: isSelected ? FontWeight.w900 : FontWeight.w600,
-                color: isSelected ? Colors.white : const Color(0xFF334155),
-              ),
-            ),
-          ),
-        );
-      },
     );
   }
 }
@@ -6593,7 +5879,6 @@ class _OperationalInsightsModalState extends State<_OperationalInsightsModal> wi
     final List<String> activeAreas = widget.selectedArea == "All Areas" ? widget.purokNames : [widget.selectedArea];
     int totalVisits = activeAreas.fold(0, (sum, area) => sum + (widget.visitData[area] ?? 0));
     int totalComplaints = activeAreas.fold(0, (sum, area) => sum + (widget.complaintData[area] ?? 0));
-    double completionRate = widget.totalRoutes > 0 ? (widget.completedRoutes / widget.totalRoutes) * 100 : 91.0;
 
     String needReviewArea = "";
     int needReviewComplaints = 0;
@@ -6609,15 +5894,14 @@ class _OperationalInsightsModalState extends State<_OperationalInsightsModal> wi
 
     final summaryText = (widget.geminiSummary != null && widget.geminiSummary!.isNotEmpty && !widget.geminiSummary!.contains("Unable to generate"))
         ? widget.geminiSummary!
-        : "Operational telemetry for ${widget.selectedArea} indicates ${widget.completedRoutes}/${widget.totalRoutes} completed collection routes (${completionRate.toStringAsFixed(0)}% efficiency). "
-          "Recorded $totalVisits collection visits alongside $totalComplaints active resident feedback reports. "
-          "${needReviewArea.isNotEmpty ? "Elevated resident feedback ($needReviewComplaints reports) in $needReviewArea requires priority attention." : "Coverage distribution remains balanced across monitored sectors."}";
+        : "${widget.selectedArea}: $totalVisits verified collection visit(s) and $totalComplaints resident complaint(s) in the selected period. "
+          "${needReviewArea.isNotEmpty ? "$needReviewArea has the most complaints ($needReviewComplaints) with $needReviewVisits verified visit(s)." : "No area has more than 2 complaints."}";
 
     int zeroVisitCount = activeAreas.where((a) => (widget.visitData[a] ?? 0) == 0 && a != "San Nicolas").length;
     String limitationsText = "• Telemetry aggregates coverage across ${activeAreas.length} active sector(s) in ${widget.selectedArea}.\n"
         "${widget.selectedArea == "All Areas" ? "• San Nicolas operates as a stationary sweeping area (tracked independently from mobile truck routes).\n" : ""}"
         "${zeroVisitCount > 0 ? "• $zeroVisitCount sector(s) report zero visits; zero records do not inherently confirm missed service.\n" : "• All active sectors report recorded collection visits during the selected timeframe.\n"}"
-        "• Complaint metrics integrate resident app submissions and verified driver field reports.";
+        "• Area complaint counts include resident complaints only; driver truck issues are reported separately.";
 
     final leftWidget = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -7149,107 +6433,138 @@ class _OperationalInsightsModalState extends State<_OperationalInsightsModal> wi
   }
 }
 
-class _EtaRecord {
-  final String area;
-  final String source; // 'Auto' or 'Manual'
-  final String notifiedEta;
-  final String gpsEntry;
-  final String status; // 'completed', 'awaiting', 'withdrawn'
-  final int? diffMinutes; // e.g. 4 for 4 min later, -3 for 3 min earlier
-  final String? note;
-  final DateTime? date;
+/// Opens the Load History dialog (the same widget the Waste Collection Summary uses).
+/// [date] opens it on that collection day and [highlightTripId] marks one trip, so
+/// Route History can land on the exact related load.
+Future<void> showLoadHistoryDialog(
+  BuildContext context, {
+  DateTime? date,
+  String? highlightTripId,
+  VoidCallback? onDataUpdated,
+  OpenRouteHistory? onOpenRouteHistory,
+}) {
+  final double width = MediaQuery.of(context).size.width;
+  final Widget content = LoadHistoryDialogModal(
+    isMobile: width < 600,
+    onDataUpdated: onDataUpdated,
+    initialDate: date,
+    highlightTripId: highlightTripId,
+    onOpenRouteHistory: onOpenRouteHistory,
+  );
 
-  const _EtaRecord({
-    required this.area,
-    required this.source,
-    required this.notifiedEta,
-    required this.gpsEntry,
-    required this.status,
-    this.diffMinutes,
-    this.note,
-    this.date,
-  });
+  if (width < 600) {
+    return showGeneralDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: "Load History",
+      barrierColor: Colors.black54,
+      transitionDuration: const Duration(milliseconds: 200),
+      pageBuilder: (context, anim1, anim2) => SafeArea(
+        child: Scaffold(
+          backgroundColor: const Color(0xFFF8FAFC),
+          body: content,
+        ),
+      ),
+    );
+  }
+  return showDialog<void>(
+    context: context,
+    builder: (context) => Dialog(
+      backgroundColor: Colors.white,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+      insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 20),
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxWidth: math.min(width - 40, 720), maxHeight: 720),
+        child: content,
+      ),
+    ),
+  );
 }
 
-class _LoadHistoryDialogModal extends StatefulWidget {
+class LoadHistoryDialogModal extends StatefulWidget {
   final ScrollController? scrollController;
   final bool isMobile;
   final VoidCallback? onDataUpdated;
 
-  const _LoadHistoryDialogModal({
+  /// Day to open on (defaults to today) and the trip to highlight, when the dialog is
+  /// opened from a specific Route History trip.
+  final DateTime? initialDate;
+  final String? highlightTripId;
+
+  /// Opens a trip's route in the host shell (instead of a separate full page).
+  final OpenRouteHistory? onOpenRouteHistory;
+
+  const LoadHistoryDialogModal({
     Key? key,
     this.scrollController,
     this.isMobile = false,
     this.onDataUpdated,
+    this.initialDate,
+    this.highlightTripId,
+    this.onOpenRouteHistory,
   }) : super(key: key);
 
   @override
-  State<_LoadHistoryDialogModal> createState() => _LoadHistoryDialogModalState();
+  State<LoadHistoryDialogModal> createState() => _LoadHistoryDialogModalState();
 }
 
-class _LoadHistoryDialogModalState extends State<_LoadHistoryDialogModal> {
+class _LoadHistoryDialogModalState extends State<LoadHistoryDialogModal> {
   DateTime _selectedDate = DateTime.now();
   bool _isLoading = true;
   List<DriverTrip> _dayTrips = [];
+  final LoadHistoryRepository _repository = LoadHistoryRepository.standard();
+  String? _loadError;
+  int _unfinishedCount = 0;
+  int _ongoingCount = 0;
+  bool _partial = false;
+  bool _highlightMissing = false;
 
   @override
   void initState() {
     super.initState();
+    if (widget.initialDate != null) _selectedDate = widget.initialDate!;
     _fetchData();
   }
 
   Future<void> _fetchData() async {
     if (!mounted) return;
-    setState(() => _isLoading = true);
+    setState(() {
+      _isLoading = true;
+      _loadError = null;
+    });
 
     try {
-      final user = await SessionManager.getUser();
-      final effectiveUser = user ?? UserData(userId: 0, name: 'Admin', email: '', role: 'Admin', approvalStatus: 'APPROVED');
+      final DateTime day = DateTime(_selectedDate.year, _selectedDate.month, _selectedDate.day);
+      // The SAME repository and the SAME finalized-collection rules as the Waste
+      // Collection Summary; only the date filter differs (this dialog shows one day).
+      final LoadHistoryResult result = await _repository.load(start: day, end: day);
 
-      final DateTime startBound = DateTime(_selectedDate.year, _selectedDate.month, _selectedDate.day, 0, 0, 0);
-      final DateTime endBound = DateTime(_selectedDate.year, _selectedDate.month, _selectedDate.day, 23, 59, 59, 999);
-
-      final trips = await DriverRouteHistoryService.fetchRouteHistory(
-        currentUser: effectiveUser,
-        startDate: startBound,
-        endDate: endBound,
-        includeAllTrips: false,
-      );
-
-      // Client-side date filter (local time / Asia/Manila) & zero-distance stub exclusion
-      final List<DriverTrip> filtered = trips.where((t) {
-        final DateTime tripTime = (t.fullTime ?? t.endTime ?? t.startTime).toLocal();
-        final bool isSameDay = tripTime.year == _selectedDate.year &&
-                               tripTime.month == _selectedDate.month &&
-                               tripTime.day == _selectedDate.day;
-        final bool isValidTrip = t.totalDistanceKm >= 0.015 || t.points.length >= 2;
-        return isSameDay && isValidTrip;
-      }).toList();
-
-      // Deduplicate by tripId
-      final Set<String> seenIds = {};
-      final List<DriverTrip> uniqueTrips = [];
-      for (var t in filtered) {
-        if (!seenIds.contains(t.tripId)) {
-          seenIds.add(t.tripId);
-          uniqueTrips.add(t);
+      if (result.isError) {
+        if (mounted) {
+          setState(() => _loadError = "Collection data could not be loaded. Check the connection and try again.");
         }
-      }
-
-      // Sort chronologically ascending (earliest trip first = Trip 1)
-      uniqueTrips.sort((a, b) {
-        final DateTime tA = a.startTime;
-        final DateTime tB = b.startTime;
-        return tA.compareTo(tB);
-      });
-
-      if (mounted) {
-        setState(() {
-          _dayTrips = uniqueTrips;
-        });
+      } else {
+        final List<DriverTrip> dayLoads = LoadHistory.inRange(result.loads, day, day);
+        // Chronological (earliest FULL = Trip 1).
+        dayLoads.sort((a, b) => LoadHistory.eventTime(a).compareTo(LoadHistory.eventTime(b)));
+        final unfinishedSplit =
+            LoadHistory.splitUnfinished(LoadHistory.inRange(result.unfinished, day, day), DateTime.now());
+        final int unfinished = unfinishedSplit.ongoing.length + unfinishedSplit.stale.length;
+        final int ongoing = unfinishedSplit.ongoing.length;
+        if (mounted) {
+          setState(() {
+            _dayTrips = dayLoads;
+            _highlightMissing = widget.highlightTripId != null &&
+                !dayLoads.any((DriverTrip t) => t.tripId == widget.highlightTripId);
+            _unfinishedCount = unfinished;
+            _ongoingCount = ongoing;
+            _partial = result.isPartial;
+          });
+        }
       }
     } catch (e) {
       debugPrint("[LOAD HISTORY MODAL] Error fetching trips: $e");
+      if (mounted) setState(() => _loadError = "Collection data could not be loaded. Please try again.");
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -7628,17 +6943,7 @@ class _LoadHistoryDialogModalState extends State<_LoadHistoryDialogModal> {
         const SizedBox(height: 6),
         InkWell(
           onTap: () async {
-            final DateTime? picked = await showDialog<DateTime>(
-              context: context,
-              builder: (context) => Dialog(
-                backgroundColor: Colors.white,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 420),
-                  child: _CuteSingleDatePicker(initialDate: _selectedDate),
-                ),
-              ),
-            );
+            final DateTime? picked = await showAppSingleDatePicker(context, initialDate: _selectedDate);
 
             if (picked != null && (picked.year != _selectedDate.year || picked.month != _selectedDate.month || picked.day != _selectedDate.day)) {
               setState(() {
@@ -7741,6 +7046,31 @@ class _LoadHistoryDialogModalState extends State<_LoadHistoryDialogModal> {
             ),
           ),
           const SizedBox(height: 8),
+          if (_unfinishedCount > 0)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Text(
+                "Not counted until the truck is marked FULL: $_ongoingCount ongoing, "
+                "${_unfinishedCount - _ongoingCount} stale or legacy (no recent activity).",
+                style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: Color(0xFF64748B)),
+              ),
+            ),
+          if (_highlightMissing)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Text(
+                "No finalized load record was found for trip ${widget.highlightTripId} on this date.",
+                style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: Color(0xFFB91C1C)),
+              ),
+            ),
+          if (_partial)
+            const Padding(
+              padding: EdgeInsets.only(bottom: 8),
+              child: Text(
+                "Some collection sources could not be reached; this list may be incomplete.",
+                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Color(0xFFB45309)),
+              ),
+            ),
 
           // Caption
           Text(
@@ -7759,6 +7089,26 @@ class _LoadHistoryDialogModalState extends State<_LoadHistoryDialogModal> {
   }
 
   Widget _buildTripsTable(bool isMobile) {
+    if (_loadError != null) {
+      return Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(vertical: 32, horizontal: 16),
+        decoration: BoxDecoration(
+          color: const Color(0xFFFEF2F2),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: const Color(0xFFFECACA)),
+        ),
+        child: Column(
+          children: [
+            const Icon(Icons.error_outline_rounded, size: 34, color: Color(0xFFDC2626)),
+            const SizedBox(height: 10),
+            Text(_loadError!, textAlign: TextAlign.center, style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600, color: Color(0xFF991B1B))),
+            const SizedBox(height: 8),
+            TextButton(onPressed: _fetchData, child: const Text("Retry")),
+          ],
+        ),
+      );
+    }
     if (_dayTrips.isEmpty) {
       return Container(
         width: double.infinity,
@@ -7773,7 +7123,7 @@ class _LoadHistoryDialogModalState extends State<_LoadHistoryDialogModal> {
             Icon(Icons.inventory_2_outlined, size: 36, color: Color(0xFF94A3B8)),
             SizedBox(height: 10),
             Text(
-              "No recorded trips for this date.",
+              "No finalized collection trips for this date.",
               style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Color(0xFF64748B)),
             ),
           ],
@@ -7856,7 +7206,7 @@ class _LoadHistoryDialogModalState extends State<_LoadHistoryDialogModal> {
                     ? trip.totalDistanceKm.toStringAsFixed(1)
                     : "${trip.totalDistanceKm.toStringAsFixed(1)} km";
 
-                final int durSec = (trip.endTime ?? DateTime.now()).difference(trip.startTime).inSeconds;
+                final int durSec = trip.collectionSeconds; // LOGIN -> FULL, never the unloading time
                 final int hours = durSec ~/ 3600;
                 final int mins = (durSec % 3600) ~/ 60;
                 final String durationDisplay = hours > 0
@@ -7870,7 +7220,9 @@ class _LoadHistoryDialogModalState extends State<_LoadHistoryDialogModal> {
                   child: Container(
                     padding: EdgeInsets.symmetric(horizontal: isMobile ? 12 : 20, vertical: 14),
                     decoration: BoxDecoration(
-                      color: isTopRow ? const Color(0xFFE6F5F2) : Colors.white,
+                      color: (widget.highlightTripId != null && trip.tripId == widget.highlightTripId)
+                          ? const Color(0xFFFFF3C4)
+                          : (isTopRow && widget.highlightTripId == null ? const Color(0xFFE6F5F2) : Colors.white),
                       border: index < _dayTrips.length - 1
                           ? const Border(bottom: BorderSide(color: Color(0xFFE2ECE9)))
                           : null,
@@ -8142,12 +7494,25 @@ class _LoadHistoryDialogModalState extends State<_LoadHistoryDialogModal> {
                     height: 50,
                     child: ElevatedButton(
                       onPressed: () {
+                        final TripLink link = TripLinks.toRoute(trip);
+                        if (!link.isAvailable) {
+                          CustomSnackBar.show(context, message: link.message ?? 'Route unavailable.', isError: true);
+                          return;
+                        }
                         Navigator.pop(dialogContext);
+                        final OpenRouteHistory? open = widget.onOpenRouteHistory;
+                        if (open != null) {
+                          // Stay inside the host shell: close the Load History dialog and
+                          // show the exact trip in the dashboard content area.
+                          Navigator.of(context).maybePop();
+                          open(tripId: link.tripId, trip: trip);
+                          return;
+                        }
                         Navigator.push(
                           context,
                           MaterialPageRoute(
                             builder: (context) => RouteHistoryScreen(
-                              initialTripId: trip.tripId,
+                              initialTripId: link.tripId,
                               initialTrip: trip,
                             ),
                           ),
@@ -8162,7 +7527,7 @@ class _LoadHistoryDialogModalState extends State<_LoadHistoryDialogModal> {
                         ),
                       ),
                       child: const Text(
-                        "View Route History",
+                        "View Collection Route",
                         style: TextStyle(
                           fontSize: 15,
                           fontWeight: FontWeight.w800,
@@ -8221,7 +7586,7 @@ class _LoadHistoryDialogModalState extends State<_LoadHistoryDialogModal> {
 
 class _EtaPerformanceModal extends StatefulWidget {
   final ScrollController? scrollController;
-  final List<_EtaRecord>? initialRecords;
+  final List<EtaVisit>? initialVisits;
   final String? initialArea;
   final DateTimeRange? selectedDateRange;
   final List<String>? purokNames;
@@ -8229,7 +7594,7 @@ class _EtaPerformanceModal extends StatefulWidget {
   const _EtaPerformanceModal({
     Key? key,
     this.scrollController,
-    this.initialRecords,
+    this.initialVisits,
     this.initialArea,
     this.selectedDateRange,
     this.purokNames,
@@ -8246,7 +7611,8 @@ class _EtaPerformanceModalState extends State<_EtaPerformanceModal> {
   bool _isHowItWorksExpanded = false;
   bool _isRefreshing = false;
 
-  List<_EtaRecord> _records = [];
+  List<EtaVisit> _visits = [];
+  int _page = 1; // 1-based; reset to 1 whenever a filter changes
 
   StreamSubscription? _modalEtaNotifSubscription;
 
@@ -8261,11 +7627,10 @@ class _EtaPerformanceModalState extends State<_EtaPerformanceModal> {
       end: DateTime.now(),
     );
 
-    if (widget.initialRecords != null && widget.initialRecords!.isNotEmpty) {
-      _records = List.from(widget.initialRecords!);
+    if (widget.initialVisits != null) {
+      _visits = List.from(widget.initialVisits!);
     }
     _listenToFirebaseEtaModal();
-    _fetchModalData();
   }
 
   @override
@@ -8277,142 +7642,31 @@ class _EtaPerformanceModalState extends State<_EtaPerformanceModal> {
   void _listenToFirebaseEtaModal() {
     _modalEtaNotifSubscription?.cancel();
     _modalEtaNotifSubscription = FirebaseDatabase.instance.ref('notifications').onValue.listen((event) {
-      if (!event.snapshot.exists || event.snapshot.value == null) return;
-      final Map<dynamic, dynamic> notifsMap = (event.snapshot.value as Map);
-      final List<Map<String, dynamic>> approachList = [];
-      final List<Map<String, dynamic>> arrivalList = [];
-
-      notifsMap.forEach((key, val) {
-        if (val is Map) {
-          final String type = (val['type'] ?? val['category'] ?? '').toString();
-          final String purok = (val['purok'] ?? val['area'] ?? val['location'] ?? '').toString();
-          final String msg = (val['message'] ?? val['description'] ?? '').toString();
-          final int ts = num.tryParse(val['timestamp']?.toString() ?? '')?.toInt() ?? 0;
-
-          if (purok.isNotEmpty) {
-            if (type == 'auto_approach' || msg.contains('approaching') || msg.contains('on the way')) {
-              approachList.add({
-                'key': key,
-                'purok': ServiceAreaService.canonicalizeAreaName(purok) ?? purok,
-                'timestamp': ts,
-                'message': msg,
-                'source': (type.contains('manual') || msg.contains('manual')) ? 'Manual' : 'Auto',
-              });
-            } else if (type == 'auto_arrival' || msg.contains('arrived')) {
-              arrivalList.add({
-                'key': key,
-                'purok': ServiceAreaService.canonicalizeAreaName(purok) ?? purok,
-                'timestamp': ts,
-                'message': msg,
-              });
-            }
-          }
-        }
-      });
-
-      if (approachList.isEmpty) return;
-
-      final List<_EtaRecord> records = [];
-
-      for (var approach in approachList) {
-        final String area = approach['purok'];
-        final int approachTs = approach['timestamp'];
-        final String source = approach['source'];
-
-        int estimatedMins = 5;
-        final match = RegExp(r'(\d+)\s*min').firstMatch(approach['message']);
-        if (match != null) {
-          estimatedMins = int.tryParse(match.group(1) ?? '5') ?? 5;
-        }
-
-        final DateTime notifiedTime = _parseEpochTimestamp(approachTs);
-        final DateTime targetEtaTime = notifiedTime.add(Duration(minutes: estimatedMins));
-        final String notifiedEtaStr = DateFormat('MMM d, h:mm a').format(targetEtaTime);
-
-        final arrival = arrivalList.firstWhere(
-          (arr) => arr['purok'].toString().toLowerCase() == area.toLowerCase() && arr['timestamp'] >= approachTs,
-          orElse: () => {},
-        );
-
-        if (arrival.isNotEmpty) {
-          final int arrivalTs = arrival['timestamp'];
-          final DateTime actualEntryTime = _parseEpochTimestamp(arrivalTs);
-          final String gpsEntryStr = DateFormat('MMM d, h:mm a').format(actualEntryTime);
-          int diffMinutes = (actualEntryTime.difference(targetEtaTime).inSeconds / 60).round();
-          if (diffMinutes.abs() > 720) {
-            diffMinutes = (diffMinutes > 0 ? 1 : -1) * (diffMinutes.abs() % 15);
-          }
-
-          records.add(_EtaRecord(
-            area: area,
-            source: source,
-            notifiedEta: notifiedEtaStr,
-            gpsEntry: gpsEntryStr,
-            status: 'completed',
-            diffMinutes: diffMinutes,
-            date: notifiedTime,
-          ));
-        } else {
-          records.add(_EtaRecord(
-            area: area,
-            source: source,
-            notifiedEta: notifiedEtaStr,
-            gpsEntry: '—',
-            status: 'awaiting',
-            date: notifiedTime,
-          ));
-        }
-      }
-
+      final List<EtaVisit> visits = _buildEtaVisits(event.snapshot.exists ? event.snapshot.value : null);
       if (mounted) {
         setState(() {
-          _records = records;
+          _visits = visits;
+          _isRefreshing = false;
         });
       }
+    }, onError: (Object e) {
+      debugPrint('ETA details listener error: $e');
+      if (mounted) setState(() => _isRefreshing = false);
     });
   }
 
-  Future<void> _fetchModalData() async {
+  Future<void> _triggerRefresh() async {
     if (!mounted) return;
     setState(() => _isRefreshing = true);
     try {
-      final startStr = DateFormat('yyyy-MM-dd').format(_selectedDateRange.start);
-      final endStr = DateFormat('yyyy-MM-dd').format(_selectedDateRange.end);
-      final response = await ApiService().getEtaPerformance(
-        area: _selectedArea,
-        startDate: startStr,
-        endDate: endStr,
-        source: _selectedSource,
-      );
-      if (response.statusCode == 200 && response.data != null && response.data['success'] == true) {
-        final list = response.data['records'] as List?;
-        if (list != null) {
-          final fetched = list.map((item) => _EtaRecord(
-            area: item['area']?.toString() ?? '',
-            source: item['source']?.toString() ?? 'Auto',
-            notifiedEta: item['notified_eta']?.toString() ?? '',
-            gpsEntry: item['gps_entry']?.toString() ?? '',
-            status: item['status']?.toString() ?? 'completed',
-            diffMinutes: item['diff_minutes'] != null ? (item['diff_minutes'] as num).toInt() : null,
-            note: item['note']?.toString(),
-            date: item['created_at'] != null ? DateTime.tryParse(item['created_at'].toString()) : null,
-          )).toList();
-          if (mounted) {
-            setState(() {
-              _records = fetched;
-            });
-          }
-        }
-      }
+      final DataSnapshot snap = await FirebaseDatabase.instance.ref('notifications').get();
+      final List<EtaVisit> visits = _buildEtaVisits(snap.exists ? snap.value : null);
+      if (mounted) setState(() => _visits = visits);
     } catch (e) {
-      debugPrint("Error fetching modal ETA records: $e");
+      debugPrint('ETA details refresh error: $e');
     } finally {
       if (mounted) setState(() => _isRefreshing = false);
     }
-  }
-
-  void _triggerRefresh() {
-    _fetchModalData();
   }
 
   @override
@@ -8420,42 +7674,30 @@ class _EtaPerformanceModalState extends State<_EtaPerformanceModal> {
     final double screenWidth = MediaQuery.of(context).size.width;
     final bool isDesktop = screenWidth >= 700;
 
-    // Filter records dynamically loaded from database / API
-    final List<_EtaRecord> filtered = _records.where((r) {
-      if (_selectedArea != "All areas" && _selectedArea != "All Areas" && r.area.toLowerCase() != _selectedArea.toLowerCase()) return false;
-      if (_selectedSource != "All sources" && r.source.toLowerCase() != _selectedSource.toLowerCase()) return false;
-      if (r.date != null) {
-        final rDay = DateTime(r.date!.year, r.date!.month, r.date!.day);
-        final startDay = DateTime(_selectedDateRange.start.year, _selectedDateRange.start.month, _selectedDateRange.start.day);
-        final endDay = DateTime(_selectedDateRange.end.year, _selectedDateRange.end.month, _selectedDateRange.end.day);
-        if (rDay.isBefore(startDay) || rDay.isAfter(endDay)) {
-          return false;
-        }
-      }
-      return true;
-    }).toList();
-
-    // Compute metrics
-    final evaluated = filtered.where((r) => r.status == "completed" && r.diffMinutes != null).toList();
-    final int evaluatedCount = evaluated.length;
-
-    double avgError = 0.0;
-    int within5Count = 0;
-    if (evaluatedCount > 0) {
-      final double totalAbsDiff = evaluated.fold(0.0, (sum, r) => sum + r.diffMinutes!.abs());
-      avgError = totalAbsDiff / evaluatedCount;
-      within5Count = evaluated.where((r) => r.diffMinutes!.abs() <= 5).length;
-    }
-    final int accuracyPct = evaluatedCount > 0 ? ((within5Count / evaluatedCount) * 100).round() : 0;
-
-    final int awaitingCount = filtered.where((r) => r.status == "awaiting").length;
-    final int withdrawnCount = filtered.where((r) => r.status == "withdrawn").length;
+    // The SAME dataset and filter as the Analytics card (EtaEvaluation.filter/summarize).
+    final List<EtaVisit> filtered = EtaEvaluation.filter(
+      _visits,
+      area: _selectedArea,
+      source: _selectedSource,
+      start: _selectedDateRange.start,
+      end: _selectedDateRange.end,
+    );
+    final EtaSummary summary = EtaEvaluation.summarize(filtered);
+    // Filters first, THEN pagination (newest sent first; 30 primary visit rows per page).
+    final EtaPage<EtaVisit> pageData = EtaPage.of(filtered, _page);
+    final int evaluatedCount = summary.evaluatedVisits;
+    final double avgError = summary.avgAbsErrorMin ?? 0.0;
+    final int accuracyPct = summary.within5Pct ?? 0;
+    final int awaitingCount = summary.awaitingVisits;
+    final int withdrawnCount = summary.withdrawnVisits;
+    final int noArrivalCount = summary.noArrivalVisits;
+    final int noEstimateCount = summary.noEstimateVisits;
 
     // Withdrawn note
-    final withdrawnRecordWithNote = filtered.firstWhere(
-      (r) => r.status == "withdrawn" && r.note != null && r.note!.isNotEmpty,
-      orElse: () => const _EtaRecord(area: "", source: "", notifiedEta: "", gpsEntry: "", status: ""),
-    );
+    final String withdrawnNote = filtered
+        .where((v) => v.status == EtaVisitStatus.withdrawn && (v.withdrawnReason ?? '').isNotEmpty)
+        .map((v) => v.withdrawnReason!)
+        .firstWhere((_) => true, orElse: () => '');
 
     return Container(
       decoration: const BoxDecoration(
@@ -8558,7 +7800,9 @@ class _EtaPerformanceModalState extends State<_EtaPerformanceModal> {
 
                   // Sub-header stats text
                   Text(
-                    "$awaitingCount awaiting arrival · $withdrawnCount withdrawn",
+                    "$awaitingCount awaiting GPS-confirmed arrival · $withdrawnCount withdrawn"
+                    "${noArrivalCount > 0 ? ' · $noArrivalCount with no arrival recorded' : ''}"
+                    "${noEstimateCount > 0 ? ' · $noEstimateCount without an ETA' : ''}",
                     style: const TextStyle(
                       fontSize: 13,
                       color: Color(0xFF64748B),
@@ -8568,14 +7812,16 @@ class _EtaPerformanceModalState extends State<_EtaPerformanceModal> {
 
                   const SizedBox(height: 12),
 
-                  // Data Table or Mobile Cards
-                  if (isDesktop)
-                    _buildDesktopTable(filtered)
+                  // Expandable detail records (same list on Android and Web)
+                  if (filtered.isEmpty)
+                    _buildEmptyRecords()
                   else
-                    _buildMobileCardList(filtered),
+                    ...pageData.items.map((v) => _EtaVisitTile(key: ValueKey(v.visitKey), visit: v, isDesktop: isDesktop)),
+
+                  if (filtered.isNotEmpty) _buildPager(pageData),
 
                   // Note for withdrawn items
-                  if (withdrawnRecordWithNote.note != null && withdrawnRecordWithNote.note!.isNotEmpty) ...[
+                  if (withdrawnNote.isNotEmpty) ...[
                     const SizedBox(height: 12),
                     Row(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -8584,7 +7830,7 @@ class _EtaPerformanceModalState extends State<_EtaPerformanceModal> {
                         const SizedBox(width: 8),
                         Expanded(
                           child: Text(
-                            withdrawnRecordWithNote.note!,
+                            withdrawnNote,
                             style: const TextStyle(
                               fontSize: 12,
                               color: Color(0xFF64748B),
@@ -8670,8 +7916,10 @@ class _EtaPerformanceModalState extends State<_EtaPerformanceModal> {
           items: areaOptions,
           onChanged: (val) {
             if (val != null) {
-              setState(() => _selectedArea = val);
-              _fetchModalData();
+              setState(() {
+                _selectedArea = val;
+                _page = 1;
+              });
             }
           },
         ),
@@ -8679,31 +7927,22 @@ class _EtaPerformanceModalState extends State<_EtaPerformanceModal> {
         // Date Range Picker Trigger
         InkWell(
           onTap: () async {
-            final DateTimeRange? picked = await showDialog<DateTimeRange>(
-              context: context,
-              builder: (context) => Dialog(
-                backgroundColor: Colors.white,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(32)),
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 420),
-                  child: _CuteDateRangePicker(initialRange: _selectedDateRange),
-                ),
-              ),
-            );
-            if (picked != null) {
+            final AppDatePick? pick = await showAppDateRangePicker(context, initialRange: _selectedDateRange, clearable: true);
+            if (pick == null) return; // cancelled: keep the current period
+            if (pick.range != null) {
               setState(() {
-                _selectedDateRange = picked;
+                _selectedDateRange = pick.range!;
+                _page = 1;
               });
-              _fetchModalData();
             } else {
-              // CLEAR was pressed (returns null) -> reset to last 7 days
+              // Clear -> reset to last 7 days
               setState(() {
                 _selectedDateRange = DateTimeRange(
                   start: DateTime.now().subtract(const Duration(days: 7)),
                   end: DateTime.now(),
                 );
+                _page = 1;
               });
-              _fetchModalData();
             }
           },
           borderRadius: BorderRadius.circular(12),
@@ -8736,8 +7975,10 @@ class _EtaPerformanceModalState extends State<_EtaPerformanceModal> {
           items: sourceOptions,
           onChanged: (val) {
             if (val != null) {
-              setState(() => _selectedSource = val);
-              _fetchModalData();
+              setState(() {
+                _selectedSource = val;
+                _page = 1;
+              });
             }
           },
         ),
@@ -8884,265 +8125,56 @@ class _EtaPerformanceModalState extends State<_EtaPerformanceModal> {
     );
   }
 
-  Widget _buildDesktopTable(List<_EtaRecord> records) {
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: const Color(0xFFE2E8F0)),
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: Table(
-        columnWidths: const {
-          0: FlexColumnWidth(1.8),
-          1: FlexColumnWidth(1.2),
-          2: FlexColumnWidth(1.6),
-          3: FlexColumnWidth(1.6),
-          4: FlexColumnWidth(1.8),
-          5: FixedColumnWidth(40),
-        },
-        defaultVerticalAlignment: TableCellVerticalAlignment.middle,
+  Widget _buildPager(EtaPage<EtaVisit> p) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
+      child: Wrap(
+        alignment: WrapAlignment.spaceBetween,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        runSpacing: 6,
         children: [
-          // Table Header
-          TableRow(
-            decoration: const BoxDecoration(color: Color(0xFFF8FAFC)),
-            children: const [
-              Padding(
-                padding: EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                child: Text("Area", style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13, color: Color(0xFF0F172A))),
+          Text(
+            'Showing ${p.firstShown}–${p.lastShown} of ${p.total}',
+            style: const TextStyle(fontSize: 12, color: Color(0xFF64748B), fontWeight: FontWeight.w600),
+          ),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              IconButton(
+                tooltip: 'Previous page',
+                onPressed: p.hasPrevious ? () => setState(() => _page = p.page - 1) : null,
+                icon: const Icon(Icons.chevron_left_rounded),
               ),
-              Padding(
-                padding: EdgeInsets.symmetric(horizontal: 8, vertical: 12),
-                child: Text("Source", style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13, color: Color(0xFF0F172A))),
+              Text('Page ${p.page} of ${p.pageCount}',
+                  style: const TextStyle(fontSize: 12, color: Color(0xFF0F172A), fontWeight: FontWeight.w700)),
+              IconButton(
+                tooltip: 'Next page',
+                onPressed: p.hasNext ? () => setState(() => _page = p.page + 1) : null,
+                icon: const Icon(Icons.chevron_right_rounded),
               ),
-              Padding(
-                padding: EdgeInsets.symmetric(horizontal: 8, vertical: 12),
-                child: Text("Notified ETA", style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13, color: Color(0xFF0F172A))),
-              ),
-              Padding(
-                padding: EdgeInsets.symmetric(horizontal: 8, vertical: 12),
-                child: Text("GPS entry", style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13, color: Color(0xFF0F172A))),
-              ),
-              Padding(
-                padding: EdgeInsets.symmetric(horizontal: 8, vertical: 12),
-                child: Text("Difference", style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13, color: Color(0xFF0F172A))),
-              ),
-              SizedBox(),
             ],
           ),
-
-          // Rows
-          ...records.map((r) {
-            return TableRow(
-              decoration: const BoxDecoration(
-                border: Border(top: BorderSide(color: Color(0xFFF1F5F9))),
-              ),
-              children: [
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-                  child: Text(r.area, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13, color: Color(0xFF0F172A))),
-                ),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 14),
-                  child: Align(
-                    alignment: Alignment.centerLeft,
-                    child: _buildSourceTag(r.source),
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 14),
-                  child: r.status == "withdrawn"
-                      ? _buildWithdrawnTag()
-                      : Text(r.notifiedEta, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: Color(0xFF334155))),
-                ),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 14),
-                  child: r.status == "awaiting"
-                      ? _buildAwaitingTag()
-                      : Text(r.gpsEntry, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: Color(0xFF334155))),
-                ),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 14),
-                  child: Align(
-                    alignment: Alignment.centerLeft,
-                    child: _buildDiffOrStatusBadge(r),
-                  ),
-                ),
-                const Padding(
-                  padding: EdgeInsets.only(right: 12),
-                  child: Icon(Icons.chevron_right_rounded, size: 20, color: Color(0xFF94A3B8)),
-                ),
-              ],
-            );
-          }),
         ],
       ),
     );
   }
 
-  Widget _buildMobileCardList(List<_EtaRecord> records) {
-    return Column(
-      children: records.map((r) {
-        return Container(
-          margin: const EdgeInsets.only(bottom: 10),
-          padding: const EdgeInsets.all(14),
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: const Color(0xFFE2E8F0)),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Row(
-                    children: [
-                      Text(
-                        r.area,
-                        style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15, color: Color(0xFF0F172A)),
-                      ),
-                      const SizedBox(width: 8),
-                      _buildSourceTag(r.source),
-                    ],
-                  ),
-                  const Icon(Icons.chevron_right_rounded, size: 20, color: Color(0xFF94A3B8)),
-                ],
-              ),
-              const SizedBox(height: 10),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Expanded(
-                    child: Text(
-                      _getMobileSubtitleText(r),
-                      style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: Color(0xFF64748B)),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  _buildDiffOrStatusBadge(r),
-                ],
-              ),
-            ],
-          ),
-        );
-      }).toList(),
-    );
-  }
-
-  String _getMobileSubtitleText(_EtaRecord r) {
-    if (r.status == "completed") {
-      return "Notified ${r.notifiedEta} → GPS entry ${r.gpsEntry}";
-    } else if (r.status == "awaiting") {
-      return "ETA ${r.notifiedEta} · Awaiting arrival";
-    } else {
-      return "Withdrawn · Reported delay";
-    }
-  }
-
-  Widget _buildSourceTag(String source) {
-    final bool isAuto = source == "Auto";
+  Widget _buildEmptyRecords() {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      width: double.infinity,
+      padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
-        color: isAuto ? const Color(0xFFDCFCE7) : const Color(0xFFE0F2FE),
-        borderRadius: BorderRadius.circular(20),
+        color: const Color(0xFFF8FAFC),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xFFE2E8F0)),
       ),
       child: Text(
-        source,
-        style: TextStyle(
-          fontSize: 11,
-          fontWeight: FontWeight.w700,
-          color: isAuto ? const Color(0xFF166534) : const Color(0xFF075985),
-        ),
+        _visits.isEmpty
+            ? 'No ETA notifications are recorded yet.'
+            : 'No ETA notifications were sent for this area, source and period.',
+        style: const TextStyle(fontSize: 13, color: Color(0xFF64748B), fontWeight: FontWeight.w500),
       ),
     );
-  }
-
-  Widget _buildWithdrawnTag() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-      decoration: BoxDecoration(
-        color: const Color(0xFFF1F5F9),
-        borderRadius: BorderRadius.circular(6),
-      ),
-      child: const Text(
-        "Withdrawn",
-        style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Color(0xFF64748B)),
-      ),
-    );
-  }
-
-  Widget _buildAwaitingTag() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-      decoration: BoxDecoration(
-        color: const Color(0xFFFEF3C7),
-        borderRadius: BorderRadius.circular(6),
-      ),
-      child: const Text(
-        "Awaiting arrival",
-        style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Color(0xFFB45309)),
-      ),
-    );
-  }
-
-  Widget _buildDiffOrStatusBadge(_EtaRecord r) {
-    if (r.status == "completed" && r.diffMinutes != null) {
-      final bool isLate = r.diffMinutes! > 0;
-      final int absMin = r.diffMinutes!.abs();
-
-      String formattedTime;
-      if (absMin >= 1440) {
-        formattedTime = "${(absMin / 1440).toStringAsFixed(1)} days";
-      } else if (absMin >= 60) {
-        formattedTime = "${(absMin / 60).toStringAsFixed(1)} hrs";
-      } else {
-        formattedTime = "$absMin min";
-      }
-
-      return Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-        decoration: BoxDecoration(
-          color: isLate ? const Color(0xFFFEF3C7) : const Color(0xFFF1F5F9),
-          borderRadius: BorderRadius.circular(20),
-        ),
-        child: Text(
-          isLate ? "$formattedTime later" : "$formattedTime earlier",
-          style: TextStyle(
-            fontSize: 11,
-            fontWeight: FontWeight.w700,
-            color: isLate ? const Color(0xFFB45309) : const Color(0xFF475569),
-          ),
-        ),
-      );
-    } else if (r.status == "awaiting") {
-      return Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-        decoration: BoxDecoration(
-          color: const Color(0xFFFEF3C7),
-          borderRadius: BorderRadius.circular(20),
-        ),
-        child: const Text(
-          "Awaiting arrival",
-          style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: Color(0xFFB45309)),
-        ),
-      );
-    } else if (r.status == "withdrawn") {
-      return Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-        decoration: BoxDecoration(
-          color: const Color(0xFFF1F5F9),
-          borderRadius: BorderRadius.circular(20),
-        ),
-        child: const Text(
-          "Withdrawn",
-          style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: Color(0xFF64748B)),
-        ),
-      );
-    }
-    return const Text("—", style: TextStyle(color: Color(0xFF94A3B8)));
   }
 
   Widget _buildPerformanceSummary(double avgError, int evaluatedCount, int accuracyPct) {
@@ -9163,7 +8195,7 @@ class _EtaPerformanceModalState extends State<_EtaPerformanceModal> {
 
     String text;
     if (evaluatedCount == 0) {
-      text = "No completed visits evaluated for $_selectedArea during $displayRangeStr. Select another area or date range to analyze records.";
+      text = "No GPS-confirmed arrivals to evaluate for $_selectedArea during $displayRangeStr. Select another area or date range, or wait for the awaiting visits to arrive.";
     } else if (evaluatedCount == 1) {
       text = "Average error is $formattedAvgError across $evaluatedCount evaluated visit ($accuracyPct% within ±5 min).";
     } else {
@@ -9249,7 +8281,7 @@ class _EtaPerformanceModalState extends State<_EtaPerformanceModal> {
             const Padding(
               padding: EdgeInsets.fromLTRB(16, 12, 16, 16),
               child: Text(
-                "The first notified ETA is compared with the matching GPS-recorded area entry. Passing through does not confirm collection. Pending and withdrawn visits are excluded from error calculations.",
+                "The first notified ETA of a visit (one truck trip in one area) is compared with the GPS-confirmed arrival recorded for the SAME trip and area. Repeated 15/10/5 minute alerts for one visit count once. Passing through does not confirm collection. Pending and withdrawn visits are excluded from error calculations.",
                 style: TextStyle(
                   fontSize: 13,
                   color: Color(0xFF64748B),
@@ -9265,3 +8297,224 @@ class _EtaPerformanceModalState extends State<_EtaPerformanceModal> {
   }
 }
 
+/// Builds the visits from the raw `notifications` node: the single ETA evaluation entry point
+/// shared by the Analytics card and the ETA Performance details.
+List<EtaVisit> _buildEtaVisits(Object? rawNotifications) {
+  return EtaEvaluation.build(
+    rawNotifications,
+    nowMs: DateTime.now().millisecondsSinceEpoch,
+    canonicalize: (String raw) => ServiceAreaService.canonicalizeAreaName(raw) ?? raw,
+  );
+}
+
+String _etaClock(int? ms) => ms == null ? '\u2014' : DateFormat('MMM d, h:mm:ss a').format(EtaEvaluation.manila(ms));
+
+String _etaMinutesText(double minutes) {
+  final double a = minutes.abs();
+  if (a >= 1440) return '${(a / 1440).toStringAsFixed(1)} days';
+  if (a >= 60) return '${(a / 60).toStringAsFixed(1)} hrs';
+  return '${a.toStringAsFixed(1)} min';
+}
+
+String _etaSignedText(double minutes) {
+  if (minutes == 0) return 'On time';
+  return minutes > 0 ? '${_etaMinutesText(minutes)} late' : '${_etaMinutesText(minutes)} early';
+}
+
+/// One visit: collapsed headline, expandable detail (sent / predicted / actual / error / status).
+class _EtaVisitTile extends StatefulWidget {
+  const _EtaVisitTile({Key? key, required this.visit, required this.isDesktop}) : super(key: key);
+
+  final EtaVisit visit;
+  final bool isDesktop;
+
+  @override
+  State<_EtaVisitTile> createState() => _EtaVisitTileState();
+}
+
+class _EtaVisitTileState extends State<_EtaVisitTile> {
+  bool _open = false;
+
+  String get _statusLabel {
+    switch (widget.visit.status) {
+      case EtaVisitStatus.evaluated:
+        return 'Evaluated';
+      case EtaVisitStatus.awaiting:
+        return 'Awaiting GPS-confirmed arrival';
+      case EtaVisitStatus.noArrival:
+        return 'No GPS-confirmed arrival recorded';
+      case EtaVisitStatus.withdrawn:
+        return 'Withdrawn';
+      case EtaVisitStatus.noEstimate:
+        return 'No ETA stated in the notification';
+    }
+  }
+
+  Widget _badge() {
+    final EtaVisit v = widget.visit;
+    Color bg = const Color(0xFFF1F5F9);
+    Color fg = const Color(0xFF475569);
+    String text = _statusLabel;
+    if (v.isEvaluated) {
+      text = _etaSignedText(v.signedErrorMin!);
+      if (v.signedErrorMin! > 0) {
+        bg = const Color(0xFFFEF3C7);
+        fg = const Color(0xFFB45309);
+      }
+    } else if (v.status == EtaVisitStatus.awaiting) {
+      bg = const Color(0xFFFEF3C7);
+      fg = const Color(0xFFB45309);
+      text = 'Awaiting arrival';
+    }
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(20)),
+      child: Text(text, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: fg)),
+    );
+  }
+
+  Widget _row(String label, String value, {bool bold = false}) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: widget.isDesktop ? 190 : 132,
+            child: Text(label, style: const TextStyle(fontSize: 12, color: Color(0xFF64748B), fontWeight: FontWeight.w500)),
+          ),
+          Expanded(
+            child: Text(
+              value,
+              style: TextStyle(
+                fontSize: 13,
+                color: const Color(0xFF0F172A),
+                fontWeight: bold ? FontWeight.w800 : FontWeight.w600,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final EtaVisit v = widget.visit;
+    final EtaPrediction p = v.first;
+    final String stage = p.stage.isEmpty ? p.type : '${p.type} (${p.stage})';
+    final String predicted = p.predictedMinutes == null ? 'No ETA stated' : '${p.predictedMinutes} min';
+    final String actual = v.arrivalMs != null ? _etaClock(v.arrivalMs) : 'Awaiting GPS-confirmed arrival';
+    final String subtitle = v.arrivalMs != null
+        ? 'Sent ${_etaClock(p.sentMs)} \u2192 arrived ${_etaClock(v.arrivalMs)}'
+        : 'Sent ${_etaClock(p.sentMs)} \u00b7 predicted ${_etaClock(p.predictedArrivalMs)}';
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xFFE2E8F0)),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        children: [
+          InkWell(
+            onTap: () => setState(() => _open = !_open),
+            child: Padding(
+              padding: const EdgeInsets.all(14),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 4,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          children: [
+                            Text(v.area, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15, color: Color(0xFF0F172A))),
+                            if (v.truckId.isNotEmpty)
+                              Text(v.truckId, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Color(0xFF475569))),
+                            if (v.tripId != null)
+                              Text('Trip ${v.tripId}',
+                                  style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w500, color: Color(0xFF94A3B8))),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: v.source == 'Auto' ? const Color(0xFFDCFCE7) : const Color(0xFFE0F2FE),
+                                borderRadius: BorderRadius.circular(20),
+                              ),
+                              child: Text(
+                                v.source,
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w700,
+                                  color: v.source == 'Auto' ? const Color(0xFF166534) : const Color(0xFF075985),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 6),
+                        Text(subtitle, style: const TextStyle(fontSize: 12, color: Color(0xFF64748B), fontWeight: FontWeight.w500)),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  _badge(),
+                  const SizedBox(width: 4),
+                  Icon(_open ? Icons.keyboard_arrow_up_rounded : Icons.keyboard_arrow_down_rounded,
+                      size: 20, color: const Color(0xFF94A3B8)),
+                ],
+              ),
+            ),
+          ),
+          if (_open) ...[
+            const Divider(height: 1, color: Color(0xFFF1F5F9)),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 10, 14, 14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _row('Area', v.area),
+                  _row('Truck', v.truckIds.isEmpty ? 'Not recorded' : v.truckIds.join(', ')),
+                  if (v.truckLabelsDiffer)
+                    _row('Note', 'Records of this trip use different truck labels; matched by trip and area.'),
+                  _row('Trip', v.tripId ?? 'Not recorded (older record)'),
+                  _row('Notification', stage),
+                  _row('Notification sent', _etaClock(p.sentMs)),
+                  _row('ETA when sent', predicted),
+                  _row('Predicted arrival', _etaClock(p.predictedArrivalMs)),
+                  _row('Actual GPS-confirmed arrival', actual, bold: v.arrivalMs != null),
+                  _row('Difference',
+                      v.isEvaluated ? _etaSignedText(v.signedErrorMin!) : 'Not available until the truck arrives'),
+                  _row('Absolute error', v.isEvaluated ? _etaMinutesText(v.absErrorMin!) : 'Not available'),
+                  _row('Status', _statusLabel),
+                  if (v.legacyMatch)
+                    _row('Match', 'Matched by truck and area (older record without a trip id)'),
+                  if (p.minutesFromMessage) _row('ETA source', 'Read from the notification text'),
+                  if ((v.withdrawnReason ?? '').isNotEmpty) _row('Reason', v.withdrawnReason!),
+                  const SizedBox(height: 8),
+                  Text('Notification stages for this visit (${v.predictions.length})',
+                      style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: Color(0xFF0F172A))),
+                  ...v.predictions.map((q) => Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: Text(
+                          '${q.stage.isEmpty ? q.type : q.stage} · sent ${_etaClock(q.sentMs)}'
+                          ' · ${q.predictedMinutes == null ? 'no ETA' : '${q.predictedMinutes} min'}'
+                          ' · predicted ${_etaClock(q.predictedArrivalMs)}'
+                          '${q.signedErrorMin == null ? '' : ' · ${_etaSignedText(q.signedErrorMin!)}'}',
+                          style: const TextStyle(fontSize: 12, color: Color(0xFF475569), fontWeight: FontWeight.w500),
+                        ),
+                      )),
+                ],
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}

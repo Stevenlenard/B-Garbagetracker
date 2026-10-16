@@ -7,23 +7,36 @@
 header("Content-Type: application/json");
 require_once 'db_config.php';
 
-$gemini_api_key = "AIzaSyCPng8Ef9-AsuUiagku1FAQOowQniZYkOo";
+require_once 'ai_config_loader.php';
+$ai_cfg = gt_ai_config(); // AI disabled unless configured outside the web root
 
 $start_date = $_GET['start_date'] ?? date("Y-m-d", strtotime("-30 days"));
 $end_date = $_GET['end_date'] ?? date("Y-m-d");
 $truck_id = $_GET['truck_id'] ?? null;
 
 try {
+    // Older servers lack full_time / weight_kg / weight_type (update_load_history_schema.php):
+    // build the SQL from the columns that exist. A missing weight is an ESTIMATED 5,000 kg
+    // load (same rule as Load History), never a recorded zero.
+    $hCols = [];
+    foreach ($conn->query("DESCRIBE driver_trip_history")->fetchAll(PDO::FETCH_ASSOC) as $c) $hCols[] = $c['Field'] ?? '';
+    $hasFull = in_array('full_time', $hCols, true);
+    $hasWeight = in_array('weight_kg', $hCols, true);
+    $hasType = in_array('weight_type', $hCols, true);
+    $when = $hasFull ? "COALESCE(h.full_time, h.start_time, h.created_at)" : "COALESCE(h.start_time, h.created_at)";
+
     // 1. Gather trip statistics
-    $where = ["(UPPER(h.route_status) IN ('FULL', 'COMPLETED', 'FINISHED') OR h.full_time IS NOT NULL)"];
+    $where = [$hasFull
+        ? "(UPPER(h.route_status) IN ('FULL', 'COMPLETED', 'FINISHED') OR h.full_time IS NOT NULL)"
+        : "UPPER(h.route_status) IN ('FULL', 'COMPLETED', 'FINISHED')"];
     $params = [];
 
     if (!empty($start_date)) {
-        $where[] = "DATE(COALESCE(h.full_time, h.start_time, h.created_at)) >= ?";
+        $where[] = "DATE($when) >= ?";
         $params[] = $start_date;
     }
     if (!empty($end_date)) {
-        $where[] = "DATE(COALESCE(h.full_time, h.start_time, h.created_at)) <= ?";
+        $where[] = "DATE($when) <= ?";
         $params[] = $end_date;
     }
     if (!empty($truck_id) && $truck_id !== 'all' && $truck_id !== 'All Trucks') {
@@ -31,12 +44,13 @@ try {
         $params[] = $truck_id;
     }
 
+    $weightSum = $hasWeight ? "COALESCE(SUM(COALESCE(h.weight_kg, 5000)), 0)" : "COUNT(*) * 5000";
+    $measured = ($hasWeight && $hasType) ? "SUM(CASE WHEN h.weight_type = 'MEASURED' AND h.weight_kg IS NOT NULL THEN 1 ELSE 0 END)" : "0";
     $stmt = $conn->prepare("
         SELECT
             COUNT(*) as total_trips,
-            COALESCE(SUM(weight_kg), 0) as total_weight_kg,
-            SUM(CASE WHEN weight_type = 'MEASURED' THEN 1 ELSE 0 END) as measured_count,
-            SUM(CASE WHEN weight_type = 'ESTIMATED' OR weight_type IS NULL THEN 1 ELSE 0 END) as estimated_count
+            $weightSum as total_weight_kg,
+            $measured as measured_count
         FROM driver_trip_history h
         WHERE " . implode(" AND ", $where)
     );
@@ -47,22 +61,26 @@ try {
     $total_weight_kg = (float)($stats['total_weight_kg'] ?? 0.0);
     $total_weight_tons = round($total_weight_kg / 1000.0, 1);
     $measured_count = (int)($stats['measured_count'] ?? 0);
-    $estimated_count = (int)($stats['estimated_count'] ?? 0);
+    $estimated_count = max(0, $total_trips - $measured_count);
 
     // 2. Count active months with data in current year
     $selected_year = (int)date("Y", strtotime($start_date));
+    $yWhen = $hasFull ? "COALESCE(full_time, start_time, created_at)" : "COALESCE(start_time, created_at)";
+    $yFinal = $hasFull
+        ? "(UPPER(route_status) IN ('FULL', 'COMPLETED', 'FINISHED') OR full_time IS NOT NULL)"
+        : "UPPER(route_status) IN ('FULL', 'COMPLETED', 'FINISHED')";
     $stmtYear = $conn->prepare("
-        SELECT COUNT(DISTINCT MONTH(COALESCE(full_time, start_time, created_at))) as active_months
+        SELECT COUNT(DISTINCT MONTH($yWhen)) as active_months
         FROM driver_trip_history
-        WHERE YEAR(COALESCE(full_time, start_time, created_at)) = ?
-          AND (UPPER(route_status) IN ('FULL', 'COMPLETED', 'FINISHED') OR full_time IS NOT NULL)
+        WHERE YEAR($yWhen) = ?
+          AND $yFinal
     ");
     $stmtYear->execute([$selected_year]);
     $active_months = (int)($stmtYear->fetchColumn() ?? 0);
 
     // Construct Rule-Based Fallback Summary
     $weightDesc = ($measured_count == 0)
-        ? "At the default 5 tons per trip, estimated waste is {$total_weight_tons} tons."
+        ? "No measured weights: at the default 5 tons per trip, ESTIMATED waste is {$total_weight_tons} tons."
         : "Recorded waste total is {$total_weight_tons} tons ({$measured_count} measured, {$estimated_count} estimated).";
 
     $trendDesc = ($active_months < 3)
@@ -73,54 +91,19 @@ try {
 
     // 3. Attempt Gemini API Call if Key Present
     $ai_summary = null;
-    if (!empty($gemini_api_key)) {
-        try {
-            $promptPayload = [
-                "period" => "{$start_date} to {$end_date}",
-                "total_full_trips" => $total_trips,
-                "total_waste_tons" => $total_weight_tons,
-                "measured_trips" => $measured_count,
-                "estimated_trips" => $estimated_count,
-                "active_months_in_year" => $active_months
-            ];
-
-            $prompt = "You are an AI Municipal Operations Auditor for GarbageTracker. " .
-                      "Summarize the following waste load collection data: " . json_encode($promptPayload) . ". " .
-                      "Provide a concise 2-sentence summary explaining the recorded trip count and waste volume, whether data suggests an increase or decrease, and any limits (such as default estimates or incomplete months). Never claim an increase/decrease unless active_months_in_year >= 3. Do not invent scale weights.";
-
-            $url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" . $gemini_api_key;
-            $request_body = json_encode([
-                "contents" => [
-                    ["parts" => [["text" => $prompt]]]
-                ],
-                "generationConfig" => [
-                    "temperature" => 0.2,
-                    "maxOutputTokens" => 150
-                ]
-            ]);
-
-            $ch = curl_init($url);
-            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-            curl_setopt($ch, CURLOPT_POST, true);
-            curl_setopt($ch, CURLOPT_POSTFIELDS, $request_body);
-            curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
-            curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-            curl_setopt($ch, CURLOPT_TIMEOUT, 5);
-
-            $api_response = curl_exec($ch);
-            $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-            curl_close($ch);
-
-            if ($http_code === 200) {
-                $respData = json_decode($api_response, true);
-                $aiText = $respData['candidates'][0]['content']['parts'][0]['text'] ?? '';
-                if (!empty(trim($aiText))) {
-                    $ai_summary = trim($aiText);
-                }
-            }
-        } catch (Exception $e) {
-            // Fallback used
-        }
+    if ($ai_cfg['enabled']) {
+        $promptPayload = [
+            "period" => "{$start_date} to {$end_date}",
+            "total_full_trips" => $total_trips,
+            "total_waste_tons" => $total_weight_tons,
+            "measured_trips" => $measured_count,
+            "estimated_trips" => $estimated_count,
+            "active_months_in_year" => $active_months
+        ];
+        $prompt = "You are an AI Municipal Operations Auditor for GarbageTracker. " .
+                  "Summarize the following waste load collection data: " . json_encode($promptPayload) . ". " .
+                  "Provide a concise 2-sentence summary explaining the recorded trip count and waste volume, whether data suggests an increase or decrease, and any limits (such as default estimates or incomplete months). Never claim an increase/decrease unless active_months_in_year >= 3. Do not invent scale weights.";
+        $ai_summary = gt_ai_generate($ai_cfg, $prompt, ['temperature' => 0.2, 'maxOutputTokens' => 150], 5);
     }
 
     if (empty($ai_summary)) {
@@ -130,7 +113,7 @@ try {
     echo json_encode([
         "success" => true,
         "summary" => $ai_summary,
-        "is_ai_generated" => (!empty($gemini_api_key) && $ai_summary !== $fallback_summary),
+        "is_ai_generated" => ($ai_cfg['enabled'] && $ai_summary !== $fallback_summary),
         "metrics" => [
             "total_trips" => $total_trips,
             "total_weight_tons" => $total_weight_tons,

@@ -375,14 +375,7 @@ class _ResidentRegisterScreenState extends State<ResidentRegisterScreen> {
                 });
               }
 
-              await FirebaseDatabase.instance.ref('notifications').push().set({
-                'type': 'REGISTRATION',
-                'title': AppLocalizations.get('new_reg_title'),
-                'message': AppLocalizations.get('new_reg_notif').replaceFirst('{name}', _fullNameController.text.trim()),
-                'timestamp': ServerValue.timestamp,
-                'isRead': false,
-                'relatedId': _usernameController.text
-              });
+              // The Admin notification is written once by register.php (no duplicate from the app).
             } catch (e) {
               debugPrint("Firebase Notification Error: $e");
             }

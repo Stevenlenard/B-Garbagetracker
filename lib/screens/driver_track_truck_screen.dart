@@ -14,7 +14,11 @@ import '../utils/session_manager.dart';
 import '../models/user.dart';
 import '../widgets/fade_slide_entrance.dart';
 import '../services/truck_assignment_service.dart';
+import '../services/truck_locations_feed.dart';
+import '../utils/fleet_snapshot.dart';
 import '../services/service_area_service.dart';
+import '../widgets/map_style_toggle.dart';
+import '../widgets/mapbox_gate.dart';
 
 class DriverTrackTruckScreen extends StatefulWidget {
   final bool isEmbedded;
@@ -33,6 +37,8 @@ class DriverTrackTruckScreen extends StatefulWidget {
   final DateTime? lastGpsUpdateTime;
   final VoidCallback? onOptimize;
   final bool isOptimizing;
+  /// Optional "Map | Route plan" switch shown in the panel header (driver dashboard).
+  final Widget? viewSwitch;
   
   const DriverTrackTruckScreen({
     super.key, 
@@ -51,6 +57,7 @@ class DriverTrackTruckScreen extends StatefulWidget {
     this.lastGpsUpdateTime,
     this.onOptimize,
     this.isOptimizing = false,
+    this.viewSwitch,
   });
 
 
@@ -81,6 +88,7 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> with Ti
   StreamSubscription? _optimizedRouteSubscription;
   
   Map<dynamic, dynamic>? _lastTruckData;
+  Timer? _fleetAgingTimer;
   geo.Position? _lastLocalPos;
 
   final Position _balintawakCenter = Position(121.1620, 13.9565);
@@ -91,6 +99,14 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> with Ti
   bool _optimizedRouteSourceCreated = false;
   bool _specialMarkersCreated = false;
   bool _optimizedMarkersCreated = false;
+  bool _satellite = false;
+  bool _cameraPlaced = false; // centre on Balintawak only on the first style load
+
+  /// Map | Satellite (the style-loaded handler redraws every layer on the new style).
+  void _setSatellite(bool v) {
+    setState(() => _satellite = v);
+    MapStyles.apply(mapboxMap, satellite: v);
+  }
   
   // LIVE DRIVER MARKERS
   PointAnnotation? _liveDriverLabel;
@@ -284,7 +300,7 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> with Ti
           
           // Refresh other truck markers with the new user context
           if (_managersReady && _lastTruckData != null) {
-            _lastTruckData!.forEach((k, v) => _updateSingleTruckMarker(k.toString(), v as Map));
+            _refreshLiveTruckMarkers();
           }
         }
       }
@@ -372,6 +388,7 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> with Ti
     _clockTimer?.cancel();
 
     _truckSubscription?.cancel();
+    _fleetAgingTimer?.cancel();
     _userSubscription?.cancel();
     _truckMetaSubscription?.cancel();
     _routeSubscription?.cancel();
@@ -417,10 +434,9 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> with Ti
 
   void _listenToTrucks() {
     _truckSubscription?.cancel();
-    _truckSubscription = _database.ref('truck_locations').onValue.listen((event) {
-      if (event.snapshot.exists && event.snapshot.value != null) {
+    _truckSubscription = TruckLocationsFeed.shared().events.listen((event) {
+      if (event.snapshot.exists && event.snapshot.value is Map) {
         _lastTruckData = event.snapshot.value as Map;
-        final int now = DateTime.now().millisecondsSinceEpoch;
 
         final String tid = (widget.focusTruckId ?? _user?.preferredTruck ?? "Unknown").toUpperCase();
         if (_lastTruckData!.containsKey(tid)) {
@@ -432,26 +448,33 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> with Ti
           }
         }
 
-        if (_managersReady) {
-          _lastTruckData!.forEach((key, value) {
-            final val = value as Map;
-            final bool isOnlineField = val['isOnline'] == true;
-            final dynamic lastSeenRaw = val['lastSeen'];
-            final int lastSeen = lastSeenRaw is num ? lastSeenRaw.toInt() : 0;
-            
-            // 2-minute freshness window
-            final bool isFresh = lastSeen > 0 && (now - lastSeen).abs() < 120000;
-            
-            if (isOnlineField && isFresh) {
-              _updateSingleTruckMarker(key.toString(), val);
-            } else {
-              // Explicitly remove if stale or offline
-              _removeSingleTruckMarker(key.toString());
-            }
-          });
-        }
+        if (_managersReady) _refreshLiveTruckMarkers();
+      } else {
+        _lastTruckData = <dynamic, dynamic>{};
+        if (_managersReady) _refreshLiveTruckMarkers();
       }
     });
+    // Freshness changes without any event (a crashed driver writes nothing).
+    _fleetAgingTimer?.cancel();
+    _fleetAgingTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      if (_managersReady) _refreshLiveTruckMarkers();
+    });
+  }
+
+  /// Shows exactly the live trucks of the shared fleet snapshot (same rule as the
+  /// Admin/Resident cards and maps) and removes every other marker.
+  void _refreshLiveTruckMarkers() {
+    final Map<dynamic, dynamic>? data = _lastTruckData;
+    if (data == null) return;
+    final FleetSnapshot fleet = FleetSnapshot.derive(data);
+    final Set<String> live = <String>{};
+    for (final LiveTruck t in fleet.trucks) {
+      live.add(t.nodeKey);
+      _updateSingleTruckMarker(t.nodeKey, t.node);
+    }
+    for (final String id in _truckMarkers.keys.toList()) {
+      if (!live.contains(id)) _removeSingleTruckMarker(id);
+    }
   }
 
   void _removeSingleTruckMarker(String id) {
@@ -590,16 +613,21 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> with Ti
     _driverSourceCreated = false;
     _routeSourceCreated = false;
     _specialMarkersCreated = false;
+    _optimizedRouteSourceCreated = false;
+    _optimizedMarkersCreated = false;
 
     try {
       await mapboxMap?.location.updateSettings(LocationComponentSettings(enabled: false, pulsingEnabled: false));
     } catch (e) {}
     
-    // Always start initial camera centered at Barangay Balintawak on map load
-    await mapboxMap?.setCamera(CameraOptions(
-      center: Point(coordinates: _balintawakCenter),
-      zoom: _getResponsiveZoom(context),
-    ));
+    // Start centred at Barangay Balintawak on the first load (not after a Map | Satellite switch).
+    if (!_cameraPlaced) {
+      _cameraPlaced = true;
+      await mapboxMap?.setCamera(CameraOptions(
+        center: Point(coordinates: _balintawakCenter),
+        zoom: _getResponsiveZoom(context),
+      ));
+    }
 
     try {
       await Future.delayed(const Duration(milliseconds: 800));
@@ -613,7 +641,7 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> with Ti
     setState(() => _managersReady = true);
     
     if (_lastLocalPos != null) _updateLocalDriverMarker(_lastLocalPos!);
-    if (_lastTruckData != null) _lastTruckData!.forEach((k, v) => _updateSingleTruckMarker(k.toString(), v as Map));
+    if (_lastTruckData != null) _refreshLiveTruckMarkers();
     if (_lastPoints.isNotEmpty) _updateRoutePolyline(_lastPoints);
     if (_lastSessionData != null) _updateSpecialMarkers(_lastSessionData!);
     if (_optimizedRouteData != null) {
@@ -1278,21 +1306,6 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> with Ti
     try { await mapboxMap!.style.setStyleSourceProperty("driver-route-source", "data", jsonEncode({"type": "FeatureCollection", "features": []})); } catch (e) {}
   }
 
-  Widget _buildLegendItem(Color color, String label) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 2),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(width: 12, height: 12, decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
-          const SizedBox(width: 8),
-          Text(label, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.black87)),
-        ],
-      ),
-    );
-  }
-
-
   String _calculateEstimatedEnd() {
     if (_startTime == "--:--" || _lastSessionData == null || widget.currentSessionId == null) {
       return "--:--";
@@ -1330,12 +1343,13 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> with Ti
       children: [
         Positioned.fill(child: _buildMap()),
         _buildMapControls(bottom: 20),
+        Positioned(top: 10, right: 10, child: MapStyleToggle(satellite: _satellite, compact: true, onChanged: _setSatellite)),
       ],
     );
   }
 
   Widget _buildMap() {
-    return MapWidget(
+    return MapboxGate(child: MapWidget(
       gestureRecognizers: <Factory<OneSequenceGestureRecognizer>>{
         Factory<OneSequenceGestureRecognizer>(() => EagerGestureRecognizer()),
       },
@@ -1345,7 +1359,7 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> with Ti
         center: Point(coordinates: _balintawakCenter), 
         zoom: _getResponsiveZoom(context),
       ),
-    );
+    ));
   }
 
   Widget _buildSwipeUpContent(ScrollController scrollController) {
@@ -1601,7 +1615,13 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> with Ti
       right: effectiveRight,
       child: Column(
         mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: isDesktop || widget.isMiniMap ? CrossAxisAlignment.center : CrossAxisAlignment.end,
         children: [
+          // Phones: Map | Satellite on top of the round buttons (desktop and mini map place it elsewhere).
+          if (!isDesktop && !widget.isMiniMap) ...[
+            MapStyleToggle(satellite: _satellite, compact: true, onChanged: _setSatellite),
+            const SizedBox(height: 12),
+          ],
           _buildMapControlButton(
             icon: Icons.gps_fixed_rounded,
             isActive: _isTargetActive,
@@ -1733,6 +1753,7 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> with Ti
           Positioned.fill(child: _buildMap()),
           _buildCornerHeader(),
           _buildMapControls(bottom: 32),
+          Positioned(left: 24 + 56 + 12, bottom: 24 + 9, child: MapStyleToggle(satellite: _satellite, onChanged: _setSatellite)),
           _buildDebugOverlay(),
 
           // Floating Info Panel
@@ -1910,6 +1931,10 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> with Ti
                 const Text("Live telemetry and route monitoring", style: TextStyle(color: Colors.grey, fontSize: 12, fontWeight: FontWeight.w700)),
               ],
             ),
+            if (widget.viewSwitch != null) ...[
+              const SizedBox(height: 12),
+              PointerInterceptor(child: widget.viewSwitch!),
+            ],
           ],
         ),
       ),
@@ -1933,7 +1958,7 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> with Ti
   Widget _buildDebugOverlay() {
     final bool isDesktop = MediaQuery.of(context).size.width >= 900;
     return Positioned(
-      top: isDesktop ? 125 : 155,
+      top: (isDesktop ? 125 : 155) + (widget.viewSwitch != null ? 44.0 : 0.0),
       left: isDesktop ? 24 : 16,
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
@@ -1971,7 +1996,11 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> with Ti
       children: [
         Positioned.fill(child: _buildMap()),
         _buildFloatingHeader(),
-        _buildLegend(),
+        if (widget.viewSwitch != null)
+          Positioned(
+            top: 68, left: 16,
+            child: SafeArea(child: PointerInterceptor(child: widget.viewSwitch!)),
+          ),
         _buildDebugOverlay(), // Added Telemetry Overlay (Speed and Distance) for mobile layout
         _buildMapControls(bottom: 200),
 
@@ -2074,52 +2103,6 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> with Ti
               ),
             ),
           ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildLegend() {
-    return Positioned(
-      top: 160, right: 16,
-      child: Container(
-        padding: const EdgeInsets.all(12),
-        constraints: const BoxConstraints(maxHeight: 500),
-        decoration: BoxDecoration(
-          color: Colors.white.withValues(alpha: 0.92), 
-          borderRadius: BorderRadius.circular(20), 
-          boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 10, offset: Offset(0, 4))]
-        ),
-        child: SingleChildScrollView(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Text("PUROK BOUNDARIES", style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: Colors.grey)),
-              const SizedBox(height: 4),
-              _buildLegendItem(const Color(0xFFE53935), "Purok 1"),
-              _buildLegendItem(const Color(0xFF1E88E5), "Purok 2"),
-              _buildLegendItem(const Color(0xFFFB8C00), "Purok 3"),
-              _buildLegendItem(const Color(0xFF43A047), "Purok Paraiso"),
-              _buildLegendItem(const Color(0xFF8E24AA), "Riverside"),
-              _buildLegendItem(const Color(0xFF00ACC1), "Brixton Homes"),
-              _buildLegendItem(const Color(0xFFE91E63), "El Pueblo"),
-              const Divider(height: 12),
-              const Text("TRAVELED ROUTE", style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: Colors.grey)),
-              const SizedBox(height: 4),
-              _buildLegendItem(Colors.green, "Active Route"),
-              _buildLegendItem(Colors.yellow, "Idle"),
-              _buildLegendItem(Colors.pinkAccent, "Full"),
-              _buildLegendItem(Colors.black, "Finish"),
-              _buildLegendItem(Colors.blue, "Start Point"),
-              if (_optimizedRouteData != null) ...[
-                const Divider(height: 12),
-                const Text("PLANNED ROUTE", style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: Colors.grey)),
-                const SizedBox(height: 4),
-                _buildLegendItem(Colors.blueAccent, "AI-Optimized Route"),
-              ],
-            ],
-          ),
         ),
       ),
     );

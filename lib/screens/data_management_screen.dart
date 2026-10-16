@@ -10,6 +10,7 @@ import '../utils/app_theme.dart';
 import '../utils/responsive.dart';
 import '../utils/custom_notification.dart';
 import '../widgets/custom_snackbar.dart';
+import '../widgets/app_date_range_picker.dart';
 
 class DataManagementScreen extends StatefulWidget {
   final bool isEmbedded;
@@ -34,7 +35,7 @@ class _DataManagementScreenState extends State<DataManagementScreen> with Ticker
   bool _showRefreshSpinner = false;
   double _manualPullDepth = 0.0;
   late AnimationController _refreshRotationController;
-  DateTime? _dateFilter;
+  DateTimeRange? _dateFilter;
 
   @override
   void initState() {
@@ -317,9 +318,8 @@ class _DataManagementScreenState extends State<DataManagementScreen> with Ticker
       if (dateStr != null && dateStr.length >= 10) {
         try {
           final DateTime backupDate = DateTime.parse(dateStr.substring(0, 10));
-          return backupDate.year == _dateFilter!.year && 
-                 backupDate.month == _dateFilter!.month && 
-                 backupDate.day == _dateFilter!.day;
+          return !backupDate.isBefore(DateUtils.dateOnly(_dateFilter!.start)) &&
+                 !backupDate.isAfter(DateUtils.dateOnly(_dateFilter!.end));
         } catch (_) {}
       }
       return false;
@@ -796,7 +796,7 @@ class _DataManagementScreenState extends State<DataManagementScreen> with Ticker
                 onTap: () => _showDateFilterPicker(),
                 child: Row(
                   children: [
-                    Text(_dateFilter == null ? "DATE CREATED" : DateFormat('MMM dd, yyyy').format(_dateFilter!).toUpperCase(), 
+                    Text(_dateFilter == null ? "DATE CREATED" : _dateFilterLabel(_dateFilter!).toUpperCase(), 
                       style: TextStyle(fontWeight: FontWeight.w900, fontSize: fontSize, color: _dateFilter == null ? Colors.grey : const Color(0xFF00796B), letterSpacing: 1.2)),
                     const SizedBox(width: 4),
                     Icon(Icons.filter_list_rounded, size: isMobile ? 12 : 14, color: _dateFilter == null ? Colors.grey : const Color(0xFF00796B)),
@@ -812,25 +812,19 @@ class _DataManagementScreenState extends State<DataManagementScreen> with Ticker
     );
   }
 
-  Future<void> _showDateFilterPicker() async {
-    final DateTime? picked = await showDialog<DateTime>(
-      context: context,
-      builder: (context) => Dialog(
-        backgroundColor: Colors.white,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(32)),
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 400),
-          child: _CuteDateFilterPicker(initialDate: _dateFilter ?? DateTime.now()),
-        ),
-      ),
-    );
+  String _dateFilterLabel(DateTimeRange r) => DateUtils.isSameDay(r.start, r.end)
+      ? DateFormat('MMM dd, yyyy').format(r.start)
+      : "${DateFormat('MMM dd').format(r.start)} - ${DateFormat('MMM dd, yyyy').format(r.end)}";
 
-    if (picked != null) {
-      setState(() => _dateFilter = picked);
-    } else if (picked == null && _dateFilter != null) {
-      // User dismissed or cleared? We need a way to clear. 
-      // I'll add a Clear button in the picker.
-    }
+  Future<void> _showDateFilterPicker() async {
+    final AppDatePick? pick = await showAppDateRangePicker(
+      context,
+      initialRange: _dateFilter,
+      lastDate: DateTime.now(),
+      clearable: _dateFilter != null,
+    );
+    if (pick == null) return;
+    setState(() => _dateFilter = pick.cleared ? null : pick.range);
   }
 
   Widget _buildBackupItem(Map<String, dynamic> backup) {
@@ -946,94 +940,5 @@ class _DataManagementScreenState extends State<DataManagementScreen> with Ticker
 
   void _showSuccessModal(String message) {
     // Modal removed in favor of top snackbars
-  }
-}
-
-class _CuteDateFilterPicker extends StatefulWidget {
-  final DateTime initialDate;
-  const _CuteDateFilterPicker({required this.initialDate});
-
-  @override
-  State<_CuteDateFilterPicker> createState() => _CuteDateFilterPickerState();
-}
-
-class _CuteDateFilterPickerState extends State<_CuteDateFilterPicker> {
-  late DateTime _selectedDate;
-
-  @override
-  void initState() {
-    super.initState();
-    _selectedDate = widget.initialDate;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(24),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(32),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              const Text("Filter by Date", style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: Color(0xFF00897B))),
-              IconButton(onPressed: () => Navigator.pop(context), icon: const Icon(Icons.close_rounded, color: Colors.grey)),
-            ],
-          ),
-          const SizedBox(height: 8),
-          const Align(alignment: Alignment.centerLeft, child: Text("Pick a date to filter backup snapshots.", style: TextStyle(fontSize: 13, color: Colors.grey, fontWeight: FontWeight.w500))),
-          const Divider(height: 32),
-          Theme(
-            data: Theme.of(context).copyWith(
-              colorScheme: const ColorScheme.light(
-                primary: Color(0xFF00897B),
-                onPrimary: Colors.white,
-                onSurface: Color(0xFF1A1A1A),
-              ),
-            ),
-            child: CalendarDatePicker(
-              initialDate: _selectedDate,
-              firstDate: DateTime(2020),
-              lastDate: DateTime.now(),
-              onDateChanged: (date) => setState(() => _selectedDate = date),
-            ),
-          ),
-          const SizedBox(height: 24),
-          Row(
-            children: [
-              Expanded(
-                child: OutlinedButton(
-                  onPressed: () => Navigator.pop(context, null),
-                  style: OutlinedButton.styleFrom(
-                    side: BorderSide(color: Colors.grey.shade300, width: 1.5),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                  ),
-                  child: const Text("CLEAR", style: TextStyle(color: Colors.grey, fontWeight: FontWeight.w900, letterSpacing: 1.1)),
-                ),
-              ),
-              const SizedBox(width: 16),
-              Expanded(
-                child: ElevatedButton(
-                  onPressed: () => Navigator.pop(context, _selectedDate),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF00897B),
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                    elevation: 0,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                  ),
-                  child: const Text("APPLY FILTER", style: TextStyle(fontWeight: FontWeight.w900, fontSize: 13)),
-                ),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
   }
 }

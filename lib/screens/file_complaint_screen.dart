@@ -1,3 +1,4 @@
+import '../utils/complaint_flow.dart';
 import 'package:flutter/material.dart';
 import 'package:firebase_database/firebase_database.dart';
 import '../api/api_service.dart';
@@ -52,42 +53,34 @@ class _FileComplaintScreenState extends State<FileComplaintScreen> {
       return;
     }
 
-    setState(() => _isLoading = true);
     final user = await SessionManager.getUser();
-    
+    final String? residentId = ComplaintFlow.residentIdFor(user);
+    if (residentId == null) {
+      // No signed-in resident: never file under id "0".
+      CustomSnackBar.show(context, message: "Please log in again to submit a complaint.", isError: true);
+      return;
+    }
+    setState(() => _isLoading = true);
+
     try {
       final response = await _apiService.fileComplaint(
-        user?.userId.toString() ?? "0",
+        residentId,
         _selectedCategory,
         description,
         purok: _selectedPurok,
         location: location.isNotEmpty ? location : _selectedPurok,
       );
 
-      if (response.data['success'] == true) {
-        // TRIGGER APP NOTIFICATION FOR ADMIN VIA FIREBASE
-        try {
-          await _database.ref('notifications').push().set({
-            'type': 'RESIDENT_COMPLAINT',
-            'title': 'New Resident Complaint',
-            'message': '${user?.name ?? 'A resident'} filed a complaint in $_selectedPurok: $_selectedCategory',
-            'resident_id': user?.userId,
-            'timestamp': ServerValue.timestamp,
-            'isRead': false,
-          });
-        } catch (e) {
-          debugPrint("Firebase notification error: $e");
-        }
-
-        if (!mounted) return;
-        CustomSnackBar.show(context, message: "Complaint submitted successfully");
-        Navigator.pop(context);
-      } else {
-        throw response.data['message'] ?? "Submission failed";
-      }
+      // Throws (server message, HTML fallback page, invalid JSON) unless the complaint was saved.
+      ComplaintFlow.submissionResult(response);
+      // The Admin in-app notification is written once by file_complaint.php, after the
+      // complaint is saved in MySQL (no second copy from the app).
+      if (!mounted) return;
+      CustomSnackBar.show(context, message: "Complaint submitted successfully");
+      Navigator.pop(context);
     } catch (e) {
       if (!mounted) return;
-      CustomSnackBar.show(context, message: "Error: $e", isError: true);
+      CustomSnackBar.show(context, message: ComplaintFlow.errorMessage(e), isError: true);
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }

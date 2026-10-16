@@ -4,12 +4,71 @@ import 'package:firebase_database/firebase_database.dart';
 import '../api/api_service.dart';
 import '../models/driver_trip.dart';
 import '../models/user.dart';
+import '../utils/history_playback.dart';
+
+/// Result of loading route history: the trips AND whether the sources answered, so a
+/// failed request is never presented as an empty (successful) history.
+class RouteHistoryResult {
+  const RouteHistoryResult({required this.trips, required this.failedSources, required this.totalSources});
+
+  final List<DriverTrip> trips;
+  final List<String> failedSources;
+  final int totalSources;
+
+  /// Every source failed: the list says nothing about whether routes exist.
+  bool get isError => failedSources.length >= totalSources;
+
+  /// Some sources failed: the list may be incomplete.
+  bool get isPartial => failedSources.isNotEmpty && !isError;
+}
 
 class DriverRouteHistoryService {
+  /// What a Resident may see of a trip: the truck, route, date, distance, duration, status
+  /// and the driver's display NAME (the same name residents already see on the live map
+  /// label) - never the driver's internal account id.
+  static DriverTrip redactForResident(DriverTrip t) => t.copyWith(
+        driverName: t.driverName.trim().isEmpty || t.driverName.trim().toLowerCase() == 'unknown'
+            ? 'Collection crew'
+            : t.driverName,
+        driverId: 0,
+      );
+
   static final ApiService _apiService = ApiService();
   static final FirebaseDatabase _database = FirebaseDatabase.instance;
 
-  /// Fetches route history list with security role verification.
+  /// Loads exactly one trip by its id from the persisted Firebase record (frozen
+  /// collection data + recorded GPS points). Returns null when no such trip exists:
+  /// callers must show "unavailable", never a different trip.
+  static Future<DriverTrip?> fetchTripById(String tripId) async {
+    if (tripId.isEmpty) return null;
+    try {
+      final DataSnapshot snap = await _database.ref('driver_routes/$tripId').get();
+      if (!snap.exists || snap.value is! Map) return null;
+      final Map value = snap.value as Map;
+      if (value['is_simulation'] == true || value['isSimulation'] == true) return null;
+
+      final List<GpsPoint> points = <GpsPoint>[];
+      if (value['route'] is Map) {
+        (value['route'] as Map).forEach((_, pVal) {
+          if (pVal is Map) {
+            final GpsPoint pt = GpsPoint.fromJson(Map<String, dynamic>.from(pVal));
+            if (pt.latitude != 0.0 && pt.longitude != 0.0 && (pt.accuracyM == 0.0 || pt.accuracyM <= 50.0)) {
+              points.add(pt);
+            }
+          }
+        });
+        points.sort((a, b) => a.timestamp.compareTo(b.timestamp));
+      }
+      final Map<String, dynamic> json = Map<String, dynamic>.from(value);
+      json['trip_id'] = tripId;
+      return DriverTrip.fromJson(json, pointsList: points);
+    } catch (e) {
+      debugPrint("[ROUTE HISTORY SERVICE] fetchTripById error: $e");
+      return null;
+    }
+  }
+
+  /// Route history list with role scoping (compat wrapper; failures are not reported).
   static Future<List<DriverTrip>> fetchRouteHistory({
     required UserData currentUser,
     DateTime? startDate,
@@ -20,10 +79,43 @@ class DriverRouteHistoryService {
     String? selectedStatus,
     bool includeAllTrips = false,
   }) async {
-    // Role Scoping: Drivers can view ONLY their own history; Residents view all public collection history
+    final RouteHistoryResult r = await fetchRouteHistoryResult(
+      currentUser: currentUser,
+      startDate: startDate,
+      endDate: endDate,
+      selectedDriverId: selectedDriverId,
+      selectedTruckId: selectedTruckId,
+      selectedArea: selectedArea,
+      selectedStatus: selectedStatus,
+      includeAllTrips: includeAllTrips,
+    );
+    return r.trips;
+  }
+
+  /// Fetches route history with security role scoping and per-source health.
+  static Future<RouteHistoryResult> fetchRouteHistoryResult({
+    required UserData currentUser,
+    DateTime? startDate,
+    DateTime? endDate,
+    String? selectedDriverId,
+    String? selectedTruckId,
+    String? selectedArea,
+    String? selectedStatus,
+    bool includeAllTrips = false,
+    bool scopeFirebaseByDate = false,
+  }) async {
+    final String role = currentUser.role.toLowerCase();
+    final bool isResident = role == 'resident';
+    bool firebaseOk = true;
+    bool mysqlOk = true;
+
+    // Role Scoping: Drivers can view ONLY their own history. Residents see the collection
+    // history of every truck (read-only) but cannot filter or identify drivers.
     String? effectiveDriverId = selectedDriverId;
-    if (currentUser.role.toLowerCase() == 'driver') {
+    if (role == 'driver') {
       effectiveDriverId = currentUser.userId.toString();
+    } else if (isResident) {
+      effectiveDriverId = null;
     }
 
     final String startDateStr = startDate != null ? "${startDate.year}-${startDate.month.toString().padLeft(2, '0')}-${startDate.day.toString().padLeft(2, '0')}" : "";
@@ -34,7 +126,15 @@ class DriverRouteHistoryService {
 
     // 1. Fetch from Firebase Realtime Database (`driver_routes` node)
     try {
-      final DataSnapshot snapshot = await _database.ref('driver_routes').get();
+      // With [scopeFirebaseByDate], only trips whose push key (creation time) can fall in the
+      // selected days are downloaded, instead of the whole node.
+      final Query query = scopeFirebaseByDate && startDate != null && endDate != null
+          ? (() {
+              final (String from, String to) = HistoryDates.firebaseKeyBounds(startDate, endDate);
+              return _database.ref('driver_routes').orderByKey().startAt(from).endAt(to);
+            })()
+          : _database.ref('driver_routes');
+      final DataSnapshot snapshot = await query.get();
       if (snapshot.exists && snapshot.value is Map) {
         final Map routesData = snapshot.value as Map;
         routesData.forEach((key, value) {
@@ -88,7 +188,7 @@ class DriverRouteHistoryService {
               tripDate = raw != null ? DateTime.fromMillisecondsSinceEpoch(raw) : DateTime.now();
             } else if (value['date'] != null || value['route_date'] != null) {
               final dStr = (value['date'] ?? value['route_date']).toString();
-              tripDate = DateTime.tryParse(dStr) ?? DateTime.now();
+              tripDate = HistoryDates.parseRecordedDate(dStr) ?? DateTime.now();
             } else if (value['start_time'] != null) {
               final stStr = value['start_time'].toString();
               tripDate = DateTime.tryParse(stStr) ?? DateTime.now();
@@ -96,16 +196,8 @@ class DriverRouteHistoryService {
               tripDate = DateTime.now();
             }
 
-            // Date filtering (Asia/Manila inclusive start, exclusive next day start)
-            final localTripDate = tripDate.toLocal();
-            if (startDate != null) {
-              final sBound = DateTime(startDate.year, startDate.month, startDate.day, 0, 0, 0);
-              if (localTripDate.isBefore(sBound)) return;
-            }
-            if (endDate != null) {
-              final eBound = DateTime(endDate.year, endDate.month, endDate.day + 1, 0, 0, 0);
-              if (localTripDate.isAfter(eBound) || localTripDate.isAtSameMomentAs(eBound)) return;
-            }
+            // Date filtering on Asia/Manila calendar days (independent of the device time zone).
+            if (!HistoryDates.inRange(tripDate, startDate, endDate)) return;
 
             final Map<String, dynamic> jsonMap = Map<String, dynamic>.from(value);
             jsonMap['trip_id'] = tripId;
@@ -150,6 +242,7 @@ class DriverRouteHistoryService {
         });
       }
     } catch (e) {
+      firebaseOk = false;
       debugPrint("[ROUTE HISTORY SERVICE] Firebase fetch error: $e");
     }
 
@@ -164,6 +257,7 @@ class DriverRouteHistoryService {
         status: selectedStatus,
       );
 
+      if (response.data['success'] != true) mysqlOk = false;
       if (response.data['success'] == true && response.data['trips'] is List) {
         final List rawTrips = response.data['trips'];
         for (var t in rawTrips) {
@@ -196,11 +290,13 @@ class DriverRouteHistoryService {
         }
       }
     } catch (e) {
+      mysqlOk = false;
       debugPrint("[ROUTE HISTORY SERVICE] MySQL API fetch error: $e");
     }
 
     // Auto-resolve missing "Truck not recorded" values using driver preferred_truck mapping
-    try {
+    // (not for residents: that lookup uses the full user list).
+    if (!isResident) try {
       final userResp = await _apiService.getUsers();
       if (userResp.data['success'] == true && userResp.data['users'] is List) {
         final Map<String, String> driverTruckMap = {};
@@ -266,7 +362,10 @@ class DriverRouteHistoryService {
 
     // Sort trips descending by start time
     tripsList.sort((a, b) => b.startTime.compareTo(a.startTime));
-    return tripsList;
+
+    final List<DriverTrip> visible = isResident ? tripsList.map(redactForResident).toList() : tripsList;
+    final List<String> failed = <String>[if (!firebaseOk) 'firebase', if (!mysqlOk) 'mysql'];
+    return RouteHistoryResult(trips: visible, failedSources: failed, totalSources: 2);
   }
 
   static String formatDurationShort(int seconds) {
@@ -274,60 +373,6 @@ class DriverRouteHistoryService {
     final mins = seconds ~/ 60;
     final secs = seconds % 60;
     return secs == 0 ? "${mins}m" : "${mins}m ${secs}s";
-  }
-
-  static List<GpsPoint> _generateSampleRoutePoints(DateTime startTime) {
-    final List<GpsPoint> samplePoints = [];
-    final List<List<double>> routeCoords = [
-      [121.1543, 13.9482],
-      [121.1550, 13.9492],
-      [121.1560, 13.9501],
-      [121.1571, 13.9511],
-      [121.1582, 13.9520],
-      [121.1592, 13.9528],
-      [121.1601, 13.9535],
-      [121.1610, 13.9542],
-      [121.1618, 13.9548], // Stop 1 start
-      [121.1618, 13.9548],
-      [121.1618, 13.9548], // Stop 1 end (38s)
-      [121.1624, 13.9555],
-      [121.1630, 13.9562],
-      [121.1638, 13.9571],
-      [121.1645, 13.9580], // Stop 2 start
-      [121.1645, 13.9580],
-      [121.1645, 13.9580], // Stop 2 end (44s)
-      [121.1652, 13.9588],
-      [121.1662, 13.9595], // Stop 3 start
-      [121.1662, 13.9595],
-      [121.1662, 13.9595],
-      [121.1662, 13.9595], // Stop 3 end (2m 6s)
-      [121.1670, 13.9602],
-      [121.1678, 13.9610],
-      [121.1686, 13.9619],
-      [121.1695, 13.9628],
-    ];
-
-    DateTime currentTs = startTime;
-    for (int i = 0; i < routeCoords.length; i++) {
-      bool isStop1 = (i >= 8 && i <= 10);
-      bool isStop2 = (i >= 14 && i <= 16);
-      bool isStop3 = (i >= 18 && i <= 21);
-      bool isStop = isStop1 || isStop2 || isStop3;
-
-      int dtSec = isStop1 ? 19 : (isStop2 ? 22 : (isStop3 ? 42 : 40));
-      currentTs = currentTs.add(Duration(seconds: dtSec));
-
-      samplePoints.add(GpsPoint(
-        latitude: routeCoords[i][1],
-        longitude: routeCoords[i][0],
-        speedKmh: isStop ? 0.0 : 22.5,
-        heading: 45.0,
-        accuracyM: 5.0,
-        status: isStop ? "IDLE" : "ACTIVE",
-        timestamp: currentTs,
-      ));
-    }
-    return samplePoints;
   }
 
   /// Filters out small GPS drift noise (< 7m movement while slow) during extended stops
@@ -525,7 +570,15 @@ class DriverRouteHistoryService {
     }
 
     // 3. End trip (or In Progress)
-    if (trip.routeStatus == 'COMPLETED') {
+    if (trip.routeStatus == 'FULL') {
+      eventTimeline.add(TripEvent(
+        eventType: "FULL",
+        description: "Truck full - collection ended",
+        timestamp: tripEndTime,
+        latitude: processedPoints.last.latitude,
+        longitude: processedPoints.last.longitude,
+      ));
+    } else if (trip.routeStatus == 'COMPLETED') {
       eventTimeline.add(TripEvent(
         eventType: "COMPLETED",
         description: "End trip",
@@ -555,8 +608,9 @@ class DriverRouteHistoryService {
       finishLat: processedPoints.last.latitude,
       finishLng: processedPoints.last.longitude,
       totalDistanceKm: trip.totalDistanceKm > 0 ? trip.totalDistanceKm : calcDistanceKm,
-      movingTimeSeconds: movingSeconds > 0 ? movingSeconds : 960,
-      stoppedTimeSeconds: stoppedSeconds > 0 ? stoppedSeconds : 480,
+      // Measured from the recorded points only; never a made-up default.
+      movingTimeSeconds: movingSeconds,
+      stoppedTimeSeconds: stoppedSeconds,
       detectedStopsCount: stops.length > 0 ? stops.length : trip.detectedStopsCount,
       visitedAreas: areas,
       isDelayed: trip.isDelayed,

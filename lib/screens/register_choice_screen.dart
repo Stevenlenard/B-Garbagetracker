@@ -104,20 +104,16 @@ class _RegisterChoiceScreenState extends State<RegisterChoiceScreen> {
                         ),
                       ),
 
-                      // Footer inside scroll for Web/Tablet
-                      if (!isMobile) ...[
-                        const SizedBox(height: 80), // Adjusted spacing for Web
-                        FadeSlideEntrance(
-                          key: const ValueKey('reg_choice_footer'),
-                          delay: const Duration(milliseconds: 800),
-                          child: _buildFooter(context),
-                        ),
-                        const SizedBox(height: 40),
-                      ],
+                      // Footer follows the content on every screen size (never on top of it).
+                      SizedBox(height: isMobile ? 32 : 80),
+                      FadeSlideEntrance(
+                        key: const ValueKey('reg_choice_footer'),
+                        delay: const Duration(milliseconds: 800),
+                        child: _buildFooter(context),
+                      ),
+                      SizedBox(height: isMobile ? 20 : 40),
                       // Keyboard Spacer
                       SizedBox(height: keyboardHeight),
-                      // Extra buffer for mobile fixed footer
-                      if (isMobile && keyboardHeight == 0) const SizedBox(height: 120),
                     ],
                   ),
                 ),
@@ -143,18 +139,6 @@ class _RegisterChoiceScreenState extends State<RegisterChoiceScreen> {
                 ),
               ),
 
-              // Fixed Footer for Mobile
-              if (isMobile)
-                Positioned(
-                  left: 0,
-                  right: 0,
-                  bottom: 20,
-                  child: FadeSlideEntrance(
-                    key: const ValueKey('reg_choice_footer_mobile'),
-                    delay: const Duration(milliseconds: 800),
-                    child: _buildFooter(context),
-                  ),
-                ),
             ],
           ),
         ),

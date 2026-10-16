@@ -1,12 +1,28 @@
+# Flutter Web on Hostinger (copied into build/web by `flutter build web`).
+
 <IfModule mod_rewrite.c>
   RewriteEngine On
   RewriteBase /
 
-  # Allow direct access to existing files and directories
+  # Existing files and directories are served as they are.
   RewriteCond %{REQUEST_FILENAME} -f [OR]
   RewriteCond %{REQUEST_FILENAME} -d
   RewriteRule ^ - [L]
 
-  # Fallback all other SPA web routes to index.html
+  # The PHP API is never answered with the web app: a missing backend file is a real 404
+  # (otherwise index.html comes back with HTTP 200 and looks like a broken API response).
+  RewriteRule ^backend/ - [L]
+
+  # Everything else is a Flutter route.
   RewriteRule ^ index.html [L]
 </IfModule>
+
+# The app shell must be revalidated on every load, or browsers keep last week's
+# main.dart.js (Hostinger sends max-age=604800 for .js by default) after a new upload.
+# Unchanged files still answer "304 Not Modified" via ETag, so this costs little.
+<FilesMatch "^(index\.html|main\.dart\.js|flutter_bootstrap\.js|flutter\.js|flutter_service_worker\.js|version\.json|manifest\.json)$">
+  <IfModule mod_headers.c>
+    Header set Cache-Control "no-cache, must-revalidate"
+    Header unset Expires
+  </IfModule>
+</FilesMatch>

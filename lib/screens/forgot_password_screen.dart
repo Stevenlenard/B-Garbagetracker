@@ -297,12 +297,10 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
                               ),
                             ),
 
-                            // Footer inside scroll for Web/Tablet
-                            if (!isMobile) ...[
-                              const SizedBox(height: 60),
-                              _buildFooter(),
-                              const SizedBox(height: 20),
-                            ],
+                            // Footer follows the content on every screen size (never on top of it).
+                            SizedBox(height: isMobile ? 28 : 60),
+                            _buildFooter(),
+                            const SizedBox(height: 20),
                           ],
                         ),
                       ),
@@ -310,24 +308,11 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
                       // Spacer for the keyboard
                       SizedBox(height: keyboardHeight),
 
-                      // Extra buffer for mobile fixed footer
-                      if (isMobile && keyboardHeight == 0) const SizedBox(height: 120),
                     ],
                   ),
                 ),
               ),
 
-              // Fixed Footer for Mobile
-              if (isMobile)
-                Positioned(
-                  left: 0,
-                  right: 0,
-                  bottom: 20,
-                  child: FadeSlideEntrance(
-                    delay: const Duration(milliseconds: 700),
-                    child: _buildFooter(),
-                  ),
-                ),
             ],
           ),
         ),

@@ -201,6 +201,24 @@ class DriverTrip {
   final String durationDisplay;
   final String distanceDisplay;
 
+  /// Frozen collection duration recorded at FULL (seconds), when known.
+  final int? collectionDurationSeconds;
+
+  /// True when this trip carries a real FULL event (frozen collection record, or a
+  /// stored FULL time/status) - i.e. it is a genuine load, not just a trip with movement.
+  final bool hasFullEvent;
+
+  /// FULL, or later (COMPLETED/FINISHED): the collection is finalized.
+  bool get isFinalizedCollection =>
+      routeStatus == 'FULL' || routeStatus == 'COMPLETED' || routeStatus == 'FINISHED';
+
+  /// End of the COLLECTION. After FULL it is the FULL time, never the unloading
+  /// confirmation, so COMPLETED cannot extend the collection duration.
+  DateTime? get collectionEndTime {
+    if (isFinalizedCollection && fullTime != null) return fullTime;
+    return endTime;
+  }
+
   bool get isMeasured => weightType.toUpperCase() == 'MEASURED';
   double get weightTons => weightKg / 1000.0;
 
@@ -252,6 +270,8 @@ class DriverTrip {
     this.hasRecordedStartTime = true,
     this.durationDisplay = "Not recorded",
     this.distanceDisplay = "Unavailable",
+    this.collectionDurationSeconds,
+    this.hasFullEvent = false,
   }) : tripNumber = tripNumber ?? (tripId.startsWith("#") ? tripId : "#$tripId");
 
   DriverTrip copyWith({
@@ -283,6 +303,8 @@ class DriverTrip {
     double? weightKg,
     String? weightType,
     DateTime? fullTime,
+    int? collectionDurationSeconds,
+    bool? hasFullEvent,
   }) {
     return DriverTrip(
       tripId: tripId ?? this.tripId,
@@ -313,6 +335,11 @@ class DriverTrip {
       weightKg: weightKg ?? this.weightKg,
       weightType: weightType ?? this.weightType,
       fullTime: fullTime ?? this.fullTime,
+      hasRecordedStartTime: hasRecordedStartTime,
+      durationDisplay: durationDisplay,
+      distanceDisplay: distanceDisplay,
+      collectionDurationSeconds: collectionDurationSeconds ?? this.collectionDurationSeconds,
+      hasFullEvent: hasFullEvent ?? this.hasFullEvent,
     );
   }
 
@@ -326,9 +353,20 @@ class DriverTrip {
     return "${visitedAreas.take(2).join(" • ")} +${visitedAreas.length - 2} areas";
   }
 
+  /// Collection duration in seconds: the frozen value recorded at FULL when present,
+  /// otherwise start -> collection end (FULL time once finalized, else trip end/last point).
+  int get collectionSeconds {
+    if (collectionDurationSeconds != null && collectionDurationSeconds! >= 0) return collectionDurationSeconds!;
+    // A finalized trip with no recorded end and no GPS points has an UNKNOWN duration;
+    // it must not be measured up to "now".
+    if (isFinalizedCollection && collectionEndTime == null && points.isEmpty) return 0;
+    final DateTime end = collectionEndTime ?? (points.isNotEmpty ? points.last.timestamp : DateTime.now());
+    final int sec = end.difference(startTime).inSeconds;
+    return sec < 0 ? 0 : sec;
+  }
+
   String get formattedDuration {
-    final DateTime end = endTime ?? (points.isNotEmpty ? points.last.timestamp : DateTime.now());
-    final int minutes = end.difference(startTime).inMinutes;
+    final int minutes = collectionSeconds ~/ 60;
     if (minutes < 60) {
       return "$minutes min";
     }
@@ -338,8 +376,7 @@ class DriverTrip {
   }
 
   int get unclassifiedTimeSeconds {
-    final DateTime end = endTime ?? (points.isNotEmpty ? points.last.timestamp : DateTime.now());
-    final int totalSec = end.difference(startTime).inSeconds;
+    final int totalSec = collectionSeconds;
     final int unclassified = totalSec - (movingTimeSeconds + stoppedTimeSeconds);
     return unclassified > 0 ? unclassified : 0;
   }
@@ -380,8 +417,9 @@ class DriverTrip {
       if (raw != null) et = DateTime.fromMillisecondsSinceEpoch(raw);
     }
 
-    if (et == null && (statusStr == 'COMPLETED' || statusStr == 'FINISHED')) {
-      et = pts.isNotEmpty ? pts.last.timestamp : st.add(const Duration(minutes: 24));
+    if (et == null && (statusStr == 'COMPLETED' || statusStr == 'FINISHED') && pts.isNotEmpty) {
+      // Only a recorded point can stand in for a missing end time; nothing is invented.
+      et = pts.last.timestamp;
     }
 
     final String idRaw = (json['trip_id'] ?? json['route_id'] ?? json['key'] ?? "100").toString();
@@ -425,19 +463,45 @@ class DriverTrip {
       calcDist = double.tryParse((json['total_distance_km'] ?? json['total_distance'] ?? 0).toString()) ?? 0.0;
     }
 
-    final double weightVal = double.tryParse((json['weight_kg'] ?? json['weightKg'] ?? 5000.0).toString()) ?? 5000.0;
-    final String weightTypeVal = (json['weight_type'] ?? json['weightType'] ?? "ESTIMATED").toString().toUpperCase();
+    // The frozen collection record written at FULL is authoritative for distance,
+    // duration, FULL time and load (a later COMPLETED or travel to the landfill can
+    // never change it).
+    final Object? collectionRaw = json['collection'];
+    final Map? rec = collectionRaw is Map ? collectionRaw : null;
+    if (rec != null && rec['distance_km'] is num) {
+      calcDist = (rec['distance_km'] as num).toDouble();
+    } else if (json['collection_distance_km'] is num) {
+      calcDist = (json['collection_distance_km'] as num).toDouble();
+    }
+    int? collectionSec;
+    final Object? durRaw = rec != null ? rec['duration_s'] : json['collection_duration_s'];
+    if (durRaw is num) collectionSec = durRaw.toInt();
+
+    double weightVal = double.tryParse((json['weight_kg'] ?? json['weightKg'] ?? 5000.0).toString()) ?? 5000.0;
+    String weightTypeVal = (json['weight_type'] ?? json['weightType'] ?? "ESTIMATED").toString().toUpperCase();
+    if (rec != null && json['weight_kg'] == null && json['weightKg'] == null && rec['weight_kg'] is num) {
+      weightVal = (rec['weight_kg'] as num).toDouble();
+      weightTypeVal = (rec['weight_type'] ?? 'ESTIMATED').toString().toUpperCase();
+    }
 
     DateTime? fTime;
-    if (json['full_time'] != null) {
-      fTime = DateTime.tryParse(json['full_time'].toString());
-    } else if (json['full_date'] != null && json['full_time'] != null) {
-      fTime = DateTime.tryParse("${json['full_date']} ${json['full_time']}");
-    } else if (json['raw_full_time'] != null) {
-      fTime = DateTime.tryParse(json['raw_full_time'].toString());
-    } else {
-      fTime = et;
+    if (rec != null && rec['finalized_at_ms'] is num) {
+      fTime = DateTime.fromMillisecondsSinceEpoch((rec['finalized_at_ms'] as num).toInt());
     }
+    // `full_time` from the PHP load history is a display string ("9:30 AM"); the
+    // machine-readable value is `raw_full_time`.
+    fTime ??= json['full_time'] != null ? DateTime.tryParse(json['full_time'].toString()) : null;
+    fTime ??= json['raw_full_time'] != null ? DateTime.tryParse(json['raw_full_time'].toString()) : null;
+    fTime ??= (json['full_date'] != null && json['full_time'] != null)
+        ? DateTime.tryParse("${json['full_date']} ${json['full_time']}")
+        : null;
+    fTime ??= et;
+
+    final bool hasFullEvent = rec != null ||
+        json['collection_finalized'] == true ||
+        statusStr == 'FULL' ||
+        json['has_full_event'] == true ||
+        (json['full_time'] != null && DateTime.tryParse(json['full_time'].toString()) != null);
 
     final bool hasStart = json['start_time'] != null && json['start_time'].toString().isNotEmpty && !json['start_time'].toString().startsWith("0000");
     final String durDisp = (json['duration'] ?? json['duration_display'])?.toString() ?? (hasStart ? "" : "Not recorded");
@@ -458,8 +522,8 @@ class DriverTrip {
       finishLat: json['finish_lat'] != null ? double.tryParse(json['finish_lat'].toString()) : (pts.isNotEmpty ? pts.last.latitude : null),
       finishLng: json['finish_lng'] != null ? double.tryParse(json['finish_lng'].toString()) : (pts.isNotEmpty ? pts.last.longitude : null),
       totalDistanceKm: calcDist,
-      movingTimeSeconds: int.tryParse((json['moving_time_seconds'] ?? 0).toString()) ?? 960,
-      stoppedTimeSeconds: int.tryParse((json['stopped_time_seconds'] ?? 0).toString()) ?? 480,
+      movingTimeSeconds: int.tryParse((json['moving_time_seconds'] ?? 0).toString()) ?? 0,
+      stoppedTimeSeconds: int.tryParse((json['stopped_time_seconds'] ?? 0).toString()) ?? 0,
       detectedStopsCount: int.tryParse((json['detected_stops_count'] ?? json['total_stops'] ?? 0).toString()) ?? 2,
       visitedAreas: areas,
       isDelayed: json['is_delayed'] == true || json['isDelayed'] == true,
@@ -473,6 +537,8 @@ class DriverTrip {
       hasRecordedStartTime: hasStart,
       durationDisplay: durDisp,
       distanceDisplay: distDisp,
+      collectionDurationSeconds: collectionSec,
+      hasFullEvent: hasFullEvent,
     );
   }
 

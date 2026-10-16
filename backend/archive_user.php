@@ -1,6 +1,10 @@
 <?php
 header("Content-Type: application/json");
 require_once 'db_config.php';
+require_once 'auth_token.php';
+
+// Only an administrator may archive or restore accounts.
+gt_require_role(['admin']);
 
 $data = json_decode(file_get_contents("php://input"));
 

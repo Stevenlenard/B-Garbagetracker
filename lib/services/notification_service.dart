@@ -3,6 +3,10 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:firebase_database/firebase_database.dart';
 import '../utils/session_manager.dart';
 import '../models/user.dart';
+import '../utils/complaint_flow.dart';
+import 'collection_reminder_service.dart';
+import '../utils/app_navigator.dart';
+import '../utils/resident_alert_rules.dart';
 import 'dart:io';
 import 'dart:async';
 import 'package:flutter/foundation.dart';
@@ -11,6 +15,9 @@ import 'package:flutter/material.dart';
 class NotificationService {
   static final FlutterLocalNotificationsPlugin _notificationsPlugin = FlutterLocalNotificationsPlugin();
   static StreamSubscription? _dbSubscription;
+
+  /// Shared plugin (scheduled collection reminders use the same initialised instance).
+  static FlutterLocalNotificationsPlugin get plugin => _notificationsPlugin;
   static int _lastNotificationTimestamp = DateTime.now().millisecondsSinceEpoch;
 
   static Future<void> init() async {
@@ -26,7 +33,45 @@ class NotificationService {
       iOS: initializationSettingsIOS,
     );
 
-    await _notificationsPlugin.initialize(initializationSettings);
+    await _notificationsPlugin.initialize(
+      initializationSettings,
+      onDidReceiveNotificationResponse: (NotificationResponse r) => openDashboardFromNotification(),
+    );
+  }
+
+  /// Asks the visible dashboard to show its Home tab (a tapped notification).
+  static final ValueNotifier<int> openHomeRequests = ValueNotifier<int>(0);
+
+  static const Map<String, String> _dashboardByRole = <String, String>{
+    'admin': '/admin_dashboard',
+    'driver': '/driver_dashboard',
+    'resident': '/resident_dashboard',
+  };
+
+  /// A tapped notification opens the signed-in user's dashboard on its Home tab.
+  ///  - App closed: the tap starts the app; the normal start-up opens the dashboard (or the
+  ///    sign-in page when nobody is signed in).
+  ///  - App running: if the dashboard is already open (also under other pages), go back to it
+  ///    and show Home. It is never rebuilt, so a driver's running trip is not interrupted.
+  static Future<void> openDashboardFromNotification() async {
+    final NavigatorState? nav = appNavigatorKey.currentState;
+    if (nav == null) return;
+    final UserData? user = await SessionManager.isLoggedIn() ? await SessionManager.getUser() : null;
+    final String? route = user == null ? null : _dashboardByRole[user.role.toLowerCase()];
+    if (route == null) {
+      nav.pushNamedAndRemoveUntil('/splash', (_) => false);
+      return;
+    }
+    bool found = false;
+    nav.popUntil((Route<dynamic> r) {
+      if (r.settings.name == route) found = true;
+      return found || r.isFirst;
+    });
+    if (found) {
+      openHomeRequests.value++;
+    } else {
+      nav.pushNamedAndRemoveUntil(route, (_) => false, arguments: user!.toJson());
+    }
   }
 
   static Future<bool> requestPermissions() async {
@@ -119,29 +164,35 @@ class NotificationService {
     });
   }
 
+  /// Logout: stop the live feed and remove this account's collection reminders.
   static void stopListening() {
     _dbSubscription?.cancel();
     _dbSubscription = null;
+    CollectionReminderService.clear();
   }
+
+  @visibleForTesting
+  static bool isRelevantFor(Map val, UserData user) => _isRelevant(val, user);
 
   static bool _isRelevant(Map val, UserData user) {
     final String type = (val['type'] ?? '').toString();
     final String targetRole = (val['targetRole'] ?? '').toString();
-    final String targetPurok = (val['purok'] ?? val['area'] ?? '').toString();
-    final String residentId = (val['resident_id'] ?? val['targetUserId'] ?? '').toString();
-
     if (user.role == 'admin') {
       if (targetRole == 'admin') return true;
       if (['DRIVER_ISSUE', 'RESIDENT_COMPLAINT', 'REGISTRATION', 'NEW_REGISTRATION', 'TRUCK_ISSUE'].contains(type)) {
         return true;
       }
     } else if (user.role == 'resident') {
-      if (residentId == user.userId.toString()) return true;
-      if (type == 'TRUCK_PROXIMITY' && (targetPurok == '' || targetPurok == user.purok)) return true;
-      if (type == 'COMPLAINT_RESOLVED' && residentId == user.userId.toString()) return true;
+      // Same rule as the resident's bell: staged approach / arrival and the driver's manual
+      // alert for their purok, their own complaint updates. (The legacy resident-generated
+      // TRUCK_PROXIMITY broadcast is not pushed.)
+      return ResidentAlertRules.isFor(val, residentId: user.userId, purok: user.purok);
     } else if (user.role == 'driver') {
+       // Resident complaint updates are private to the resident (ids can collide with drivers).
+       if (ComplaintFlow.residentComplaintTypes.contains(type)) return false;
        if (targetRole == 'driver' || targetRole == 'all') return true;
-       // Add other driver specific filters if needed
+       // Status update of this driver's own truck report.
+       if (type == ComplaintFlow.typeIssueUpdate && (val['targetUserId'] ?? '').toString() == user.userId.toString()) return true;
     }
     
     return false;
@@ -178,7 +229,7 @@ class NotificationService {
         notificationColor = const Color(0xFFE53935); // Red for issues
         channelId = 'garbage_tracker_issues';
         channelName = 'System Issues';
-      } else if (type == 'TRUCK_PROXIMITY') {
+      } else if (type == 'TRUCK_PROXIMITY' || ResidentAlertRules.truckAlertTypes.contains(type)) {
         notificationColor = const Color(0xFFFB8C00); // Orange for proximity
         channelId = 'garbage_tracker_tracking';
         channelName = 'Tracking Alerts';

@@ -1,6 +1,12 @@
 <?php
 header("Content-Type: application/json");
 require_once 'db_config.php';
+require_once 'auth_token.php';
+
+// An administrator may delete any account. A resident or driver may delete ONLY their own
+// account (the in-app "delete my account" action). No token is accepted only while the
+// server is not enforcing authorization (see auth_token.php rollout modes).
+$gtAuth = gt_require_role(['admin', 'resident', 'driver']);
 
 $data = json_decode(file_get_contents("php://input"));
 
@@ -11,6 +17,12 @@ if (!$data || !isset($data->user_id) || !isset($data->role)) {
 
 $user_id = $data->user_id;
 $role = $data->role;
+
+if ($gtAuth !== null && $gtAuth['role'] !== 'admin') {
+    if ((string)$gtAuth['sub'] !== (string)$user_id || $gtAuth['role'] !== strtolower((string)$role)) {
+        gt_auth_fail(403, "You can only delete your own account.");
+    }
+}
 
 try {
     if ($role === 'resident') {

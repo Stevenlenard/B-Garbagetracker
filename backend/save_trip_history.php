@@ -2,6 +2,107 @@
 header("Content-Type: application/json");
 require_once 'db_config.php';
 
+/**
+ * Merges an incoming trip-history write with the stored row.
+ *
+ * FULL finalizes the collection (distance, end point, FULL time, estimated load and
+ * visited areas). Later writes - the COMPLETED unloading confirmation, a retry, or an
+ * older app that keeps accumulating distance - must not change those values or move
+ * the status backwards. Pure function: no database access.
+ *
+ * @param array|null $existing stored row (assoc) or null when the trip is new
+ * @param array      $in       incoming values
+ * @return array values to store
+ */
+function gt_merge_trip_history($existing, array $in)
+{
+    $terminal = ['COMPLETED', 'FINISHED', 'INTERRUPTED'];
+    $out = $in;
+    if (!is_array($existing)) {
+        return $out;
+    }
+
+    $old = strtoupper((string)($existing['route_status'] ?? ''));
+    $new = strtoupper((string)($in['route_status'] ?? ''));
+    $oldFinal = ($old === 'FULL' || in_array($old, $terminal, true));
+
+    // Status never moves backwards (FULL/COMPLETED -> ACTIVE).
+    if ($oldFinal && !in_array($new, $terminal, true) && $new !== 'FULL') {
+        $out['route_status'] = $old;
+    }
+    if (in_array($old, $terminal, true) && $new === 'FULL') {
+        $out['route_status'] = $old;
+    }
+
+    if ($oldFinal) {
+        // The finalized collection is frozen.
+        foreach (['total_distance_km', 'finish_lat', 'finish_lng', 'full_time', 'weight_kg', 'weight_type', 'areas_visited'] as $k) {
+            if (array_key_exists($k, $existing) && $existing[$k] !== null && $existing[$k] !== '') {
+                $out[$k] = $existing[$k];
+            }
+        }
+        // A generic route name must not replace the visited-area name stored at FULL.
+        $oldName = (string)($existing['route_name'] ?? '');
+        if ($oldName !== '' && $oldName !== 'Collection Route' && ($in['route_name'] ?? '') === 'Collection Route') {
+            $out['route_name'] = $oldName;
+        }
+    }
+
+    // Never wipe measured values with the zero defaults of a partial write.
+    foreach (['moving_time_seconds', 'stopped_time_seconds', 'detected_stops_count'] as $k) {
+        if ((int)($in[$k] ?? 0) === 0 && isset($existing[$k])) {
+            $out[$k] = $existing[$k];
+        }
+    }
+    if (($out['end_time'] ?? null) === null && !empty($existing['end_time'])) {
+        $out['end_time'] = $existing['end_time'];
+    }
+    return $out;
+}
+
+/**
+ * Links this trip to the driver's route assignment and records its latest status.
+ *
+ * Runs ONLY for a request carrying a VERIFIED driver token whose subject is the trip's driver.
+ * Token-less (legacy) saves keep working exactly as before and never write assignment data,
+ * so this adds no unauthenticated write path. Skipped silently when the assignment tables do
+ * not exist yet. Returns the link result, or null when skipped.
+ */
+function gt_trip_history_assignment_link($conn, $data, $tripId, $driverId, $truckId, $routeStatus, $existing)
+{
+    try {
+        if (!function_exists('gt_verify_token')) require_once 'auth_token.php';
+        $auth = gt_verify_token(gt_request_token());
+        if ($auth === null || $auth['role'] !== 'driver' || (string)$auth['sub'] !== (string)$driverId || (int)$driverId <= 0) {
+            return null;
+        }
+        require_once 'assignment_lib.php';
+        if (!gt_assignment_tables_exist($conn)) return null;
+        if (is_array($existing) && !empty($existing['driver_id']) && (int)$existing['driver_id'] !== (int)$driverId) {
+            return null; // the stored trip belongs to another driver
+        }
+        // Trip start: the app sends local (Asia/Manila) ISO time without an offset; a stored
+        // row's start_time was written in the server's own time zone.
+        $startTs = null;
+        if (!empty($data->start_time)) {
+            try {
+                $startTs = (new DateTimeImmutable((string)$data->start_time, new DateTimeZone(GT_ASSIGNMENT_TZ)))->getTimestamp();
+            } catch (Exception $e) {
+                $startTs = null;
+            }
+        }
+        if ($startTs === null && is_array($existing) && !empty($existing['start_time'])) {
+            $t = strtotime((string)$existing['start_time']);
+            $startTs = $t === false ? null : $t;
+        }
+        if ($startTs === null) return null;
+        return gt_link_trip($conn, (int)$driverId, $tripId, (string)$truckId, $startTs, 'TRIP_HISTORY', $routeStatus);
+    } catch (Throwable $e) {
+        error_log("save_trip_history.php assignment link skipped: " . $e->getMessage());
+        return null;
+    }
+}
+
 $data = json_decode(file_get_contents("php://input"));
 
 if (!$data || empty($data->trip_id)) {
@@ -35,36 +136,88 @@ try {
     $moving_time_seconds = isset($data->moving_time_seconds) ? intval($data->moving_time_seconds) : 0;
     $stopped_time_seconds = isset($data->stopped_time_seconds) ? intval($data->stopped_time_seconds) : 0;
     $detected_stops_count = isset($data->detected_stops_count) ? intval($data->detected_stops_count) : 0;
+    $full_time = isset($data->full_time) ? date("Y-m-d H:i:s", strtotime($data->full_time)) : null;
+    $weight_kg = isset($data->weight_kg) && is_numeric($data->weight_kg) ? floatval($data->weight_kg) : null;
+    $weight_type = isset($data->weight_type) ? strtoupper((string)$data->weight_type) : null;
+    if ($weight_type !== null && !in_array($weight_type, ['ESTIMATED', 'MEASURED'], true)) {
+        $weight_type = 'ESTIMATED';
+    }
+    $areas_visited = isset($data->areas_visited) ? (string)$data->areas_visited : null;
 
     // Check if table exists
     $tableCheck = $conn->query("SHOW TABLES LIKE 'driver_trip_history'");
     if ($tableCheck->rowCount() > 0) {
-        $stmt = $conn->prepare("
-            INSERT INTO driver_trip_history (
-                trip_id, driver_id, driver_name, truck_id, route_name, route_status,
-                start_time, end_time, start_lat, start_lng, finish_lat, finish_lng,
-                total_distance_km, moving_time_seconds, stopped_time_seconds, detected_stops_count
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON DUPLICATE KEY UPDATE
-                driver_name = VALUES(driver_name),
-                truck_id = VALUES(truck_id),
-                route_name = VALUES(route_name),
-                route_status = VALUES(route_status),
-                end_time = COALESCE(VALUES(end_time), end_time),
-                finish_lat = COALESCE(VALUES(finish_lat), finish_lat),
-                finish_lng = COALESCE(VALUES(finish_lng), finish_lng),
-                total_distance_km = VALUES(total_distance_km),
-                moving_time_seconds = VALUES(moving_time_seconds),
-                stopped_time_seconds = VALUES(stopped_time_seconds),
-                detected_stops_count = VALUES(detected_stops_count)
-        ");
-        $stmt->execute([
-            $trip_id, $driver_id, $driver_name, $truck_id, $route_name, $route_status,
-            $start_time, $end_time, $start_lat, $start_lng, $finish_lat, $finish_lng,
-            $total_distance_km, $moving_time_seconds, $stopped_time_seconds, $detected_stops_count
-        ]);
+        // Columns added by update_load_history_schema.php may not exist on older databases.
+        $cols = array_column($conn->query("DESCRIBE driver_trip_history")->fetchAll(PDO::FETCH_ASSOC), 'Field');
+        $has = function ($c) use ($cols) { return in_array($c, $cols, true); };
 
-        // Insert Points if provided
+        $sel = $conn->prepare("SELECT * FROM driver_trip_history WHERE trip_id = ?");
+        $sel->execute([$trip_id]);
+        $existing = $sel->fetch(PDO::FETCH_ASSOC);
+
+        $values = gt_merge_trip_history($existing ?: null, [
+            'driver_id' => $driver_id,
+            'driver_name' => $driver_name,
+            'truck_id' => $truck_id,
+            'route_name' => $route_name,
+            'route_status' => $route_status,
+            'start_time' => $start_time,
+            'end_time' => $end_time,
+            'start_lat' => $start_lat,
+            'start_lng' => $start_lng,
+            'finish_lat' => $finish_lat,
+            'finish_lng' => $finish_lng,
+            'total_distance_km' => $total_distance_km,
+            'moving_time_seconds' => $moving_time_seconds,
+            'stopped_time_seconds' => $stopped_time_seconds,
+            'detected_stops_count' => $detected_stops_count,
+            'full_time' => $full_time,
+            'weight_kg' => $weight_kg,
+            'weight_type' => $weight_type,
+            'areas_visited' => $areas_visited,
+        ]);
+        $route_status = strtoupper((string)$values['route_status']);
+
+        $optional = ['full_time', 'weight_kg', 'weight_type', 'areas_visited'];
+        $writeCols = ['driver_id', 'driver_name', 'truck_id', 'route_name', 'route_status', 'end_time',
+                      'finish_lat', 'finish_lng', 'total_distance_km', 'moving_time_seconds',
+                      'stopped_time_seconds', 'detected_stops_count'];
+        foreach ($optional as $c) {
+            if ($has($c) && $values[$c] !== null) $writeCols[] = $c;
+        }
+
+        $upsert = function () use ($conn, $trip_id, $values, $writeCols) {
+            $sets = [];
+            $params = [];
+            foreach ($writeCols as $c) {
+                if ($c === 'driver_id' || $c === 'end_time' || $c === 'finish_lat' || $c === 'finish_lng') {
+                    // keep a stored value when the write has none
+                    $sets[] = "$c = COALESCE(?, $c)";
+                } else {
+                    $sets[] = "$c = ?";
+                }
+                $params[] = $values[$c];
+            }
+            $params[] = $trip_id;
+            $conn->prepare("UPDATE driver_trip_history SET " . implode(', ', $sets) . " WHERE trip_id = ?")->execute($params);
+        };
+
+        if ($existing) {
+            $upsert();
+        } else {
+            $insCols = array_merge(['trip_id', 'start_time', 'start_lat', 'start_lng'], $writeCols);
+            $ph = implode(', ', array_fill(0, count($insCols), '?'));
+            $insParams = [$trip_id, $values['start_time'], $values['start_lat'], $values['start_lng']];
+            foreach ($writeCols as $c) $insParams[] = $values[$c];
+            try {
+                $conn->prepare("INSERT INTO driver_trip_history (" . implode(', ', $insCols) . ") VALUES ($ph)")->execute($insParams);
+            } catch (PDOException $dup) {
+                // A concurrent request created the row first: merge into it instead.
+                if ($dup->getCode() !== '23000') throw $dup;
+                $upsert();
+            }
+        }
+
         if (!empty($data->route_points) && is_array($data->route_points)) {
             $pointsCheck = $conn->query("SHOW TABLES LIKE 'driver_trip_gps_points'");
             if ($pointsCheck->rowCount() > 0) {
@@ -108,44 +261,20 @@ try {
             }
         }
 
-        // 2. BACKEND RETENTION AUTHORITY (Max 200 Finalized Real Movement Trips per Manila Calendar Month)
-        if (in_array($route_status, ['COMPLETED', 'FINISHED', 'INTERRUPTED'])) {
-            $conn->query("SELECT GET_LOCK('driver_trip_retention_lock', 10)");
-            try {
-                $monthKey = date("Y-m", strtotime($start_time));
-                $purgeStmt = $conn->prepare("
-                    SELECT trip_id FROM driver_trip_history
-                    WHERE DATE_FORMAT(start_time, '%Y-%m') = ?
-                      AND UPPER(route_status) IN ('COMPLETED', 'FINISHED', 'INTERRUPTED')
-                      AND total_distance_km >= 0.015
-                    ORDER BY start_time DESC, trip_id DESC
-                    LIMIT 18446744073709551615 OFFSET 200
-                ");
-                $purgeStmt->execute([$monthKey]);
-                $oldTripsToPurge = $purgeStmt->fetchAll(PDO::FETCH_COLUMN);
-
-                if (!empty($oldTripsToPurge)) {
-                    $inClause = implode(',', array_fill(0, count($oldTripsToPurge), '?'));
-
-                    // Purge exclusively owned points & events
-                    $delPoints = $conn->prepare("DELETE FROM driver_trip_gps_points WHERE trip_id IN ($inClause)");
-                    $delPoints->execute($oldTripsToPurge);
-
-                    $delEvents = $conn->prepare("DELETE FROM driver_trip_events WHERE trip_id IN ($inClause)");
-                    $delEvents->execute($oldTripsToPurge);
-
-                    // Purge finalized trips exceeding 200 limit
-                    $delHistory = $conn->prepare("DELETE FROM driver_trip_history WHERE trip_id IN ($inClause)");
-                    $delHistory->execute($oldTripsToPurge);
-                }
-            } finally {
-                $conn->query("SELECT RELEASE_LOCK('driver_trip_retention_lock')");
-            }
-        }
+        // No automatic deletion: completed trips are kept for Analytics, Route History and
+        // route assignments. (The former 200-trips-per-month purge deleted history rows,
+        // their GPS points and events.)
     }
 
-    echo json_encode(["success" => true, "message" => "Trip history saved successfully"]);
+    // Route assignment link (optional feature, never blocks the history save).
+    $assignmentLink = gt_trip_history_assignment_link($conn, $data, $trip_id, $driver_id, $truck_id, $route_status, $existing ?? null);
+
+    echo json_encode(array_merge(
+        ["success" => true, "message" => "Trip history saved successfully"],
+        $assignmentLink === null ? [] : ["assignment_link" => $assignmentLink]
+    ));
 } catch (PDOException $e) {
-    echo json_encode(["success" => false, "message" => "Database Error: " . $e->getMessage()]);
+    error_log("save_trip_history.php: " . $e->getMessage());
+    echo json_encode(["success" => false, "message" => "The trip history could not be saved."]);
 }
 ?>

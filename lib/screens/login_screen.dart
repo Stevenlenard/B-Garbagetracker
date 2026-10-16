@@ -17,11 +17,20 @@ import '../utils/custom_notification.dart';
 import '../utils/route_persistence_manager.dart';
 import '../utils/responsive_text.dart';
 import '../widgets/custom_snackbar.dart';
+import '../services/auth_session.dart';
 import 'forgot_password_screen.dart';
 import 'register_choice_screen.dart';
+import 'verify_2fa_screen.dart';
 
 class LoginScreen extends StatefulWidget {
-  const LoginScreen({super.key});
+  const LoginScreen({super.key, this.initialNotice, this.startFresh = false});
+
+  /// Shown once on open, e.g. why a saved sign-in ended.
+  final String? initialNotice;
+
+  /// A new sign-in from the public page / Truck Buddy (`#/login_new`): the form only, saved
+  /// accounts of this device are never listed, so a visitor cannot "Continue as" anyone.
+  final bool startFresh;
 
   @override
   State<LoginScreen> createState() => _LoginScreenState();
@@ -33,7 +42,10 @@ class _LoginScreenState extends State<LoginScreen> {
   final _passwordController = TextEditingController();
   bool _isLoading = false;
   bool _obscureText = true;
-  bool _rememberMe = true; // Auto Login / Remember Me preference
+  bool _rememberMe = true; // "Remember account": Saved Logins, resumable with one tap (no password)
+  // "Stay signed in": keeps the account signed in across restarts (revocable server session).
+  // On by default on Android (drivers' trips run across app restarts), off on shared browsers.
+  bool _staySignedIn = !kIsWeb;
   IconData _currentLogoIcon = Icons.local_shipping_rounded;
 
   // Saved Login Profile State
@@ -56,6 +68,12 @@ class _LoginScreenState extends State<LoginScreen> {
   void initState() {
     super.initState();
     RoutePersistenceManager.saveLastRoute('/login');
+    final String? notice = widget.initialNotice;
+    if (notice != null && notice.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) CustomSnackBar.show(context, message: notice, isError: true);
+      });
+    }
     _checkSecurityStatus();
     _loadSavedProfiles();
     AppLocalizations.currentLanguage.addListener(_onLanguageChanged);
@@ -80,6 +98,7 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   void _loadSavedProfiles() async {
+    if (widget.startFresh) return; // fresh sign-in page: no saved accounts
     final profiles = await SessionManager.getSavedProfiles();
     if (mounted && profiles.isNotEmpty) {
       setState(() {
@@ -189,55 +208,64 @@ class _LoginScreenState extends State<LoginScreen> {
     });
   }
 
+  /// A remembered account with a saved sign-in ("Stay signed in", `one_tap`) is resumed
+  /// through the server (revocable session: ended there => password required). Any other
+  /// remembered account only pre-fills the form for the normal password sign-in.
   void _handleSavedProfileLogin() async {
-    if (_selectedProfile == null) return;
-    setState(() => _isLoading = true);
+    final Map<String, dynamic>? p = _selectedProfile;
+    if (p == null || _isLoading) return;
+    final String ident = (p['username'] ?? p['email'] ?? p['name'] ?? '').toString();
 
-    try {
-      final Map<String, dynamic> userData = Map<String, dynamic>.from(_selectedProfile!['user_data'] as Map? ?? _selectedProfile!);
-      final String userId = (_selectedProfile!['user_id'] ?? _selectedProfile!['id'] ?? userData['user_id'] ?? userData['id']).toString();
-      final String role = (userData['role'] ?? _selectedProfile!['role'] ?? 'resident').toString().toLowerCase();
-      final String name = (userData['name'] ?? _selectedProfile!['name'] ?? 'User').toString();
-
-      debugPrint("[AUTH DEBUG] Saved profile clicked for User ID: $userId");
-      debugPrint("[AUTH DEBUG] Role: $role");
-
-      // Save active session with rememberMe: true
-      await SessionManager.saveUser(userData, rememberMe: true);
-
-      if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
-        bool hasPermissions = await _checkAndRequestPermissions();
-        if (!hasPermissions) {
-          setState(() => _isLoading = false);
-          return;
-        }
+    if (p['one_tap'] == true) {
+      setState(() => _isLoading = true);
+      final String? problem = await SessionManager.resumeSavedAccount(p);
+      if (!mounted) return;
+      if (problem == null) {
+        final user = await SessionManager.getUser();
+        if (!mounted || user == null) return;
+        await _enterApp(user.toJson());
+        if (mounted) setState(() => _isLoading = false);
+        return;
       }
+      final List<Map<String, dynamic>> profiles = await SessionManager.getSavedProfiles();
+      if (!mounted) return;
+      setState(() {
+        _isLoading = false;
+        _savedProfiles = profiles;
+        _usernameController.text = ident;
+        _passwordController.clear();
+        _showSavedProfileCard = false;
+      });
+      CustomSnackBar.show(context, message: problem, isError: true);
+      return;
+    }
 
-      if (mounted) {
-        debugPrint("[AUTH DEBUG] Auto-login result: SUCCESS");
-        CustomSnackBar.show(
-          context,
-          message: AppLocalizations.get('welcome_name').replaceFirst('{name}', name),
-        );
+    setState(() {
+      _usernameController.text = ident;
+      _passwordController.clear();
+      _showSavedProfileCard = false;
+    });
+  }
 
-        if (role == 'admin') {
-          Navigator.pushReplacementNamed(context, '/admin_dashboard');
-        } else if (role == 'driver') {
-          Navigator.pushReplacementNamed(context, '/driver_dashboard', arguments: userData);
-        } else if (role == 'resident') {
-          Navigator.pushReplacementNamed(context, '/resident_dashboard', arguments: userData);
-        }
-      }
-    } catch (e) {
-      debugPrint("[AUTH DEBUG] Auto-login result: FAILED ($e)");
-      if (mounted) {
-        CustomSnackBar.show(context, message: "Session expired. Please log in with password.", isError: true);
-        setState(() => _showSavedProfileCard = false);
-      }
-    } finally {
-      if (mounted) setState(() => _isLoading = false);
+  /// Permissions (mobile), welcome message and the role's dashboard.
+  Future<void> _enterApp(Map<String, dynamic> user) async {
+    final role = (user['role'] ?? '').toString().toLowerCase();
+    final name = user['name'] ?? user['username'] ?? '';
+    if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
+      final bool hasPermissions = await _checkAndRequestPermissions();
+      if (!hasPermissions) return;
+    }
+    if (!mounted) return;
+    CustomSnackBar.show(context, message: AppLocalizations.get('welcome_name').replaceFirst('{name}', name.toString()));
+    if (role == 'admin') {
+      Navigator.pushReplacementNamed(context, '/admin_dashboard');
+    } else if (role == 'driver') {
+      Navigator.pushReplacementNamed(context, '/driver_dashboard', arguments: user);
+    } else if (role == 'resident') {
+      Navigator.pushReplacementNamed(context, '/resident_dashboard', arguments: user);
     }
   }
+
 
   void _handleRemoveSavedProfile() async {
     if (_selectedProfile == null) return;
@@ -283,41 +311,33 @@ class _LoginScreenState extends State<LoginScreen> {
       final response = await ApiService().login(
         username,
         _passwordController.text,
+        extra: AuthSession.instance.loginFields(staySignedIn: _staySignedIn || _rememberMe),
       );
 
       if (response.data['success'] == true) {
         await LoginSecurityManager.resetAttempts(username);
         if (!mounted) return;
-        
-        final user = response.data['user'];
-        final role = user['role'];
-        final name = user['name'] ?? username;
 
-        // Save User to Session with Remember Me Preference
-        await SessionManager.saveUser(user, rememberMe: _rememberMe);
+        final Map<String, dynamic> user = Map<String, dynamic>.from(response.data['user'] as Map);
 
-        if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
-          bool hasPermissions = await _checkAndRequestPermissions();
-          if (!hasPermissions) {
-            setState(() => _isLoading = false);
-            return;
-          }
+        // Two-factor accounts are NOT signed in yet: the code must be verified first.
+        if (response.data['message'] == '2FA_REQUIRED') {
+          Navigator.pushNamed(context, '/verify_2fa', arguments: <String, dynamic>{
+            ...user,
+            Verify2FAScreen.rememberAccountKey: _rememberMe,
+            Verify2FAScreen.staySignedInKey: _staySignedIn,
+          });
+          return;
         }
 
-        if (mounted) {
-          CustomSnackBar.show(
-            context,
-            message: AppLocalizations.get('welcome_name').replaceFirst('{name}', name),
-          );
-        }
-
-        if (role == 'admin') {
-          Navigator.pushReplacementNamed(context, '/admin_dashboard');
-        } else if (role == 'driver') {
-          Navigator.pushReplacementNamed(context, '/driver_dashboard', arguments: user);
-        } else if (role == 'resident') {
-          Navigator.pushReplacementNamed(context, '/resident_dashboard', arguments: user);
-        }
+        final Object? session = response.data['session'];
+        await SessionManager.startSession(
+          user,
+          rememberAccount: _rememberMe,
+          staySignedIn: _staySignedIn,
+          session: session is Map ? Map<String, dynamic>.from(session) : null,
+        );
+        await _enterApp(user);
       } else {
         final serverMessage = response.data['message']?.toString();
         if (serverMessage != null && serverMessage.isNotEmpty && serverMessage != "Invalid username/email or password") {
@@ -621,12 +641,24 @@ class _LoginScreenState extends State<LoginScreen> {
           ),
         ],
 
-        const SizedBox(height: 24),
+        const SizedBox(height: 16),
+
+        // Say exactly what this saved account can do: resume a signed-in session (one tap),
+        // or only pre-fill the name for a password sign-in.
+        Text(
+          _selectedProfile!['one_tap'] == true
+              ? "Signed in on this device. Continue without entering your password."
+              : "This device remembers your account name only. You'll enter your password next.",
+          textAlign: TextAlign.center,
+          style: TextStyle(fontSize: 12, height: 1.35, color: Colors.grey.shade600, fontWeight: FontWeight.w600),
+        ),
+
+        const SizedBox(height: 16),
 
         // Continue Button
         HoverActionButton(
           text: "Continue as ${name.split(' ').first}",
-          loadingText: "Restoring session...",
+          loadingText: _selectedProfile!['one_tap'] == true ? "Signing in..." : "Loading...",
           onTap: _handleSavedProfileLogin,
           isLoading: _isLoading,
         ),
@@ -786,7 +818,11 @@ class _LoginScreenState extends State<LoginScreen> {
                                             const SizedBox(width: 8),
                                             GestureDetector(
                                               onTap: () => setState(() => _rememberMe = !_rememberMe),
-                                              child: const Text("Remember me", style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Color(0xFF2C3E50))),
+                                              // Saved Logins with one-tap sign-in (a revocable server session; the password is never saved).
+                                              child: const Tooltip(
+                                                message: "Saves this account on this device so you can sign in again with one tap. Your password is not saved. Don't use on a shared device.",
+                                                child: Text("Remember account", style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Color(0xFF2C3E50))),
+                                              ),
                                             ),
                                           ],
                                         ),
@@ -816,6 +852,36 @@ class _LoginScreenState extends State<LoginScreen> {
                                           child: Text(
                                             AppLocalizations.get('forgot_password'),
                                             style: ResponsiveText.link(context, color: AppColors.tealLink).copyWith(fontSize: ResponsiveText.getFontSize(context, 13)),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 10),
+                                    // Distinct from "Remember account": this keeps the account
+                                    // signed in (a revocable session, no password saved).
+                                    Row(
+                                      children: [
+                                        SizedBox(
+                                          width: 20,
+                                          height: 20,
+                                          child: Checkbox(
+                                            key: const ValueKey<String>('stay-signed-in'),
+                                            value: _staySignedIn,
+                                            activeColor: AppColors.tealText,
+                                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+                                            onChanged: (val) => setState(() => _staySignedIn = val ?? false),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 8),
+                                        Flexible(
+                                          child: GestureDetector(
+                                            onTap: () => setState(() => _staySignedIn = !_staySignedIn),
+                                            child: Tooltip(
+                                              message: kIsWeb
+                                                  ? "Keeps you signed in on this browser until you log out. Don't use on a shared computer."
+                                                  : "Keeps you signed in on this device until you log out. Your password is not saved.",
+                                              child: const Text("Stay signed in", style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Color(0xFF2C3E50))),
+                                            ),
                                           ),
                                         ),
                                       ],
@@ -870,28 +936,16 @@ class _LoginScreenState extends State<LoginScreen> {
                           ),
                         ),
                       ),
-                      if (!isMobile) ...[
-                        const SizedBox(height: 60),
-                        _buildFooter(),
-                        const SizedBox(height: 20),
-                      ],
+                      // The footer follows the card on every screen size, so it can never sit on
+                      // top of the form (short phone screens, browser toolbars).
+                      SizedBox(height: isMobile ? 28 : 60),
+                      _buildFooter(),
+                      const SizedBox(height: 20),
                       SizedBox(height: keyboardHeight),
-                      if (isMobile && keyboardHeight == 0) const SizedBox(height: 120),
                     ],
                   ),
                 ),
               ),
-              
-              if (isMobile)
-                Positioned(
-                  left: 0,
-                  right: 0,
-                  bottom: 20,
-                  child: FadeSlideEntrance(
-                    delay: const Duration(milliseconds: 600),
-                    child: _buildFooter(),
-                  ),
-                ),
             ],
           ),
         ),

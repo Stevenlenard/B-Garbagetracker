@@ -2,12 +2,17 @@ import 'package:dio/dio.dart';
 import 'api_client.dart';
 
 class ApiService {
-  final Dio _dio = ApiClient.instance;
+  /// [dio] is for tests; the app always uses the shared client (auth token interceptor).
+  ApiService({Dio? dio}) : _dio = dio ?? ApiClient.instance;
 
-  Future<Response> login(String username, String password) async {
+  final Dio _dio;
+
+  /// [extra]: session opt-in fields (AuthSession.loginFields); older servers ignore them.
+  Future<Response> login(String username, String password, {Map<String, dynamic>? extra}) async {
     return await _dio.post('login.php', data: {
       'username_or_email': username,
       'password': password,
+      ...?extra,
     });
   }
 
@@ -37,6 +42,18 @@ class ApiService {
     return await _dio.get('get_complaints.php');
   }
 
+  /// Admin Complaint Center: one server-filtered page of resident complaints + real counts.
+  Future<Response> getComplaintCenter(Map<String, dynamic> params) async {
+    return await _dio.get('complaint_center.php', queryParameters: params);
+  }
+
+  /// One complaint with its status history (Admin, or the complaining resident).
+  Future<Response> getComplaintDetail(String id) async {
+    return await _dio.get('complaint_center.php', queryParameters: {'action': 'detail', 'complaint_id': id});
+  }
+
+  /// Pending -> in_progress -> resolved. A resolved status requires [response] (the
+  /// resolution note); the server notifies the complainant.
   Future<Response> updateComplaint(int id, String status, String? response) async {
     return await _dio.post('update_complaint.php', data: FormData.fromMap({
       'complaint_id': id,
@@ -53,6 +70,11 @@ class ApiService {
       if (purok != null) 'purok': purok,
       if (location != null) 'location': location,
     }));
+  }
+
+  /// Registered fleet counts (no personal data), for Truck Buddy.
+  Future<Response> getPublicStats() async {
+    return await _dio.get('get_public_stats.php');
   }
 
   Future<Response> getLocations() async {
@@ -148,10 +170,12 @@ class ApiService {
     });
   }
 
-  Future<Response> verifyOTP(String email, String otp) async {
+  Future<Response> verifyOTP(String email, String otp, {String? purpose, Map<String, dynamic>? extra}) async {
     return await _dio.post('verify_otp.php', data: {
       'email': email,
       'otp': otp,
+      if (purpose != null) 'purpose': purpose,
+      ...?extra,
     });
   }
 

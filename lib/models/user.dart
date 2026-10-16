@@ -1,3 +1,5 @@
+import '../api/api_client.dart';
+
 class UserData {
   final int userId;
   final String username;
@@ -82,7 +84,7 @@ class UserData {
     }
     
     // Fallback: build URL if database somehow has relative path
-    return "https://indigo-bear-885857.hostingersite.com/backend/$profilePicture";
+    return "${ApiClient.baseUrl}$profilePicture";
   }
 
   UserData copyWith({

@@ -1,0 +1,41 @@
+{
+  "_status": "DRAFT - DO NOT APPLY. Requires Firebase Authentication (PHP-issued custom tokens, see ../backend/firebase_custom_token.php), the firebase_auth client dependency and a staged client rollout.",
+  "_claims": "Custom token claims minted by login.php after the password is verified: role ('admin'|'driver'|'resident') and driver_id (drivers only).",
+  "rules": {
+    ".read": true,
+
+    "truck_locations": {
+      "$truck": {
+        ".write": "auth != null && (auth.token.role === 'admin' || (auth.token.role === 'driver' && newData.child('driver_id').val() + '' === auth.token.driver_id + '' && newData.child('owner_epoch').val() === root.child('driver_sessions').child(auth.token.driver_id + '').child('epoch').val() && newData.child('owner_token').val() === root.child('driver_sessions').child(auth.token.driver_id + '').child('token').val() && newData.child('wseq').val() === (data.child('wseq').exists() ? data.child('wseq').val() : 0) + 1))"
+      }
+    },
+
+    "driver_sessions": {
+      "$driver": {
+        ".write": "auth != null && auth.token.role === 'driver' && $driver === auth.token.driver_id + '' && (!newData.exists() || newData.child('epoch').val() === (data.exists() ? data.child('epoch').val() : 0) + 1 || (data.exists() && newData.child('epoch').val() === data.child('epoch').val() && (newData.child('token').val() === data.child('token').val() || !newData.child('token').exists())))"
+      }
+    },
+
+    "driver_routes": {
+      "$trip": {
+        ".write": "auth != null && (auth.token.role === 'admin' || (auth.token.role === 'driver' && (!data.exists() || data.child('driver_id').val() + '' === auth.token.driver_id + '') && !(data.child('isFinished').val() === true || data.child('route_status').val() === 'COMPLETED' || data.child('route_status').val() === 'FINISHED')))",
+        "isFinished":   { ".write": "auth != null && data.val() !== true" },
+        "route_status": { ".write": "auth != null && (newData.val() === 'COMPLETED' || newData.val() === 'FINISHED')" },
+        "weight_kg":    { ".write": "auth != null && auth.token.role === 'admin'" },
+        "weight_type":  { ".write": "auth != null && auth.token.role === 'admin'" },
+        "weightKg":     { ".write": "auth != null && auth.token.role === 'admin'" },
+        "weightType":   { ".write": "auth != null && auth.token.role === 'admin'" },
+        "maintenance_applied": { ".write": "auth != null && (auth.token.role === 'admin' || auth.token.role === 'driver')" }
+      }
+    },
+
+    "users": {
+      "$uid": { ".write": "auth != null && (auth.token.role === 'admin' || (auth.token.role === 'driver' && $uid === auth.token.driver_id + ''))" }
+    },
+    "residents": {
+      "$rid": { ".write": "auth != null && (auth.token.role === 'admin' || auth.token.role === 'resident')" }
+    },
+    "complaints":    { ".write": "auth != null" },
+    "notifications": { ".write": true }
+  }
+}

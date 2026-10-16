@@ -1,6 +1,10 @@
 <?php
 header("Content-Type: application/json");
 require_once 'db_config.php';
+require_once 'auth_token.php';
+
+// Only an administrator may archive or restore complaints.
+gt_require_role(['admin']);
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     // Check both POST and JSON input
@@ -10,11 +14,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if ($complaint_id !== null && $is_archived !== null) {
         try {
-            // First, ensure the column exists
-            $conn->exec("ALTER TABLE complaints ADD COLUMN IF NOT EXISTS is_archived TINYINT(1) DEFAULT 0");
-
-            // Standardize ID column check
+            // No schema change at request time: the column must already exist.
             $columns = $conn->query("DESCRIBE complaints")->fetchAll(PDO::FETCH_COLUMN);
+            if (!in_array('is_archived', $columns)) {
+                echo json_encode(["success" => false, "message" => "Archiving is not available until the complaints.is_archived column is added."]);
+                exit;
+            }
             $id_col = in_array('complaint_id', $columns) ? 'complaint_id' : 'id';
 
             $query = "UPDATE complaints SET is_archived = ? WHERE $id_col = ?";

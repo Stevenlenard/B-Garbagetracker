@@ -1,3 +1,4 @@
+import '../widgets/logout_choice_dialog.dart';
 import 'dart:async';
 import 'dart:ui';
 import 'dart:math' as math;
@@ -387,8 +388,6 @@ class _ResidentSettingsScreenState extends State<ResidentSettingsScreen> with Ti
                                       _buildAppInformation(),
                                       const SizedBox(height: 32),
                                       _buildLogoutButton(),
-                                      const SizedBox(height: 16),
-                                      _buildDeleteAccountButton(),
                                       SizedBox(height: Responsive.isDesktop(context) ? 40 : 100),
                                     ],
                                   ),
@@ -1019,16 +1018,6 @@ class _ResidentSettingsScreenState extends State<ResidentSettingsScreen> with Ti
     );
   }
 
-  Widget _buildDeleteAccountButton() {
-    return HoverActionButton(
-      text: "Delete Account",
-      loadingText: "Deleting Account...",
-      isLoading: _isLoading,
-      isDestructive: true,
-      onTap: () => _showDeleteAccountConfirmation(),
-    );
-  }
-
   void _showLanguageModal() {
     _showStyledBottomSheet(
       title: "Language Selection",
@@ -1472,33 +1461,6 @@ class _ResidentSettingsScreenState extends State<ResidentSettingsScreen> with Ti
     ) ?? false;
   }
 
-  void _showDeleteAccountConfirmation() async {
-    bool confirmed = await _showConfirmActionDialog(
-      title: "Delete Account?",
-      message: "You will lose all access and your account data will be permanently removed.",
-      confirmText: "Delete",
-      isDestructive: true,
-      icon: Icons.no_accounts_rounded,
-    );
-    if (confirmed) {
-      setState(() => _isLoading = true);
-      try {
-        final res = await _apiService.deleteUser(_user!.userId, _user!.role);
-        if (res.data['success'] == true) {
-           await SessionManager.logout();
-           if (mounted) {
-             CustomNotification.showTopNotification(context, "Account deleted successfully.", false);
-             Navigator.pushNamedAndRemoveUntil(context, '/login', (route) => false);
-           }
-        }
-      } catch (e) {
-        CustomNotification.showTopNotification(context, "Delete failed. Please try again.");
-      } finally {
-        if (mounted) setState(() => _isLoading = false);
-      }
-    }
-  }
-
   void _showStyledBottomSheet({required String title, required List<Widget> children, String? description, double maxHeightMultiplier = 0.6, bool needsLoading = false, String loadingText = "Loading..."}) {
     bool isModalLoading = needsLoading;
 
@@ -1673,23 +1635,16 @@ class _ResidentSettingsScreenState extends State<ResidentSettingsScreen> with Ti
   }
 
   void _showLogoutDialog(BuildContext context) async {
-    bool confirmed = await _showConfirmActionDialog(
-      title: "Logout?", 
-      message: "Are you sure you want to end your current session?", 
-      confirmText: "Logout",
-      isDestructive: false, // Changed to false to use primary color (Green/Teal)
-      icon: Icons.logout_rounded,
-      iconColor: AppColors.tealText,
-    );
-    if (confirmed) {
-      setState(() => _isLoggingOut = true);
-      await SessionManager.logout();
-      if (mounted) {
-        CustomNotification.showTopNotification(context, "Logout successful.", false);
-        Navigator.of(context).pushNamedAndRemoveUntil('/login', (route) => false);
-      }
+    final LogoutChoice choice = await showLogoutChoiceDialog(context);
+    if (choice == LogoutChoice.cancel || !mounted) return;
+    setState(() => _isLoggingOut = true);
+    await SessionManager.logout(forgetLogin: choice == LogoutChoice.forget, keepSignedIn: choice == LogoutChoice.remember || choice == LogoutChoice.switchAccount);
+    if (mounted) {
+      CustomNotification.showTopNotification(context, "Logout successful.", false);
+      Navigator.of(context).pushNamedAndRemoveUntil('/login', (route) => false);
     }
   }
+
 }
 
 class _HoverZoomLink extends StatefulWidget {

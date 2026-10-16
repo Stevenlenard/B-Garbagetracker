@@ -4,4 +4,7 @@
          to allow setting breakpoints, to provide hot reload, etc.
     -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- Debug builds only: lets the isolated test setup reach the local HTTP PHP stub
+         (adb reverse -> http://127.0.0.1:8080/). Release builds are unaffected. -->
+    <application android:usesCleartextTraffic="true"/>
 </manifest>

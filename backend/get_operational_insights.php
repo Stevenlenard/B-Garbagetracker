@@ -8,8 +8,13 @@
 header("Content-Type: application/json");
 require_once 'db_config.php';
 
-// Valid Gemini API Key provided by user
-$gemini_api_key = "AIzaSyCPng8Ef9-AsuUiagku1FAQOowQniZYkOo";
+require_once 'ai_config_loader.php';
+$ai_cfg = gt_ai_config();
+if (!$ai_cfg['enabled']) {
+    // Fail safe: no AI call, no data aggregation, no error detail.
+    echo json_encode(["success" => false, "ai_disabled" => true, "message" => "AI insights are disabled on this server."]);
+    exit;
+}
 
 try {
     // 1. Gather Complaint Statistics by Status
@@ -39,7 +44,7 @@ try {
 
     $payload_json = json_encode($system_context, JSON_PRETTY_PRINT);
 
-    // 5. Construct Prompt for Gemini 1.5 Flash
+    // 5. Construct prompt
     $prompt = "You are an expert AI Municipal Operations Auditor for a Garbage Tracking System (GarbageTracker). " .
               "Analyze the following real-time JSON system data from our database: " . $payload_json . ". " .
               "Generate a comprehensive, detailed operational insights report and administrative transcript. " .
@@ -63,40 +68,11 @@ try {
               "  ]" .
               "}";
 
-    // 6. Call Gemini 1.5 Flash API via cURL
-    $url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" . $gemini_api_key;
-
-    $request_body = json_encode([
-        "contents" => [
-            [
-                "parts" => [
-                    ["text" => $prompt]
-                ]
-            ]
-        ],
-        "generationConfig" => [
-            "responseMimeType" => "application/json",
-            "temperature" => 0.4
-        ]
-    ]);
-
-    $ch = curl_init($url);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_POST, true);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, $request_body);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-
-    $api_response = curl_exec($ch);
-    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
-
-    if ($http_code !== 200) {
-        throw new Exception("Gemini API Error (HTTP $http_code): " . $api_response);
+    // 6. One bounded call to the configured model (no key in the URL, no raw error echoed)
+    $ai_json_string = gt_ai_generate($ai_cfg, $prompt, ["responseMimeType" => "application/json", "temperature" => 0.4], 15);
+    if ($ai_json_string === null) {
+        throw new Exception("AI service unavailable");
     }
-
-    $response_data = json_decode($api_response, true);
-    $ai_json_string = $response_data['candidates'][0]['content']['parts'][0]['text'] ?? '{}';
     $insights = json_decode($ai_json_string, true);
 
     // 7. Output Final JSON Response
@@ -110,7 +86,7 @@ try {
     http_response_code(500);
     echo json_encode([
         "success" => false,
-        "message" => "Failed to generate operational insights: " . $e->getMessage()
+        "message" => "Failed to generate operational insights."
     ]);
 }
 ?>

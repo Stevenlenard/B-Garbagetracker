@@ -1,0 +1,64 @@
+{
+  "rules": {
+    ".read": true,
+
+    "driver_routes": {
+      "$trip": {
+        ".write": "!data.exists() || !newData.exists() || !(data.child('isFinished').val() === true || data.child('route_status').val() === 'COMPLETED' || data.child('route_status').val() === 'FINISHED')",
+
+        "isFinished":       { ".write": "data.val() !== true" },
+        "route_status":     { ".write": "newData.val() === 'COMPLETED' || newData.val() === 'FINISHED'" },
+
+        "finishTime":       { ".write": true },
+        "end_time":         { ".write": true },
+        "unloading_confirmed_at_ms": { ".write": true },
+        "post_full_distance_km":     { ".write": true },
+        "unload_lat":       { ".write": true },
+        "unload_lng":       { ".write": true },
+        "finish_lat":       { ".write": true },
+        "finish_lng":       { ".write": true },
+        "final_distance":   { ".write": true },
+        "total_distance":   { ".write": true },
+        "finished_by":      { ".write": true },
+        "maintenance_applied": { ".write": true },
+
+        "weight_kg":        { ".write": true },
+        "weight_type":      { ".write": true },
+        "weightKg":         { ".write": true },
+        "weightType":       { ".write": true }
+      }
+    },
+
+    "driver_sessions": {
+      "$driver": {
+        ".write": "!newData.exists() || newData.child('epoch').val() === (data.exists() ? data.child('epoch').val() : 0) + 1 || (data.exists() && newData.child('epoch').val() === data.child('epoch').val() && (newData.child('token').val() === data.child('token').val() || !newData.child('token').exists()))"
+      }
+    },
+
+    "truck_locations":             { ".write": true },
+    "users":                       { ".write": true },
+    "residents":                   { ".write": true },
+    "trucks":                      { ".write": true },
+    "puroks":                      { ".write": true },
+    "notifications":               { ".write": true },
+    "notification_inbox":          { ".write": true },
+    "complaints":                  { ".write": true },
+    "collection_logs":             { ".write": true },
+    "collection_progress":         { ".write": true },
+    "weekly_collection_progress":  { ".write": true },
+    "load_history":                { ".write": true },
+    "trip_history":                { ".write": true },
+    "truck_issues":                { ".write": true },
+    "driver_settings":             { ".write": true },
+    "admin_settings":              { ".write": true },
+    "system_logs":                 { ".write": true },
+    "login_security":              { ".write": true },
+    "simulation_routes":           { ".write": true },
+    "demo_simulations":            { ".write": true },
+    "resident_locations":          { ".write": true },
+    "manual_alerts":               { ".write": true },
+    "alerts":                      { ".write": true },
+    "user_evaluations":            { ".write": true },
+    "user_ratings":                { ".write": true }
+  }
+}

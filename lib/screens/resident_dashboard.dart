@@ -1,12 +1,27 @@
+import '../widgets/logout_choice_dialog.dart';
+import '../services/rtdb_port.dart';
+import '../services/notification_inbox.dart';
+import '../utils/relative_time.dart';
+import '../utils/complaint_flow.dart';
+import '../utils/eta_policy.dart';
+import '../utils/fleet_status.dart';
 import 'dart:async';
 import 'dart:ui';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import '../widgets/notification_center.dart';
+import '../utils/resident_alert_rules.dart';
+import '../services/collection_schedule_service.dart';
+import '../services/collection_reminder_service.dart';
+import '../chatbot/faq_bot.dart';
+import '../widgets/truck_chat_widget.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:geolocator/geolocator.dart' as geo;
 import '../utils/prediction_engine.dart';
+import '../utils/fleet_snapshot.dart';
+import '../utils/tracking_telemetry.dart';
 import '../utils/session_manager.dart';
 import '../models/user.dart';
 import '../utils/app_theme.dart';
@@ -26,6 +41,9 @@ import 'package:dio/dio.dart';
 import '../utils/route_persistence_manager.dart';
 import '../utils/app_localizations.dart';
 import '../services/notification_service.dart';
+import '../services/truck_locations_feed.dart';
+import 'collection_route_optimization_screen.dart';
+import '../widgets/map_view_switch.dart';
 
 class ResidentDashboard extends StatefulWidget {
   const ResidentDashboard({super.key});
@@ -43,6 +61,9 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
   int _totalTrucks = 0;
   int _unreadNotificationsCount = 0;
   int _selectedIndex = 0;
+  // Truck Tracking tab: live map or Collection Route Optimization ("Collection status").
+  bool _showRoutePlan = false;
+  bool _routePlanOpened = false; // built on first use
   int _complaintsRefreshCount = 0;
   String? _targetComplaintId;
   bool _shouldShowDataManagement = false;
@@ -68,6 +89,12 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
   }
 
   StreamSubscription? _truckSubscription;
+  Timer? _fleetAgingTimer;
+  NotificationInbox? _inbox; // this resident's own read/dismiss/clear state
+  InboxState _inboxState = InboxState.empty;
+  StreamSubscription<InboxState>? _inboxSub;
+  Map<dynamic, dynamic>? _rawNotifications;
+  Map<dynamic, dynamic>? _rawTruckLocations;
   StreamSubscription? _notificationSubscription;
   StreamSubscription? _totalTruckSubscription;
   StreamSubscription? _userRealtimeSubscription;
@@ -78,6 +105,7 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
   @override
   void initState() {
     super.initState();
+    NotificationService.openHomeRequests.addListener(_openHomeFromNotification);
     RoutePersistenceManager.saveLastRoute('/resident_dashboard');
     _loadUser();
     _startClock();
@@ -101,10 +129,18 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
     });
   }
 
+  /// A tapped phone notification shows the dashboard's Home tab.
+  void _openHomeFromNotification() {
+    if (mounted) setState(() { _selectedIndex = 0; _showRoutePlan = false; });
+  }
+
   @override
   void dispose() {
+    NotificationService.openHomeRequests.removeListener(_openHomeFromNotification);
+    _scheduleSub?.cancel();
     _clockTimer?.cancel();
     _truckSubscription?.cancel();
+    _fleetAgingTimer?.cancel();
     _notificationSubscription?.cancel();
     _totalTruckSubscription?.cancel();
     _userRealtimeSubscription?.cancel();
@@ -237,7 +273,28 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
         });
         NotificationService.startListening(_user!);
         _setupListeners();
+        _watchSchedule();
       }
+    });
+  }
+
+  StreamSubscription<Map<String, CollectionSchedule>>? _scheduleSub;
+  CollectionSchedule? _mySchedule;
+  bool _scheduleLoaded = false;
+
+  /// The admin-set schedule of this resident's purok: shown on the Schedule card and turned
+  /// into weekly reminders on the phone (they arrive even when the app is closed).
+  void _watchSchedule() {
+    _scheduleSub?.cancel();
+    _scheduleSub = CollectionScheduleService.watch().listen((Map<String, CollectionSchedule> all) {
+      final CollectionSchedule? mine = CollectionScheduleService.forPurok(all, _user?.purok);
+      if (mounted) setState(() {
+        _mySchedule = mine;
+        _scheduleLoaded = true;
+      });
+      CollectionReminderService.sync(mine);
+    }, onError: (Object _) {
+      if (mounted) setState(() => _scheduleLoaded = true);
     });
   }
 
@@ -266,128 +323,18 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
     });
 
     _truckSubscription?.cancel();
-    _truckSubscription = _database.ref('truck_locations').onValue.listen((event) {
-      if (event.snapshot.exists && event.snapshot.value != null) {
-        final Map data = event.snapshot.value as Map;
-        final Map<String, Map<dynamic, dynamic>> driverToLatestTruck = {};
-        final int now = DateTime.now().millisecondsSinceEpoch;
-
-        data.forEach((key, value) {
-          if (value is Map) {
-            final val = Map<dynamic, dynamic>.from(value);
-            final String nodeKey = key.toString();
-            final String tid = (val['truck_id'] ?? nodeKey).toString().toUpperCase();
-            final String? dId = val['driver_id']?.toString() ?? val['driverId']?.toString();
-            final String dName = (val['driver_name'] ?? val['driverName'] ?? 'Driver').toString().trim();
-            final String dNameUpper = dName.toUpperCase();
-            final String driverKey = (dId != null && dId.isNotEmpty && dId != 'null') ? dId : dNameUpper;
-
-            final String role = (val['role'] ?? '').toString().toLowerCase();
-            final bool isExplicitNonDriver = (role == 'resident' || role == 'admin');
-
-            final String accountStatus = (val['account_status'] ?? val['status'] ?? '').toString().toLowerCase();
-            final dynamic isArchivedRaw = val['is_archived'] ?? val['isArchived'];
-            final bool isNodeArchived = accountStatus == 'archived' ||
-                isArchivedRaw == 1 ||
-                isArchivedRaw == '1' ||
-                isArchivedRaw == true ||
-                isArchivedRaw == 'true';
-
-            if (isExplicitNonDriver ||
-                isNodeArchived ||
-                dNameUpper.contains("ARIAN JOY") ||
-                dNameUpper.contains("JOHN DRIVER") ||
-                dNameUpper.contains("SYSTEM ADMIN") ||
-                tid.contains("ADMIN") ||
-                tid.contains("SYSTEM") ||
-                tid.contains("USER")) {
-              return; // Filter out non-drivers, residents, admins, and test accounts
-            }
-
-            final String status = (val['status'] ?? 'OFFLINE').toString().toUpperCase();
-            final bool isOnlineField = val['isOnline'] == true || val['is_online'] == true || val['is_online'] == 1;
-            final dynamic lastSeenRaw = val['lastSeen'] ?? val['last_seen'];
-            int lastSeen = 0;
-            if (lastSeenRaw is num) {
-              lastSeen = lastSeenRaw.toInt();
-            } else if (lastSeenRaw != null) {
-              final parsed = DateTime.tryParse(lastSeenRaw.toString().replaceAll(' ', 'T'));
-              if (parsed != null) lastSeen = parsed.millisecondsSinceEpoch;
-            }
-
-            final dynamic loginTimeRaw = val['login_time'] ?? val['loginTime'];
-            int loginTime = 0;
-            if (loginTimeRaw is num) {
-              loginTime = loginTimeRaw.toInt();
-            }
-
-            // Session Limit: 12 Hours
-            final bool isSessionValid = loginTime == 0 || (now - loginTime) < 43200000;
-            final bool isFresh = lastSeen == 0 || (now - lastSeen).abs() < 900000;
-
-            final bool isGenuinelyOnline = isOnlineField &&
-                status != 'OFFLINE' &&
-                status != 'COMPLETED' &&
-                status != 'FINISHED' &&
-                isSessionValid &&
-                isFresh;
-
-            if (isGenuinelyOnline) {
-              if (!driverToLatestTruck.containsKey(driverKey)) {
-                driverToLatestTruck[driverKey] = val;
-              } else {
-                final existing = driverToLatestTruck[driverKey]!;
-                final int existingSeen = (existing['lastSeen'] ?? 0) as int;
-                if (lastSeen >= existingSeen) {
-                  driverToLatestTruck[driverKey] = val;
-                }
-              }
-            }
-          }
-        });
-
-        final List<Map<dynamic, dynamic>> onlineTrucks = driverToLatestTruck.values.toList();
-        final int activeCount = onlineTrucks.length;
-        double minEta = double.infinity;
-
-        for (var val in onlineTrucks) {
-          if (_currentPosition != null && val['latitude'] != null && val['longitude'] != null) {
-            final double lat = (val['latitude'] as num).toDouble();
-            final double lng = (val['longitude'] as num).toDouble();
-            if (lat != 0.0 && lng != 0.0) {
-              try {
-                double dist = geo.Geolocator.distanceBetween(_currentPosition!.latitude, _currentPosition!.longitude, lat, lng) / 1000.0;
-                double speed = (val['speed'] ?? 15.0).toDouble();
-                double eta = PredictionEngine.estimateArrivalTime(dist, [speed > 5 ? speed : 15.0]);
-                if (eta < minEta) minEta = eta;
-              } catch (_) {}
-            }
-          }
-        }
-        String etaDisplay = "--";
-        if (activeCount > 0) {
-          etaDisplay = minEta != double.infinity ? "${minEta.toStringAsFixed(0)} mins" : "Approaching";
-          if (minEta <= 10 && _user?.purok != null) {
-            final String alertKey = "${_user!.userId}_proximity_${_user!.purok}";
-            final lastAlert = _sentProximityAlerts[alertKey];
-            if (lastAlert == null || DateTime.now().difference(lastAlert).inMinutes > 30) {
-              _sentProximityAlerts[alertKey] = DateTime.now();
-              _database.ref('notifications').push().set({
-                'type': 'TRUCK_PROXIMITY',
-                'title': 'Truck is Arriving!',
-                'message': 'A garbage truck is approximately ${minEta.toStringAsFixed(0)} minutes away from ${_user!.purok}. Please prepare your trash.',
-                'purok': _user!.purok,
-                'timestamp': ServerValue.timestamp,
-                'isRead': false,
-              });
-            }
-          }
-        }
-        if (mounted) setState(() { _activeTrucks = activeCount; _etaText = etaDisplay; });
-      }
+    _truckSubscription = TruckLocationsFeed.shared().events.listen((event) {
+      _rawTruckLocations = (event.snapshot.exists && event.snapshot.value is Map)
+          ? Map<dynamic, dynamic>.from(event.snapshot.value as Map)
+          : null;
+      // Dev-only timing (test mode + GT_TELEMETRY); no-op in production.
+      TrackingTelemetry.onTruckLocations(_rawTruckLocations, source: 'resident_cards');
+      _recomputeResidentFleet();
     });
-
-    _fetchTotalDriversFromUserManagement();
+    // A driver that stops reporting sends no event, so freshness is re-evaluated
+    // on a timer; otherwise the count would never fall.
+    _fleetAgingTimer?.cancel();
+    _fleetAgingTimer = Timer.periodic(const Duration(seconds: 15), (_) => _recomputeResidentFleet(fromAging: true));
 
     _fetchTotalDriversFromUserManagement();
 
@@ -418,23 +365,102 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
       }
     });
 
+    _ensureInbox();
     _notificationSubscription?.cancel();
     _notificationSubscription = _database.ref('notifications').onValue.listen((event) {
-      if (event.snapshot.exists) {
-        final Map data = event.snapshot.value as Map; int unread = 0;
-        data.forEach((key, value) {
-          final val = value as Map;
-          if (val['isRead'] == false) {
-             final String type = (val['type'] ?? '').toString();
-             final String targetPurok = (val['purok'] ?? val['area'] ?? '').toString();
-             final String residentId = (val['resident_id'] ?? '').toString();
-             bool isRelevant = (type == 'TRUCK_PROXIMITY' && (targetPurok == '' || targetPurok == _user?.purok)) || (type == 'COMPLAINT_RESOLVED' && residentId == _user?.userId.toString());
-             if (isRelevant) unread++;
-          }
-        });
-        if (mounted) setState(() => _unreadNotificationsCount = unread);
+      _rawNotifications = (event.snapshot.exists && event.snapshot.value is Map) ? event.snapshot.value as Map : null;
+      _recomputeResidentUnread();
+    });
+  }
+
+  /// Notifications this resident may see. TRUCK_PROXIMITY is the legacy resident-generated
+  /// broadcast (it produced "0 minutes away" duplicates); the driver app's staged
+  /// approach/arrival records replace it.
+  bool _isResidentRelevant(Map val) => ResidentAlertRules.isFor(val, residentId: _user?.userId, purok: _user?.purok);
+
+  void _ensureInbox() {
+    if (_inbox != null || _user == null) return;
+    _inbox = NotificationInbox(db: FirebaseRtdbPort(), role: 'resident', userId: _user!.userId);
+    _inboxSub = _inbox!.watch().listen((InboxState s) {
+      _inboxState = s;
+      _recomputeResidentUnread();
+    });
+  }
+
+  /// Unread = relevant, visible and not read by THIS resident (shared flags are ignored).
+  void _recomputeResidentUnread() {
+    final Map? data = _rawNotifications;
+    if (data == null) {
+      if (mounted) setState(() => _unreadNotificationsCount = 0);
+      return;
+    }
+    final List<Map> relevant = <Map>[];
+    data.forEach((key, value) {
+      if (value is Map && _isResidentRelevant(value)) {
+        relevant.add(<dynamic, dynamic>{...value, 'key': key.toString()});
       }
     });
+    final List<Map> visible = NotificationInbox.visible(relevant, _inboxState);
+    final int unread = NotificationInbox.unreadCount(visible, _inboxState);
+    if (mounted) setState(() => _unreadNotificationsCount = unread);
+  }
+
+  /// Re-derives the Active Fleets card and ETA from the latest raw snapshot.
+  /// [fromAging] re-evaluates freshness only (no proximity notification).
+  void _recomputeResidentFleet({bool fromAging = false}) {
+    final Map<dynamic, dynamic>? data = _rawTruckLocations;
+    if (data != null) {
+      final Stopwatch? telemetryClock = TrackingTelemetry.enabled ? (Stopwatch()..start()) : null;
+      // Shared fleet snapshot (same function as the Admin cards and the live map).
+      // Resident-only exclusion: reserved/test driver names, kept as before.
+      final FleetSnapshot fleet = FleetSnapshot.derive(
+        data,
+        includeCompleted: true,
+        exclude: (String nodeKey, Map node) {
+          final String dNameUpper = (node['driver_name'] ?? node['driverName'] ?? 'Driver').toString().trim().toUpperCase();
+          return dNameUpper.contains("ARIAN JOY") ||
+              dNameUpper.contains("JOHN DRIVER") ||
+              dNameUpper.contains("SYSTEM ADMIN");
+        },
+      );
+      {
+        // ETA/cards use the collection fleet (a COMPLETED truck is not collecting).
+        final List<Map<dynamic, dynamic>> onlineTrucks = fleet.fleetTrucks.map((LiveTruck t) => t.node).toList();
+        final int activeCount = fleet.activeFleets;
+        // ETA only from a truck that is COLLECTING with fresh GPS, from its real speed.
+        // Otherwise "ETA unavailable": never "0 min" and never an invented number. Arrival
+        // alerts are the driver app's job (once per trip, area and stage); the resident app
+        // no longer broadcasts its own.
+        EtaResult? best;
+        final int nowMs = DateTime.now().millisecondsSinceEpoch;
+        int rank(EtaResult r) => r.kind == EtaKind.arrived ? -1 : (r.minutes ?? 1 << 30);
+        for (final Map<dynamic, dynamic> val in onlineTrucks) {
+          if (_currentPosition == null) break;
+          final double? lat = double.tryParse('${val['latitude']}');
+          final double? lng = double.tryParse('${val['longitude']}');
+          if (lat == null || lng == null || (lat == 0.0 && lng == 0.0)) continue;
+          final double distKm = geo.Geolocator.distanceBetween(_currentPosition!.latitude, _currentPosition!.longitude, lat, lng) / 1000.0;
+          final EtaResult r = EtaPolicy.evaluate(
+            status: FleetStatus.collectionState(val),
+            gpsAgeMs: FleetStatus.gpsAgeMs(val, nowMs: nowMs),
+            distanceKm: distKm,
+            speedKmh: double.tryParse('${val['speed']}'),
+            averageSpeedKmh: double.tryParse('${val['avg_speed']}'),
+          );
+          if (best == null || (r.isAvailable && (!best.isAvailable || rank(r) < rank(best)))) best = r;
+        }
+        final String etaDisplay = activeCount == 0 ? "--" : (best?.label ?? "ETA unavailable");
+        if (mounted) setState(() { _activeTrucks = activeCount; _etaText = etaDisplay; });
+        if (telemetryClock != null) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            TrackingTelemetry.onFleetRendered(source: 'resident_cards', ms: telemetryClock.elapsedMilliseconds);
+          });
+        }
+      }
+    } else if (mounted) {
+      // No truck data at all: clear the count instead of leaving a stale value.
+      setState(() { _activeTrucks = 0; _etaText = "--"; });
+    }
   }
 
   Future<void> _fetchTotalDriversFromUserManagement() async {
@@ -473,73 +499,16 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
     }
   }
 
-  void _handleLogout() {
-    final bool isDesktop = Responsive.isDesktop(context);
-    final Color themeColor = isDesktop ? Colors.red : AppColors.tealText;
-    final String btnText = isDesktop ? "Logout" : "Logout"; // User said "Logout" for web sidebar text, let's keep consistency for button text in modal too
-
-    showDialog(
-      context: context,
-      builder: (context) => Dialog(
-        backgroundColor: Colors.white,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(32)),
-        child: Container(
-          constraints: const BoxConstraints(maxWidth: 400),
-          padding: const EdgeInsets.all(32),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(Icons.logout_rounded, size: 48, color: themeColor),
-              const SizedBox(height: 24),
-              const Text("Logout?", style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900)),
-              const SizedBox(height: 16),
-              Text(
-                "Are you sure you want to end your current session?",
-                textAlign: TextAlign.center,
-                style: TextStyle(color: Colors.grey.shade600, fontSize: 14, height: 1.5),
-              ),
-              const SizedBox(height: 32),
-              Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton(
-                      onPressed: () => Navigator.pop(context),
-                      style: OutlinedButton.styleFrom(
-                        side: const BorderSide(color: Colors.grey),
-                        padding: const EdgeInsets.symmetric(vertical: 16),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                      ),
-                      child: const Text("CANCEL", style: TextStyle(color: Colors.grey, fontWeight: FontWeight.w900)),
-                    ),
-                  ),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: ElevatedButton(
-                      onPressed: () async {
-                        NotificationService.stopListening();
-                        await SessionManager.logout();
-                        await RoutePersistenceManager.clearLastRoute();
-                        if (!mounted) return;
-                        Navigator.of(context).pushNamedAndRemoveUntil('/login', (route) => false);
-                      },
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: themeColor,
-                        foregroundColor: Colors.white,
-                        elevation: 0,
-                        padding: const EdgeInsets.symmetric(vertical: 16),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                      ),
-                      child: const Text("Logout", style: TextStyle(fontWeight: FontWeight.w900)),
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
+  Future<void> _handleLogout() async {
+    final LogoutChoice choice = await showLogoutChoiceDialog(context);
+    if (choice == LogoutChoice.cancel || !mounted) return;
+    NotificationService.stopListening();
+    await SessionManager.logout(forgetLogin: choice == LogoutChoice.forget, keepSignedIn: choice == LogoutChoice.remember || choice == LogoutChoice.switchAccount);
+    await RoutePersistenceManager.clearLastRoute();
+    if (!mounted) return;
+    Navigator.of(context).pushNamedAndRemoveUntil('/login', (route) => false);
   }
+
 
   void _viewProfilePicture() {
     if (_user == null) return;
@@ -712,16 +681,53 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
           children: [
             mainLayout,
             _buildRefreshSpinner(),
+            // Shown on every resident page; the resident can drag it out of the way.
+            TruckChatLauncher(
+              role: 'resident',
+              purok: _user?.purok,
+              onAction: _handleBotAction,
+              right: isDesktop ? 28 : 16,
+              bottom: isDesktop ? 120 : 100 + MediaQuery.paddingOf(context).bottom,
+            ),
           ],
         ),
       ),
     );
   }
 
+  /// Screens the Truck Buddy help bot can open.
+  void _handleBotAction(BotAction action) {
+    setState(() {
+      switch (action) {
+        case BotAction.track:
+          _selectedIndex = 1;
+          _showRoutePlan = false;
+        case BotAction.collectionStatus:
+          _selectedIndex = 1;
+          _showRoutePlan = true;
+          _routePlanOpened = true;
+        case BotAction.complaints:
+        case BotAction.fileComplaint:
+          _selectedIndex = 2;
+        case BotAction.settings:
+          _selectedIndex = 3;
+        case BotAction.routeHistory:
+          _selectedIndex = 4;
+        default:
+          break;
+      }
+    });
+  }
+
   Widget _buildMainContent() {
     return IndexedStack(index: _selectedIndex, children: [
         FadeSlideEntrance(key: const ValueKey("home"), child: _buildHomeTab()),
-        FadeSlideEntrance(key: const ValueKey("track"), child: ResidentTrackTruckScreen(isEmbedded: true, onBack: () => setState(() => _selectedIndex = 0))),
+        FadeSlideEntrance(key: const ValueKey("track"), child: IndexedStack(index: _showRoutePlan ? 1 : 0, sizing: StackFit.expand, children: [
+          ResidentTrackTruckScreen(isEmbedded: true, onBack: () => setState(() => _selectedIndex = 0), viewSwitch: _mapViewSwitch(0)),
+          _routePlanOpened
+              ? CollectionRouteOptimizationScreen(role: 'resident', isEmbedded: true, headerAccessory: _mapViewSwitch(1))
+              : const SizedBox.shrink(),
+        ])),
         FadeSlideEntrance(key: ValueKey("complaints_$_complaintsRefreshCount"), child: ResidentComplaintsScreen(isEmbedded: true, targetComplaintId: _targetComplaintId, onDataChanged: _refreshComplaints, onBack: () {
           setState(() {
             _selectedIndex = 0;
@@ -919,7 +925,7 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
                 ),
                 const SizedBox(width: 20),
                 _HoverZoomCard(
-                  onTap: () => setState(() => _selectedIndex = 1),
+                  onTap: () => setState(() { _selectedIndex = 1; _showRoutePlan = false; }),
                   child: Container(
                     padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 12),
                     decoration: BoxDecoration(
@@ -1052,8 +1058,7 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
                                       ),
                                     ),
                                     _buildActionCard("File Complaint", "Report collection issues", Icons.feedback_rounded, const Color(0xFFFFF0F2), const Color(0xFFFF1744)),
-                                    const SizedBox(height: 12),
-                                    _buildActionCard("GIS Route History", "Confirm collection history & truck visits in your area", Icons.route_rounded, const Color(0xFFE0F2F1), const Color(0xFF00796B)),
+                                    // Route History and Collection Status are in the sidebar on web.
                                     const SizedBox(height: 24),
                                     _buildTransactionHistoryCard(),
                                     const SizedBox(height: 24),
@@ -1104,6 +1109,11 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
                       ])),
                   const SizedBox(height: 16),
                   _buildMapCard(),
+                  _buildSectionHeader("Collection History", "See where garbage trucks have collected in your area."),
+                  _buildActionCard("Route History", "View recorded collection routes and truck visits", Icons.route_rounded, const Color(0xFFE0F2F1), const Color(0xFF00796B)),
+                  const SizedBox(height: 12),
+                  _buildActionCard("Collection Status", "When was each area last collected?", Icons.event_available_rounded, const Color(0xFFE8F5E9), const Color(0xFF2E7D32)),
+                  const SizedBox(height: 16),
                   _buildSectionHeader("Reports & Feedback", "File new reports and track your submitted complaints."),
                   _buildActionCard("File Complaint", "Report issues", Icons.feedback_rounded, const Color(0xFFFFF0F2), const Color(0xFFFF1744)),
                   const SizedBox(height: 16),
@@ -1170,7 +1180,7 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
             subtitle: const Text("Real-time monitoring",
                 style: TextStyle(fontSize: 13, color: Colors.grey, fontWeight: FontWeight.w500)),
             trailing: _HoverZoomLink(
-              onTap: () => setState(() => _selectedIndex = 1),
+              onTap: () => setState(() { _selectedIndex = 1; _showRoutePlan = false; }),
               child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                   decoration:
@@ -1212,9 +1222,10 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
           const SizedBox(height: 4),
           const Text("Stay updated with your local collection times", style: TextStyle(fontSize: 13, color: Colors.grey, fontWeight: FontWeight.w500)),
           const SizedBox(height: 24),
-          _buildScheduleRow("Frequency", _getDynamicFrequency(), isBadge: true),
+          // Only the schedule the barangay set; nothing is guessed when there is none.
+          _buildScheduleRow("Collection Days", !_scheduleLoaded ? "Loading..." : (_mySchedule == null ? "Not set yet" : _mySchedule!.daysLabel), isBadge: true),
           const Divider(height: 32),
-          _buildScheduleRow("Estimated Time", _getDynamicTime(), isBold: true),
+          _buildScheduleRow("Usual Time", _mySchedule == null ? "Follow the live alerts" : "Around ${_mySchedule!.timeLabel}", isBold: true),
           const Divider(height: 32),
           _buildScheduleRow("Area", _user?.purok ?? "Area", icon: Icons.location_searching_rounded)
         ]));
@@ -1325,11 +1336,18 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
                     children: [
                       _buildSidebarItem(0, Icons.home_rounded, 'Dashboard Home'),
                       const SizedBox(height: 8),
-                      _buildSidebarItem(1, Icons.location_on_rounded, 'Truck Tracking'),
+                      _buildSidebarItem(1, Icons.location_on_rounded, 'Truck Tracking',
+                          selected: _selectedIndex == 1 && !_showRoutePlan,
+                          onTap: () => setState(() { _selectedIndex = 1; _showRoutePlan = false; })),
+                      const SizedBox(height: 8),
+                      // Web: Collection Status and Route History live in the sidebar (phones: cards).
+                      _buildSidebarItem(1, Icons.event_available_rounded, 'Collection Status',
+                          selected: _selectedIndex == 1 && _showRoutePlan,
+                          onTap: () => setState(() { _selectedIndex = 1; _showRoutePlan = true; _routePlanOpened = true; })),
                       const SizedBox(height: 8),
                       _buildSidebarItem(2, Icons.chat_bubble_outline_rounded, 'Report Complaints'),
                       const SizedBox(height: 8),
-                      _buildSidebarItem(4, Icons.route_rounded, 'GIS Route History'),
+                      _buildSidebarItem(4, Icons.route_rounded, 'Route History'),
                       const SizedBox(height: 8),
                       _buildSidebarItem(3, Icons.person_outline_rounded, 'Account Settings'),
                     ],
@@ -1373,10 +1391,10 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
     return Positioned(top: top, left: left, bottom: bottom, right: right, child: Transform.translate(offset: offset, child: Transform.scale(scale: scale, child: Container(width: size, height: size, decoration: BoxDecoration(color: color, shape: BoxShape.circle)))));
   }
 
-  Widget _buildSidebarItem(int index, IconData icon, String label) {
-    bool isSelected = _selectedIndex == index;
+  Widget _buildSidebarItem(int index, IconData icon, String label, {bool? selected, VoidCallback? onTap}) {
+    bool isSelected = selected ?? _selectedIndex == index;
     return _HoverZoomCard(
-      onTap: () => setState(() => _selectedIndex = index),
+      onTap: onTap ?? () => setState(() => _selectedIndex = index),
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 200),
         padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
@@ -1646,7 +1664,7 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
                 SizedBox(height: isMobile ? 12.0 : 16.0),
                 HoverActionButton(
                   text: "Track Trash Truck",
-                  onTap: () => setState(() => _selectedIndex = 1),
+                  onTap: () => setState(() { _selectedIndex = 1; _showRoutePlan = false; }),
                 ),
               ],
             ),
@@ -1832,12 +1850,32 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
     );
   }
 
+  Widget _mapViewSwitch(int selected) => MapViewSwitch(
+        options: const <MapViewOption>[
+          MapViewOption('Map', Icons.map_rounded),
+          MapViewOption('Collection status', Icons.fact_check_rounded, color: Color(0xFF1565C0)),
+        ],
+        selected: selected,
+        onChanged: (int i) => setState(() {
+          _showRoutePlan = i == 1;
+          if (_showRoutePlan) _routePlanOpened = true;
+        }),
+      );
+
   Widget _buildActionCard(String title, String subtitle, IconData icon, Color bgColor, Color iconColor) {
     bool isDesktop = Responsive.isDesktop(context);
     return _HoverZoomCard(
       onTap: () {
-        if (title.contains("Track")) {
-          setState(() => _selectedIndex = 1);
+        if (title == "Collection Status") {
+          // Collection Route Optimization, resident view (status and history only), inside the
+          // Truck Tracking tab so the sidebar / bottom bar stay visible.
+          setState(() {
+            _selectedIndex = 1;
+            _showRoutePlan = true;
+            _routePlanOpened = true;
+          });
+        } else if (title.contains("Track")) {
+          setState(() { _selectedIndex = 1; _showRoutePlan = false; });
         } else if (title.contains("Route") || title.contains("History") || title.contains("GIS")) {
           setState(() => _selectedIndex = 4);
         } else if (title.contains("Settings")) {
@@ -2101,20 +2139,25 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
                         (c['user_id'] ?? c['resident_id']).toString() == _user?.userId.toString())
                     .toList();
                 if (filtered.isEmpty) {
-                  return Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      const SizedBox(height: 20),
-                      Container(
-                        padding: const EdgeInsets.all(16),
-                        decoration: const BoxDecoration(color: Color(0xFFF8F9FA), shape: BoxShape.circle),
-                        child: const Icon(Icons.assignment_turned_in_rounded, size: 40, color: Colors.black12),
-                      ),
-                      const SizedBox(height: 12),
-                      const Text("No Found Complaint History",
-                          style: TextStyle(fontWeight: FontWeight.w800, fontSize: 14, color: Colors.grey)),
-                      const SizedBox(height: 20),
-                    ],
+                  // Centred in the card (the card's column aligns its children to the start).
+                  return SizedBox(
+                    width: double.infinity,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        const SizedBox(height: 20),
+                        Container(
+                          padding: const EdgeInsets.all(16),
+                          decoration: const BoxDecoration(color: Color(0xFFF8F9FA), shape: BoxShape.circle),
+                          child: const Icon(Icons.assignment_turned_in_rounded, size: 40, color: Colors.black12),
+                        ),
+                        const SizedBox(height: 12),
+                        const Text("No complaints filed yet",
+                            textAlign: TextAlign.center,
+                            style: TextStyle(fontWeight: FontWeight.w800, fontSize: 14, color: Colors.grey)),
+                        const SizedBox(height: 20),
+                      ],
+                    ),
                   );
                 }
                 return Column(
@@ -2500,469 +2543,40 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
     );
   }
 
-  String _getDynamicFrequency() {
-    if (_user?.purok == null || _user!.purok!.isEmpty) return "Weekly";
-    final String p = _user!.purok!;
-    if (p.contains("Sentro") || p.contains("Home Subdivision") || p.contains("Tanco")) return "Daily";
-    return "Weekly";
-  }
 
-  String _getDynamicTime() {
-    if (_user?.purok == null || _user!.purok!.isEmpty) return "8:00 AM - 10:00 AM";
-    final String p = _user!.purok!;
-    if (p.contains("1") || p.contains("2") || p.contains("3") || p.contains("4")) {
-      return "6:00 AM - 8:00 AM";
-    }
-    if (p.contains("Dos Riles") || p.contains("Sentro") || p.contains("San Isidro")) {
-      return "8:00 AM - 10:00 AM";
-    }
-    if (p.contains("Paraiso") || p.contains("Riverside") || p.contains("Kalaw")) {
-      return "10:00 AM - 12:00 PM";
-    }
-    return "1:00 PM - 3:00 PM";
-  }
 
+  /// Shared notification center: swipe to remove, Clear all, Mark all read.
   void _showNotificationsModal(BuildContext context) {
-    final GlobalKey<AnimatedListState> listKey = GlobalKey<AnimatedListState>();
-    List<Map> notifications = [];
-    bool isClearingAll = false;
-
-    // Selection State
-    bool isSelectionMode = false;
-    Set<String> selectedKeys = {};
-    bool isModalLoading = true; // Moved outside showDialog builder
-    bool timerStarted = false; // Flag para siguradong iisang beses lang ang timer
-
-    showDialog(
-      context: context,
-      builder: (context) {
-        return StatefulBuilder(
-          builder: (context, setModalState) {
-            if (isModalLoading && !timerStarted) {
-              timerStarted = true;
-              Future.delayed(const Duration(milliseconds: 500), () {
-                if (mounted) {
-                  setModalState(() => isModalLoading = false);
-                }
-              });
+    final NotificationInbox? inbox = _inbox;
+    if (inbox == null) return;
+    showNotificationCenter(
+      context,
+      source: _database.ref('notifications').onValue.map((DatabaseEvent e) => e.snapshot.value),
+      isRelevant: _isResidentRelevant,
+      inbox: inbox,
+      onOpen: (Map item) {
+        final String type = (item['type'] ?? '').toString();
+        if (ComplaintFlow.residentComplaintTypes.contains(type)) {
+          // Open Complaint History on this complaint (its tab, highlighted).
+          final String? cid = ComplaintFlow.notificationComplaintId(item);
+          setState(() {
+            _selectedIndex = 2;
+            if (cid != null) {
+              _targetComplaintId = cid;
+              _complaintsRefreshCount++;
             }
-
-
-
-            void toggleSelection(String key) {
-              setModalState(() {
-                if (selectedKeys.contains(key)) {
-                  selectedKeys.remove(key);
-                } else {
-                  selectedKeys.add(key);
-                }
-              });
-            }
-
-            void cancelSelection() {
-              setModalState(() {
-                isSelectionMode = false;
-                selectedKeys.clear();
-              });
-            }
-
-            void selectAll() {
-              setModalState(() {
-                for (var n in notifications) {
-                  selectedKeys.add(n['key'].toString());
-                }
-              });
-            }
-
-            Future<void> deleteSelected() async {
-              if (selectedKeys.isEmpty) return;
-              bool confirmed = await _showConfirmDialog(
-                  title: "Delete Selected?",
-                  message: "Remove ${selectedKeys.length} selected alerts permanently?",
-                  isDestructive: true);
-
-              if (confirmed) {
-                setModalState(() => isClearingAll = true);
-                final keysToRemove = List<String>.from(selectedKeys);
-                
-                for (String key in keysToRemove) {
-                  int idx = notifications.indexWhere((n) => n['key'] == key);
-                  if (idx != -1) {
-                    final removedItem = notifications[idx];
-                    notifications.removeAt(idx);
-                    
-                    listKey.currentState?.removeItem(
-                      idx,
-                      (context, animation) => SlideTransition(
-                        position: animation.drive(Tween<Offset>(begin: const Offset(1.5, 0.0), end: Offset.zero)),
-                        child: FadeTransition(
-                          opacity: animation,
-                          child: SizeTransition(sizeFactor: animation, axisAlignment: -1.0, child: _buildNotificationItem(removedItem, const AlwaysStoppedAnimation(1.0))),
-                        ),
-                      ),
-                      duration: const Duration(milliseconds: 300),
-                    );
-                    _database.ref('notifications/$key').remove();
-                    await Future.delayed(const Duration(milliseconds: 80));
-                  }
-                }
-                
-                setModalState(() {
-                  selectedKeys.clear();
-                  isSelectionMode = false;
-                  isClearingAll = false;
-                });
-                _showSnackBar("Successfully deleted selected notifications");
-              }
-            }
-
-            return Dialog(
-              backgroundColor: Colors.white,
-              surfaceTintColor: Colors.white,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(32)),
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 300),
-                curve: Curves.easeInOutCubic,
-                clipBehavior: Clip.antiAlias,
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(32),
-                ),
-                constraints: BoxConstraints(
-                  maxWidth: (MediaQuery.of(context).size.width * 0.92).clamp(320.0, 580.0), 
-                  maxHeight: isModalLoading 
-                      ? 350 
-                      : MediaQuery.of(context).size.height * 0.80,
-                ),
-                padding: const EdgeInsets.fromLTRB(0, 16, 0, 24),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 24),
-                      child: Row(
-                        children: [
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  isSelectionMode ? "Select Alerts" : "Notifications",
-                                  style: const TextStyle(
-                                    fontSize: 20,
-                                    fontWeight: FontWeight.w900,
-                                    color: Color(0xFF00695C),
-                                  ),
-                                ),
-                                const SizedBox(height: 4),
-                                Text(
-                                  isSelectionMode
-                                      ? "${selectedKeys.length} alerts selected"
-                                      : "Stay updated with system events and alerts.",
-                                  style: const TextStyle(
-                                    color: Colors.grey,
-                                    fontSize: 13,
-                                    fontWeight: FontWeight.w500,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                          IconButton(
-                            onPressed: () => Navigator.pop(context),
-                            icon: const Icon(Icons.close_rounded, color: Colors.grey),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const Padding(
-                      padding: EdgeInsets.symmetric(horizontal: 24),
-                      child: Divider(height: 24),
-                    ),
-                    if (isModalLoading)
-                      const Expanded(
-                        child: Center(
-                          child: Padding(
-                            padding: EdgeInsets.all(40),
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                CircularProgressIndicator(color: AppColors.tealText),
-                                SizedBox(height: 16),
-                                Text("Loading your notifications...",
-                                    style: TextStyle(fontSize: 14, color: Colors.grey, fontWeight: FontWeight.w500)),
-                              ],
-                            ),
-                          ),
-                        ),
-                      )
-                    else
-                      Flexible(
-                        child: StreamBuilder<DatabaseEvent>(
-                        stream: _database.ref('notifications').onValue,
-                        builder: (context, snapshot) {
-                          if (snapshot.connectionState == ConnectionState.waiting) {
-                            return const Center(
-                              child: Padding(
-                                padding: EdgeInsets.all(40),
-                                child: Column(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    CircularProgressIndicator(color: AppColors.tealText),
-                                    SizedBox(height: 16),
-                                    Text("Loading your notifications...",
-                                        style: TextStyle(fontSize: 14, color: Colors.grey, fontWeight: FontWeight.w500)),
-                                  ],
-                                ),
-                              ),
-                            );
-                          }
-                          if (snapshot.hasData && snapshot.data!.snapshot.exists) {
-                            if (!isClearingAll) {
-                              final Map data = snapshot.data!.snapshot.value as Map;
-                              List<Map> newList = [];
-                              data.forEach((k, v) {
-                                final val = v as Map;
-                                final String type = (val['type'] ?? '').toString();
-                                final String targetPurok =
-                                    (val['purok'] ?? val['area'] ?? '').toString();
-                                final String residentId = (val['resident_id'] ?? '').toString();
-                                bool isRelevant = (type == 'TRUCK_PROXIMITY' &&
-                                        (targetPurok == '' || targetPurok == _user?.purok)) ||
-                                    (type == 'COMPLAINT_RESOLVED' &&
-                                        residentId == _user?.userId.toString());
-                                if (isRelevant) {
-                                  val['key'] = k;
-                                  newList.add(val);
-                                }
-                              });
-                              newList.sort(
-                                  (a, b) => (b['timestamp'] ?? 0).compareTo(a['timestamp'] ?? 0));
-                              notifications = newList;
-                            }
-
-                            return Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                // Action Toolbar (Only shown in Selection Mode)
-                                if (isSelectionMode && notifications.isNotEmpty && !isClearingAll)
-                                  Padding(
-                                    padding: const EdgeInsets.fromLTRB(24, 0, 24, 16),
-                                    child: Row(
-                                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                      children: [
-                                        _HoverZoomLink(
-                                          onTap: selectAll,
-                                          child: Text(
-                                            selectedKeys.length == notifications.length ? "All Selected" : "Select All",
-                                            style: const TextStyle(color: Color(0xFF00695C), fontWeight: FontWeight.w800, fontSize: 13),
-                                          ),
-                                        ),
-                                        Row(
-                                          children: [
-                                            _HoverZoomLink(
-                                              onTap: selectedKeys.isEmpty ? null : deleteSelected,
-                                              child: Text("Delete",
-                                                  style: TextStyle(
-                                                      color: selectedKeys.isEmpty ? Colors.grey.shade300 : Colors.red,
-                                                      fontWeight: FontWeight.w900,
-                                                      fontSize: 13)),
-                                            ),
-                                            const SizedBox(width: 16),
-                                            _HoverZoomLink(
-                                              onTap: cancelSelection,
-                                              child: const Text("Cancel",
-                                                  style: TextStyle(
-                                                      color: Colors.grey,
-                                                      fontWeight: FontWeight.w800,
-                                                      fontSize: 13)),
-                                            ),
-                                          ],
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                if (notifications.isEmpty && !isClearingAll)
-                                  _buildEmptyState()
-                                else
-                                  Flexible(
-                                    child: Stack(
-                                      children: [
-                                        if (isClearingAll)
-                                          Positioned.fill(child: Center(child: _buildEmptyState())),
-                                        ClipRect(
-                                          child: SingleChildScrollView(
-                                            physics: const BouncingScrollPhysics(),
-                                            clipBehavior: Clip.none,
-                                            padding: const EdgeInsets.symmetric(horizontal: 24),
-                                            child: AnimatedList(
-                                              key: listKey,
-                                              shrinkWrap: true,
-                                              physics: const NeverScrollableScrollPhysics(),
-                                              initialItemCount: notifications.length,
-                                              itemBuilder: (context, index, animation) {
-                                                if (index >= notifications.length)
-                                                  return const SizedBox();
-                                                final item = notifications[index];
-                                                final String key = item['key'].toString();
-                                                return _buildDismissibleNotification(
-                                                    item,
-                                                    index,
-                                                    listKey,
-                                                    setModalState,
-                                                    notifications,
-                                                    isSelectionMode: isSelectionMode,
-                                                    isSelected: selectedKeys.contains(key),
-                                                    onDoubleTap: Responsive.isDesktop(context) ? () {
-                                                      setModalState(() {
-                                                        isSelectionMode = true;
-                                                        selectedKeys.add(key);
-                                                      });
-                                                    } : null,
-                                                    onLongPress: !Responsive.isDesktop(context) ? () {
-                                                      setModalState(() {
-                                                        isSelectionMode = true;
-                                                        selectedKeys.add(key);
-                                                      });
-                                                    } : null,
-                                                    onTap: () {
-                                                      if (isSelectionMode) toggleSelection(key);
-                                                    }
-                                                );
-                                              },
-                                            ),
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                              ],
-                            );
-                          }
-                          return _buildEmptyState();
-                        },
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            );
-          },
-        );
+          });
+        } else if (ResidentAlertRules.truckAlertTypes.contains(type) || type == 'TRUCK_PROXIMITY') {
+          setState(() {
+            _selectedIndex = 1;
+            _showRoutePlan = false;
+          });
+        }
       },
-    ).whenComplete(() {
-      _markNotificationsAsRead(notifications);
-    });
-  }
-
-  void _markNotificationsAsRead(List<Map> notifications) async {
-    for (var notif in notifications) {
-      if (notif['isRead'] == false) {
-        final String key = notif['key'].toString();
-        await _database.ref('notifications/$key').update({'isRead': true});
-      }
-    }
-  }
-
-  Widget _buildEmptyState() {
-    return const Column(children: [
-      SizedBox(height: 48),
-      CircleAvatar(
-          radius: 40,
-          backgroundColor: Color(0xFFF5F5F5),
-          child: Icon(Icons.notifications_rounded, size: 40, color: Colors.grey)),
-      SizedBox(height: 16),
-      Text("No alerts found.", style: TextStyle(fontWeight: FontWeight.w900, color: Colors.grey)),
-      SizedBox(height: 48)
-    ]);
-  }
-
-  Future<void> _handleClearAllNotifications(
-      List<Map> notifications, GlobalKey<AnimatedListState> listKey, StateSetter setModalState) async {
-    if (notifications.isEmpty) return;
-    bool confirmed = await _showConfirmDialog(
-        title: "Clear All?",
-        message: "Permanently remove all alerts?",
-        isDestructive: true);
-    if (confirmed) {
-      final List<Map> toRemove = List.from(notifications);
-      setModalState(() {});
-
-      for (int i = 0; i < toRemove.length; i++) {
-        if (notifications.isEmpty) break;
-        final removedItem = notifications[0];
-        final String key = removedItem['key'].toString();
-
-        notifications.removeAt(0);
-
-        listKey.currentState?.removeItem(
-          0,
-          (context, animation) {
-            return SlideTransition(
-              position: animation.drive(Tween<Offset>(
-                begin: const Offset(1.5, 0.0),
-                end: Offset.zero,
-              )),
-              child: FadeTransition(
-                opacity: animation,
-                child: SizeTransition(
-                  sizeFactor: animation,
-                  axisAlignment: -1.0,
-                  child: _buildNotificationItem(removedItem, const AlwaysStoppedAnimation(1.0)),
-                ),
-              ),
-            );
-          },
-          duration: const Duration(milliseconds: 400),
-        );
-
-        _database.ref('notifications/$key').remove();
-
-        setModalState(() {});
-
-        await Future.delayed(const Duration(milliseconds: 100));
-      }
-
-      _showSnackBar("Successful cleared all notifications");
-      if (mounted) setModalState(() {});
-    }
-  }
-
-  Widget _buildDismissibleNotification(Map item, int index, GlobalKey<AnimatedListState> listKey,
-      StateSetter setModalState, List<Map> currentList, {bool isSelectionMode = false, bool isSelected = false, VoidCallback? onTap, VoidCallback? onDoubleTap, VoidCallback? onLongPress}) {
-    final bool isMobile = MediaQuery.of(context).size.width < 600;
-    return Padding(
-      padding: EdgeInsets.only(bottom: isMobile ? 8.0 : 10.0),
-      child: Dismissible(
-        key: Key(item['key'].toString()),
-        direction: isSelectionMode ? DismissDirection.none : DismissDirection.horizontal,
-        confirmDismiss: (direction) async {
-          return await _showConfirmDialog(
-              title: "Delete Notification?",
-              message: "Are you sure you want to remove this alert?",
-              isDestructive: true);
-        },
-        onDismissed: (direction) {
-          final String key = item['key'].toString();
-          _database.ref('notifications/$key').remove();
-          _showSnackBar("Successful delete notification");
-        },
-        background: _buildSwipeBackground(Alignment.centerLeft),
-        secondaryBackground: _buildSwipeBackground(Alignment.centerRight),
-        child: _buildNotificationItem(item, const AlwaysStoppedAnimation(1.0), isSelectionMode: isSelectionMode, isSelected: isSelected, onTap: onTap, onDoubleTap: onDoubleTap, onLongPress: onLongPress),
-      ),
     );
   }
 
-  Widget _buildSwipeBackground(Alignment alignment) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 0, left: 10, right: 10),
-      padding: const EdgeInsets.symmetric(horizontal: 20),
-      decoration: BoxDecoration(color: Colors.red.shade50, borderRadius: BorderRadius.circular(24)),
-      alignment: alignment,
-      child: Icon(Icons.delete_outline_rounded, color: Colors.red.shade400),
-    );
-  }
+
 
   Future<bool> _showConfirmDialog(
       {required String title, required String message, bool isDestructive = false}) async {
@@ -3013,7 +2627,7 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
   }
 
   Map<String, dynamic> _getNotificationStyle(String type) {
-    if (type == 'TRUCK_PROXIMITY') {
+    if (type == 'TRUCK_PROXIMITY' || type == 'auto_approach' || type == 'auto_arrival') {
       return {
         'icon': Icons.local_shipping_rounded,
         'color': const Color(0xFFFF9800),
@@ -3024,6 +2638,12 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
         'icon': Icons.assignment_turned_in_rounded,
         'color': const Color(0xFF3F51B5),
         'bgColor': const Color(0xFFE8EAF6),
+      };
+    } else if (type == ComplaintFlow.typeInProgress) {
+      return {
+        'icon': Icons.autorenew_rounded,
+        'color': const Color(0xFF0369A1),
+        'bgColor': const Color(0xFFE0F2FE),
       };
     } else if (type == 'MAINTENANCE_ALERT') {
       return {
@@ -3044,108 +2664,6 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
         'bgColor': const Color(0xFFE0F2F1),
       };
     }
-  }
-
-  Widget _buildNotificationItem(Map item, Animation<double> animation, {bool isSelectionMode = false, bool isSelected = false, VoidCallback? onTap, VoidCallback? onDoubleTap, VoidCallback? onLongPress}) {
-    final String type = (item['type'] ?? '').toString();
-    final bool isRead = item['isRead'] ?? false;
-    final style = _getNotificationStyle(type);
-    final Color themeColor = style['color'];
-    final Color bgColor = style['bgColor'];
-    final IconData icon = style['icon'];
-
-    final double screenWidth = MediaQuery.of(context).size.width;
-    final bool isMobile = screenWidth < 600;
-    final bool isTablet = screenWidth >= 600 && screenWidth < 1024;
-
-    final double cardRadius = isMobile ? 16.0 : (isTablet ? 18.0 : 20.0);
-    final double contentPaddingH = isMobile ? 12.0 : (isTablet ? 14.0 : 16.0);
-    final double contentPaddingV = isMobile ? 6.0 : (isTablet ? 8.0 : 10.0);
-
-    final double iconBoxPadding = isMobile ? 8.0 : (isTablet ? 9.0 : 10.0);
-    final double iconBoxRadius = isMobile ? 12.0 : 14.0;
-    final double iconSize = isMobile ? 18.0 : (isTablet ? 20.0 : 22.0);
-
-    final double titleFontSize = isMobile ? 13.5 : (isTablet ? 14.5 : 15.0);
-    final double subtitleFontSize = isMobile ? 11.5 : (isTablet ? 12.0 : 12.5);
-
-    return FadeTransition(
-        opacity: animation,
-        child: SizeTransition(
-            sizeFactor: animation,
-            child: _HoverZoomCard(
-                onTap: isSelectionMode ? onTap : () {
-                  Navigator.pop(context);
-                  if (type == 'COMPLAINT_RESOLVED')
-                    setState(() => _selectedIndex = 2);
-                  else if (type == 'TRUCK_PROXIMITY') setState(() => _selectedIndex = 1);
-                },
-                child: GestureDetector(
-                  onDoubleTap: onDoubleTap,
-                  onLongPress: onLongPress,
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 200),
-                    margin: const EdgeInsets.symmetric(horizontal: 2),
-                    decoration: BoxDecoration(
-                        color: isSelected ? const Color(0xFFE0F2F1) : Colors.white,
-                        borderRadius: BorderRadius.circular(cardRadius),
-                        border: Border.all(color: isSelected ? const Color(0xFF00796B) : Colors.grey.shade200, width: isSelected ? 2.0 : 1.0),
-                        boxShadow: [BoxShadow(color: Colors.black.withAlpha(5), blurRadius: 6, offset: const Offset(0, 2))]),
-                    child: Stack(
-                      children: [
-                        ListTile(
-                            dense: true,
-                            contentPadding: EdgeInsets.symmetric(horizontal: contentPaddingH, vertical: contentPaddingV),
-                            leading: Container(
-                                padding: EdgeInsets.all(iconBoxPadding),
-                                decoration: BoxDecoration(color: isSelected ? const Color(0xFF00796B).withOpacity(0.1) : bgColor, borderRadius: BorderRadius.circular(iconBoxRadius)),
-                                child: Icon(
-                                    icon,
-                                    color: themeColor,
-                                    size: iconSize)),
-                            title: Text(item['title'] ?? 'Alert',
-                                style: TextStyle(
-                                  fontWeight: FontWeight.w800, 
-                                  fontSize: titleFontSize,
-                                  color: const Color(0xFF1A1A1A),
-                                )),
-                            subtitle: Padding(
-                              padding: const EdgeInsets.only(top: 2),
-                              child: Text(item['message'] ?? '',
-                                  style: TextStyle(
-                                    fontSize: subtitleFontSize, 
-                                    color: const Color(0xFF666666),
-                                    fontWeight: FontWeight.w500,
-                                    height: 1.25,
-                                  )),
-                            )),
-                        if (isSelectionMode)
-                          Positioned(
-                            top: 6,
-                            right: 6,
-                            child: Icon(
-                              isSelected ? Icons.check_circle_rounded : Icons.radio_button_unchecked_rounded,
-                              color: const Color(0xFF00796B),
-                              size: isMobile ? 18.0 : 20.0,
-                            ),
-                          ),
-                        if (!isRead && !isSelectionMode)
-                          Positioned(
-                            top: 8,
-                            right: 8,
-                            child: Container(
-                              width: isMobile ? 6.0 : 8.0,
-                              height: isMobile ? 6.0 : 8.0,
-                              decoration: const BoxDecoration(
-                                color: Color(0xFF00796B),
-                                shape: BoxShape.circle,
-                              ),
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
-                ))));
   }
 
   void _showSnackBar(String message, {bool isError = false}) {

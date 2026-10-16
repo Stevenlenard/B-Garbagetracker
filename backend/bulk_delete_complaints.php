@@ -1,6 +1,10 @@
 <?php
 header("Content-Type: application/json");
 require_once 'db_config.php';
+require_once 'auth_token.php';
+
+// Bulk deletion is an administrator action.
+gt_require_role(['admin']);
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     // Support both JSON and Form-Data
