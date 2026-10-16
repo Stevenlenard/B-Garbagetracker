@@ -2948,8 +2948,7 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> with Ticker
         await _database.ref('users/${_user!.userId}').update({
           'name': name,
           'username': username,
-          'email': email,
-          'phone': phone,
+          // No email/phone here: the `users` node is listed publicly (live map); MySQL keeps them.
           'preferred_truck': truck,
           'lastUpdated': ServerValue.timestamp,
         });

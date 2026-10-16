@@ -1,0 +1,110 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+
+    "admin_settings": {
+      ".read": true,
+      "$setting": { ".write": "newData.exists()" }
+    },
+
+    "collection_logs": {
+      ".read": true,
+      ".indexOn": ["date"],
+      "$log": { ".write": "newData.exists()" }
+    },
+
+    "collection_progress": {
+      ".read": true
+    },
+
+    "collection_schedule": {
+      ".read": true,
+      "$area": { ".write": true }
+    },
+
+    "complaints": {
+      ".read": true,
+      "$complaint": { ".write": true }
+    },
+
+    "driver_routes": {
+      ".read": true,
+      ".indexOn": ["driver_id"],
+      "$trip": { ".write": true }
+    },
+
+    "simulation_routes": {
+      ".read": true,
+      ".indexOn": ["driver_id"],
+      "$trip": { ".write": true }
+    },
+
+    "driver_sessions": {
+      "$driver": { ".read": true, ".write": true }
+    },
+
+    "driver_settings": {
+      "$driver": { ".read": true, ".write": "newData.exists()" }
+    },
+
+    "load_history": {
+      ".read": true,
+      "$trip": { ".write": "newData.exists()" }
+    },
+
+    "login_security": {
+      "$account": { ".read": true, ".write": true }
+    },
+
+    "notification_inbox": {
+      "$owner": { ".read": true, ".write": "newData.exists()" }
+    },
+
+    "notifications": {
+      ".read": true,
+      "$notification": { ".write": true }
+    },
+
+    "puroks": {
+      ".read": true,
+      ".write": "newData.hasChildren()",
+      "$purok": { ".write": true }
+    },
+
+    "residents": {
+      "$resident": { ".read": true, ".write": "newData.exists()" }
+    },
+
+    "system_logs": {
+      ".read": true,
+      ".indexOn": ["timestamp"],
+      "$log": { ".write": true }
+    },
+
+    "truck_issues": {
+      ".read": true,
+      "$issue": { ".write": true }
+    },
+
+    "truck_locations": {
+      ".read": true,
+      "$truck": { ".write": "newData.exists()" }
+    },
+
+    "trucks": {
+      ".read": true,
+      "$truck": { ".write": "newData.exists()" }
+    },
+
+    "users": {
+      ".read": true,
+      "$user": { ".write": "newData.exists()" }
+    },
+
+    "weekly_collection_progress": {
+      ".read": true,
+      "$week": { ".write": "newData.exists()" }
+    }
+  }
+}

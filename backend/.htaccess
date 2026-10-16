@@ -1,0 +1,20 @@
+# Bundle 1: files that must never be opened from the web.
+# PHP can still include them (includes do not go through the web server).
+<FilesMatch "\.(sql|md|txt|log|bak|zip|gz|ini|json)$">
+  <IfModule mod_authz_core.c>
+    Require all denied
+  </IfModule>
+  <IfModule !mod_authz_core.c>
+    Order allow,deny
+    Deny from all
+  </IfModule>
+</FilesMatch>
+<FilesMatch "^(firebase_backup|debug_schema|apply_db_changes|update_db_schema|update_load_history_schema|preflight_migration|test_connection|check_php|db_config|email_config|email_credentials\.example|auth_config|approval_config|auth_token|auth_session_lib|rate_limit_lib|ai_config_loader|assignment_lib|complaint_lib|load_history_lib|cleanup_logic|notify_password_change)\.php$">
+  <IfModule mod_authz_core.c>
+    Require all denied
+  </IfModule>
+  <IfModule !mod_authz_core.c>
+    Order allow,deny
+    Deny from all
+  </IfModule>
+</FilesMatch>

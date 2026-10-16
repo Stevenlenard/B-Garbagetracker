@@ -311,8 +311,9 @@ class _DataManagementModalState extends State<DataManagementModal> {
         await _database.ref('$node/${widget.user.userId}').update({
           'name': nameCtrl.text.trim(),
           'username': usernameCtrl.text.trim(),
-          'email': emailCtrl.text.trim(),
-          'phone': phoneCtrl.text.trim(),
+          // The `users` node is listed publicly (live map); contact details stay in MySQL only.
+          if (node == 'residents') 'email': emailCtrl.text.trim(),
+          if (node == 'residents') 'phone': phoneCtrl.text.trim(),
           if (widget.user.role == 'resident') 'purok': selectedPurok,
           if (widget.user.role == 'driver') 'preferred_truck': truckCtrl.text.trim(),
         });
