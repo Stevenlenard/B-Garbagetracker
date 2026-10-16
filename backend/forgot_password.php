@@ -3,6 +3,7 @@ header("Content-Type: application/json");
 date_default_timezone_set('Asia/Manila'); // Set to local timezone
 require_once 'db_config.php';
 require_once 'email_config.php';
+require_once 'rate_limit_lib.php';
 
 // PHPMailer Includes
 use PHPMailer\PHPMailer\PHPMailer;
@@ -20,7 +21,18 @@ if (!$data || empty($data->email)) {
     exit;
 }
 
-$email = $data->email;
+$email = strtolower(trim((string)$data->email));
+// Same answer whether or not the email is registered (no account discovery).
+$gtGeneric = ["success" => true, "message" => "If this email is registered, a 6-digit code has been sent. It expires in 3 minutes."];
+// Resend cooldown 60 s, at most 5 codes per hour per email, 20 per hour per IP.
+$gtWait = max(gt_rl_blocked('otp_send', $email, 1, 60), gt_rl_blocked('otp_send_hour', $email, 5, 3600), gt_rl_blocked('otp_send_ip', gt_client_ip(), 20, 3600));
+if ($gtWait > 0) {
+    echo json_encode(["success" => false, "retry_after" => $gtWait, "message" => "Please wait " . ($gtWait < 60 ? "$gtWait seconds" : gt_rl_wait_text($gtWait)) . " before requesting another code."]);
+    exit;
+}
+gt_rl_hit('otp_send', $email, 60);
+gt_rl_hit('otp_send_hour', $email, 3600);
+gt_rl_hit('otp_send_ip', gt_client_ip(), 3600);
 
 try {
     // 1. Check if email exists
@@ -30,12 +42,13 @@ try {
     $user = $stmt->fetch();
 
     if (!$user) {
-        echo json_encode(["success" => false, "message" => "Email address not found"]);
+        echo json_encode($gtGeneric);
         exit;
     }
 
     // 2. Generate 6-digit OTP
-    $otp = sprintf("%06d", mt_rand(1, 999999));
+    $otp = sprintf("%06d", random_int(0, 999999)); // cryptographically secure
+    gt_rl_clear('otp_verify', $email);
     $expiry = date("Y-m-d H:i:s", strtotime("+3 minutes"));
 
     // 3. Save to password_resets table

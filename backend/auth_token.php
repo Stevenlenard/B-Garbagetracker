@@ -155,3 +155,48 @@ function gt_require_subject($role, $id)
     }
     return null;
 }
+
+/* ---------------------------------------------------------------------------------------------
+ * Bundle 1 (server-side authorization on every endpoint)
+ * ------------------------------------------------------------------------------------------- */
+
+/**
+ * Every protected endpoint: a valid token with one of [$roles] is required, always (no token-less
+ * legacy access). Returns the token payload ['sub' => id, 'role' => role, ...].
+ */
+function gt_guard(array $roles)
+{
+    return gt_require_verified_role($roles);
+}
+
+/** Requests that change or delete data must be POST (no destructive links). */
+function gt_require_post()
+{
+    if (strtoupper($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
+        gt_auth_fail(405, "Use POST for this action.");
+    }
+}
+
+/**
+ * The account a self-service request acts on: ALWAYS the caller's own account from the token.
+ * A different id or role sent by the client is refused (IDOR protection).
+ * Returns [role, id].
+ */
+function gt_acting_account(array $auth, $claimedId = null, $claimedRole = null)
+{
+    $role = strtolower((string)$auth['role']);
+    $id = (string)$auth['sub'];
+    $ci = ($claimedId === null || $claimedId === '') ? null : (string)$claimedId;
+    $cr = ($claimedRole === null || $claimedRole === '') ? null : strtolower((string)$claimedRole);
+    if (($ci !== null && $ci !== $id) || ($cr !== null && $cr !== $role)) {
+        gt_auth_fail(403, "You can only change your own account.");
+    }
+    return [$role, $id];
+}
+
+/** Generic error for clients; the detail goes to the server log only (no schema/SQL leaks). */
+function gt_server_error($e, $message = "Something went wrong. Please try again.")
+{
+    error_log('[GT] ' . basename($_SERVER['SCRIPT_NAME'] ?? '') . ': ' . ($e instanceof Throwable ? $e->getMessage() : (string)$e));
+    echo json_encode(["success" => false, "message" => $message]);
+}

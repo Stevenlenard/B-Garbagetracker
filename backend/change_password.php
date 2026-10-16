@@ -1,6 +1,9 @@
 <?php
 header("Content-Type: application/json");
 require_once 'db_config.php';
+require_once 'auth_token.php';
+$gtAuth = gt_guard(['admin', 'driver', 'resident']); // Bundle 1: login + role required
+gt_require_post();
 require_once 'email_config.php';
 
 use PHPMailer\PHPMailer\PHPMailer;
@@ -14,6 +17,7 @@ require 'PHPMailer/SMTP.php';
 $data = json_decode(file_get_contents("php://input"), true);
 $id = $_POST['id'] ?? $data['id'] ?? null;
 $role = $_POST['role'] ?? $data['role'] ?? null;
+list($role, $id) = gt_acting_account($gtAuth, $id, $role); // own account only
 $old_password = $_POST['old_password'] ?? $data['old_password'] ?? null;
 $new_password = $_POST['new_password'] ?? $data['new_password'] ?? null;
 

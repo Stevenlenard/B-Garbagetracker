@@ -1,6 +1,8 @@
 <?php
 header("Content-Type: application/json");
 require_once 'db_config.php';
+require_once 'auth_token.php';
+$gtAuth = gt_guard(['admin', 'driver', 'resident']); // Bundle 1: login + role required
 
 $trip_id = $_GET['trip_id'] ?? null;
 

@@ -1,11 +1,15 @@
 <?php
 header("Content-Type: application/json");
 require_once 'db_config.php';
+require_once 'auth_token.php';
+$gtAuth = gt_guard(['admin', 'driver', 'resident']); // Bundle 1: login + role required
+gt_require_post();
 
 // Support both JSON (Retrofit/Flutter) and Form-Data (POST)
 $json_data = json_decode(file_get_contents("php://input"), true);
 $user_id = $_POST['user_id'] ?? $json_data['user_id'] ?? null;
 $role = $_POST['role'] ?? $json_data['role'] ?? null;
+list($role, $user_id) = gt_acting_account($gtAuth, $user_id, $role); // own account only
 $name = $_POST['name'] ?? $json_data['name'] ?? null;
 $phone = $_POST['phone'] ?? $json_data['phone'] ?? null;
 $email = $_POST['email'] ?? $json_data['email'] ?? null;

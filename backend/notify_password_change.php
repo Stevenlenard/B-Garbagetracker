@@ -75,7 +75,7 @@ function send_password_change_notification($email) {
         $mail->send();
         return true;
     } catch (Exception $e) {
-        error_log(\"Email Notification Error: {$mail->ErrorInfo}\");
+        error_log("Email Notification Error: {$mail->ErrorInfo}");
         return false;
     }
 }

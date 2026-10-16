@@ -6,6 +6,7 @@ require_once 'auto_backup_checker.php';
 require_once 'email_config.php';
 require_once 'auth_token.php';
 require_once 'auth_session_lib.php';
+require_once 'rate_limit_lib.php';
 @include_once 'approval_config.php';
 
 use PHPMailer\PHPMailer\PHPMailer;
@@ -103,6 +104,15 @@ if ($data && !empty($data->username_or_email)) {
 }
 
 if (!empty($identifier) && !empty($password)) {
+    // Brute-force protection: 5 wrong passwords per account per 15 min; 100 per IP per 15 min.
+    $gtIp = gt_client_ip();
+    $gtWait = max(gt_rl_blocked('login_acct', $identifier, 5, 900), gt_rl_blocked('login_ip', $gtIp, 100, 900));
+    if ($gtWait > 0) {
+        header('Retry-After: ' . $gtWait);
+        echo json_encode(["success" => false, "locked" => true, "retry_after" => $gtWait,
+            "message" => "Too many sign-in attempts. Please wait " . gt_rl_wait_text($gtWait) . " or reset your password."]);
+        exit;
+    }
     try {
         // 1. Search sa 'users' table (Admin/Driver)
         $query = "SELECT user_id, username, name, email, phone, license_number, preferred_truck, role, password_hash, is_archived, two_factor_enabled FROM users WHERE username = ? OR email = ?";
@@ -111,6 +121,7 @@ if (!empty($identifier) && !empty($password)) {
         $user = $stmt->fetch(PDO::FETCH_ASSOC);
 
         if ($user && password_verify($password, $user['password_hash'])) {
+            gt_rl_clear('login_acct', $identifier);
             if ($user['is_archived'] == 1) {
                 log_access($conn, $user['user_id'], $user['username'], "Login Attempt (Archived Account)");
                 $msg = ($user['role'] === 'driver')
@@ -212,6 +223,7 @@ if (!empty($identifier) && !empty($password)) {
         $resident = $stmt->fetch(PDO::FETCH_ASSOC);
 
         if ($resident && password_verify($password, $resident['password_hash'])) {
+            gt_rl_clear('login_acct', $identifier);
             if ($resident['is_archived'] == 1) {
                 echo json_encode(["success" => false, "message" => "Account pending approval"]);
                 exit;
@@ -232,6 +244,8 @@ if (!empty($identifier) && !empty($password)) {
             exit;
         }
 
+        gt_rl_hit('login_acct', $identifier, 900);
+        gt_rl_hit('login_ip', $gtIp, 900);
         echo json_encode(["success" => false, "message" => "Invalid username/email or password"]);
     } catch (PDOException $e) {
         echo json_encode(["success" => false, "message" => "Database Error"]);

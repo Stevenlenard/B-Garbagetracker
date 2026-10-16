@@ -2,6 +2,8 @@
 header("Content-Type: application/json");
 date_default_timezone_set('Asia/Manila');
 require_once 'db_config.php';
+require_once 'auth_token.php';
+require_once 'rate_limit_lib.php';
 
 $data = json_decode(file_get_contents("php://input"));
 
@@ -10,8 +12,17 @@ if (!$data || empty($data->email) || empty($data->otp) || empty($data->password)
     exit;
 }
 
-$email = $data->email;
-$otp = $data->otp;
+$email = strtolower(trim((string)$data->email));
+$otp = trim((string)$data->otp);
+if (strlen((string)$data->password) < 6) {
+    echo json_encode(["success" => false, "message" => "Use at least 6 characters for the new password."]);
+    exit;
+}
+if (gt_rl_blocked('otp_verify', $email, 5, 900) > 0) {
+    $conn->prepare("DELETE FROM password_resets WHERE email = ?")->execute([$email]);
+    echo json_encode(["success" => false, "message" => "Too many wrong codes. Please request a new code."]);
+    exit;
+}
 $new_password = password_hash($data->password, PASSWORD_BCRYPT);
 
 try {
@@ -23,6 +34,7 @@ try {
     $reset = $stmt->fetch();
 
     if (!$reset) {
+        gt_rl_hit('otp_verify', $email, 900);
         echo json_encode(["success" => false, "message" => "Security verification failed. Please try again."]);
         exit;
     }
@@ -46,6 +58,6 @@ try {
     echo json_encode(["success" => true, "message" => "Password updated successfully"]);
 
 } catch (PDOException $e) {
-    echo json_encode(["success" => false, "message" => "Database Error: " . $e->getMessage()]);
+    gt_server_error($e);
 }
 ?>

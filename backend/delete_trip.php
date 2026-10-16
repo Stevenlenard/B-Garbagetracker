@@ -10,6 +10,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 }
 
 require_once 'db_config.php';
+require_once 'auth_token.php';
+$gtAuth = gt_guard(['admin']); // Bundle 1: login + role required
+gt_require_post();
 
 $rawInput = file_get_contents("php://input");
 $data = json_decode($rawInput, true);

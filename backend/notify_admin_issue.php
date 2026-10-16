@@ -2,6 +2,9 @@
 header("Content-Type: application/json");
 date_default_timezone_set('Asia/Manila');
 require_once 'db_config.php';
+require_once 'auth_token.php';
+$gtAuth = gt_guard(['driver']); // Bundle 1: login + role required
+gt_require_post();
 require_once 'email_config.php';
 
 // PHPMailer Includes

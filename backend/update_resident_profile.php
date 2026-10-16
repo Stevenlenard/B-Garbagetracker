@@ -1,9 +1,11 @@
 <?php
 header("Content-Type: application/json");
 require_once 'db_config.php';
+require_once 'auth_token.php';
+$gtAuth = gt_guard(['resident']); // Bundle 1: login + role required
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $userId = $_POST['user_id'] ?? null;
+    list(, $userId) = gt_acting_account($gtAuth, $_POST['user_id'] ?? null, 'resident'); // own account only
     $name = $_POST['name'] ?? null;
     $email = $_POST['email'] ?? null;
     $phone = $_POST['phone'] ?? null;

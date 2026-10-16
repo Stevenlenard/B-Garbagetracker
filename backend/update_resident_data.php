@@ -5,6 +5,9 @@ header("Access-Control-Allow-Methods: POST, GET, OPTIONS");
 header("Content-Type: application/json");
 
 require_once 'db_config.php';
+require_once 'auth_token.php';
+$gtAuth = gt_guard(['admin', 'driver', 'resident']); // Bundle 1: login + role required
+gt_require_post();
 
 // Check OPTIONS request for CORS preflight
 if ($_SERVER['REQUEST_METHOD'] == 'OPTIONS') {
@@ -32,6 +35,7 @@ if (empty($user_id)) {
     $purok = $json_data['purok'] ?? null;
 }
 
+list($role, $user_id) = gt_acting_account($gtAuth, $user_id, $role); // own account only
 if (!empty($user_id) && !empty($role) && !empty($name)) {
     try {
         $table = "residents";

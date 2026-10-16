@@ -5,6 +5,10 @@
  */
 header("Content-Type: application/json");
 require_once 'db_config.php';
+// Downloads open as a browser link (no custom header): accept the short-lived token as ?gt_token=.
+if (empty($_SERVER['HTTP_X_GT_TOKEN']) && !empty($_GET['gt_token'])) $_SERVER['HTTP_X_GT_TOKEN'] = (string)$_GET['gt_token'];
+require_once 'auth_token.php';
+$gtAuth = gt_guard(['admin']); // Bundle 1: login + role required
 
 $reports_dir = 'reports/complaints/';
 if (!file_exists($reports_dir)) {

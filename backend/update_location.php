@@ -1,6 +1,9 @@
 <?php
 require_once 'db_config.php';
-$user_id = $_POST['user_id'] ?? null;
+require_once 'auth_token.php';
+$gtAuth = gt_guard(['driver']); // Bundle 1: login + role required
+gt_require_post();
+list(, $user_id) = gt_acting_account($gtAuth, $_POST['user_id'] ?? null, 'driver');
 $lat = $_POST['latitude'] ?? null;
 $lng = $_POST['longitude'] ?? null;
 $truck_id = $_POST['truck_id'] ?? null;

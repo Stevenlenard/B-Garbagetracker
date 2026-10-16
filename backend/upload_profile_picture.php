@@ -6,6 +6,9 @@
 
 // 1. Core Config & CORS (Already handled in db_config but explicit for safety)
 require_once 'db_config.php';
+require_once 'auth_token.php';
+$gtAuth = gt_guard(['admin', 'driver', 'resident']); // Bundle 1: login + role required
+gt_require_post();
 header("Content-Type: application/json");
 
 // 2. Setup Directories
@@ -17,6 +20,7 @@ if (!is_dir($uploadDir)) {
 // 3. Get Data
 $user_id = $_POST['user_id'] ?? null;
 $role = $_POST['role'] ?? null;
+list($role, $user_id) = gt_acting_account($gtAuth, $user_id, $role); // own account only
 
 if (empty($user_id) || empty($role)) {
     echo json_encode(["success" => false, "message" => "Missing User ID or Role."]);

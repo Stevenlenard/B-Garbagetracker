@@ -5,6 +5,8 @@
  */
 header("Content-Type: application/json");
 require_once 'db_config.php';
+require_once 'auth_token.php';
+$gtAuth = gt_guard(['admin']); // Bundle 1: login + role required
 require_once 'cleanup_logic.php';
 
 $backup_dir = 'backups/';

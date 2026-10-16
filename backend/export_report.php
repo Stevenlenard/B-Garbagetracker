@@ -4,6 +4,10 @@
  * Generates a stylized Excel report (HTML/XLS) matching the UI screenshots.
  */
 require_once 'db_config.php';
+// Downloads open as a browser link (no custom header): accept the short-lived token as ?gt_token=.
+if (empty($_SERVER['HTTP_X_GT_TOKEN']) && !empty($_GET['gt_token'])) $_SERVER['HTTP_X_GT_TOKEN'] = (string)$_GET['gt_token'];
+require_once 'auth_token.php';
+$gtAuth = gt_guard(['admin']); // Bundle 1: login + role required
 
 // Check if format is XLS
 if (($_GET['format'] ?? '') !== 'xls') {

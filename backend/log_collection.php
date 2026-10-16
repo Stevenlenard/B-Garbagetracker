@@ -1,5 +1,8 @@
 <?php
 require_once 'db_config.php';
+require_once 'auth_token.php';
+$gtAuth = gt_guard(['driver']); // Bundle 1: login + role required
+gt_require_post();
 $truck_id = $_POST['truck_id'] ?? null;
 $zone_name = $_POST['zone_name'] ?? null;
 $type = $_POST['type'] ?? null;

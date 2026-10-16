@@ -733,6 +733,9 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
       'total_drivers': "${_allDriverRoutes.values.map((e) => e['driver_id']).toSet().length}",
     };
 
+    // A download opens as a plain browser link: the short-lived sign-in token travels with it.
+    final String? token = await SessionManager.getAuthToken();
+    if (token != null) queryParams['gt_token'] = token;
     final uri = Uri.parse(exportUrl).replace(queryParameters: queryParams);
 
     if (await canLaunchUrl(uri)) {

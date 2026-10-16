@@ -1,6 +1,8 @@
 <?php
 header("Content-Type: application/json");
 require_once 'db_config.php';
+require_once 'auth_token.php';
+$gtAuth = gt_guard(['admin']); // Bundle 1: login + role required
 
 try {
     $stmt = $conn->prepare("SELECT * FROM access_logs ORDER BY timestamp DESC LIMIT 50");

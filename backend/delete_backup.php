@@ -1,10 +1,13 @@
 <?php
 header("Content-Type: application/json");
+require_once 'auth_token.php';
+$gtAuth = gt_guard(['admin']); // Bundle 1
+gt_require_post();
 $backup_dir = 'backups/';
 
 // Handle both POST (JSON) and GET for flexibility
 $data = json_decode(file_get_contents("php://input"), true);
-$filename = $data['filename'] ?? $_GET['filename'] ?? null;
+$filename = $data['filename'] ?? null; // POST only (no destructive GET links)
 
 if (!$filename) {
     echo json_encode(["success" => false, "message" => "Filename not specified"]);

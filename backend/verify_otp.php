@@ -4,6 +4,7 @@ date_default_timezone_set('Asia/Manila');
 require_once 'db_config.php';
 require_once 'auth_token.php';
 require_once 'auth_session_lib.php';
+require_once 'rate_limit_lib.php';
 
 $data = json_decode(file_get_contents("php://input"));
 
@@ -12,8 +13,14 @@ if (!$data || empty($data->email) || empty($data->otp)) {
     exit;
 }
 
-$email = $data->email;
-$otp = $data->otp;
+$email = strtolower(trim((string)$data->email));
+$otp = trim((string)$data->otp);
+// 5 wrong codes -> the code is cancelled and a new one must be requested.
+if (gt_rl_blocked('otp_verify', $email, 5, 900) > 0) {
+    $conn->prepare("DELETE FROM password_resets WHERE email = ?")->execute([$email]);
+    echo json_encode(["success" => false, "message" => "Too many wrong codes. Please request a new code."]);
+    exit;
+}
 
 try {
     $now = date("Y-m-d H:i:s");
@@ -22,8 +29,12 @@ try {
     $stmt = $conn->prepare("SELECT email FROM password_resets WHERE email = ? AND token = ? AND expiry > ?");
     $stmt->execute([$email, $otp, $now]);
     if ($stmt->fetch()) {
-        // Clean up the OTP after successful verification
-        $conn->prepare("DELETE FROM password_resets WHERE email = ?")->execute([$email]);
+        gt_rl_clear('otp_verify', $email);
+        // Sign-in (2FA) codes are used up now. A password-reset code stays valid for the final
+        // reset step (reset_password_final.php checks it again and deletes it).
+        if (($data->purpose ?? '') === 'login') {
+            $conn->prepare("DELETE FROM password_resets WHERE email = ?")->execute([$email]);
+        }
 
         $response = ["success" => true, "message" => "OTP verified successfully"];
         if (($data->purpose ?? '') === 'login') {
@@ -53,9 +64,10 @@ try {
         exit;
     }
 
+    gt_rl_hit('otp_verify', $email, 900);
     echo json_encode(["success" => false, "message" => "Invalid or expired verification code"]);
 
 } catch (PDOException $e) {
-    echo json_encode(["success" => false, "message" => "Database Error: " . $e->getMessage()]);
+    gt_server_error($e);
 }
 ?>

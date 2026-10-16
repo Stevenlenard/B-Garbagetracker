@@ -1894,7 +1894,10 @@ class _AdminSettingsScreenState extends State<AdminSettingsScreen> with TickerPr
   }
 
   Future<void> _handleExportData() async {
-    final String exportUrl = "${ApiClient.baseUrl}export_report.php?format=xls";
+    // A download opens as a plain browser link: the short-lived sign-in token travels with it.
+    final String? token = await SessionManager.getAuthToken();
+    final String exportUrl = "${ApiClient.baseUrl}export_report.php?format=xls"
+        "${token == null ? '' : '&gt_token=${Uri.encodeQueryComponent(token)}'}";
     await _downloadFile(exportUrl);
   }
 

@@ -6,6 +6,8 @@
 
 header("Content-Type: application/json");
 require_once 'db_config.php';
+require_once 'auth_token.php';
+$gtAuth = gt_guard(['admin']); // Bundle 1: login + role required
 
 require_once 'ai_config_loader.php';
 $ai_cfg = gt_ai_config(); // AI disabled unless configured outside the web root

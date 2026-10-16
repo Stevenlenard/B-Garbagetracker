@@ -1,10 +1,14 @@
 <?php
 header("Content-Type: application/json");
 require_once 'db_config.php';
+require_once 'auth_token.php';
+$gtAuth = gt_guard(['admin', 'driver', 'resident']); // Bundle 1: login + role required
 
 $start_date = $_GET['start_date'] ?? null;
 $end_date = $_GET['end_date'] ?? null;
 $driver_id = $_GET['driver_id'] ?? null;
+// Drivers see only their own trips (whatever driver_id the client sends).
+if ($gtAuth['role'] === 'driver') $driver_id = (string)$gtAuth['sub'];
 $truck_id = $_GET['truck_id'] ?? null;
 $area = $_GET['area'] ?? null;
 $status = $_GET['status'] ?? null;

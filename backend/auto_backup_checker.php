@@ -4,6 +4,11 @@
  * It can be triggered by a Cron Job or called from other scripts.
  */
 include_once 'db_config.php';
+// Opened directly as a URL: administrators only. (login.php includes this file; that path is unchanged.)
+if (realpath($_SERVER['SCRIPT_FILENAME'] ?? '') === realpath(__FILE__)) {
+    require_once 'auth_token.php';
+    gt_guard(['admin']);
+}
 
 if (!function_exists('generate_sql_dump_auto')) {
     function generate_sql_dump_auto($conn) {

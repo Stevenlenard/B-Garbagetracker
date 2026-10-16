@@ -1,9 +1,12 @@
 <?php
 header("Content-Type: application/json");
 require_once 'db_config.php';
+require_once 'auth_token.php';
+$gtAuth = gt_guard(['admin', 'driver', 'resident']); // Bundle 1: login + role required
 
 $user_id = $_GET['user_id'] ?? null;
-$role = $_GET['role'] ?? 'admin';
+$role = $_GET['role'] ?? null;
+list($role, $user_id) = gt_acting_account($gtAuth, $user_id, $role); // own account only
 
 if ($user_id) {
     try {
