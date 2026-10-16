@@ -1,5 +1,8 @@
 # Firebase Realtime Database rules
 
+**Published 2026-10-16.** The previous rules were fully open (`.read`/`.write` true); a copy is in the
+2026-10-16 full-backup folder (`rules_before_publish_2026-10-16.json`).
+
 `database.rules.json` replaces the open rules (anyone could read, change or wipe the whole
 database). It must be published by an account that has access to the Firebase project
 `garbagesis-78d39`.
