@@ -91,6 +91,9 @@ if ($Platform -eq 'web') {
     & flutter build web --release "--dart-define-from-file=$cfgPath"
     if ($LASTEXITCODE -ne 0) { Fail 'flutter build web failed' }
     Test-Artifact ([IO.File]::ReadAllText((Join-Path $root 'build\web\main.dart.js'))) 'main.dart.js'
+    # Versioned app files + no service worker, so no browser keeps an outdated app after a deploy.
+    & python (Join-Path $root 'scripts\web_cache_bust.py') (Join-Path $root 'build\web')
+    if ($LASTEXITCODE -ne 0) { Fail 'web_cache_bust failed' }
 
     # Package = Flutter app files only. .htaccess and .well-known stay as they are on the server
     # (review build\web\.htaccess separately before replacing the live one).
