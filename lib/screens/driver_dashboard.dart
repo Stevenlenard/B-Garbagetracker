@@ -35,6 +35,7 @@ import '../utils/custom_notification.dart';
 import '../utils/fleet_status.dart';
 import '../utils/gps_fix_policy.dart';
 import '../utils/gps_quality.dart';
+import '../services/background_tracking.dart';
 import '../services/server_clock.dart';
 import '../utils/tracking_telemetry.dart';
 import '../services/rtdb_port.dart';
@@ -1622,6 +1623,11 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
 
       _autoStartPending = false;
       _startFixes.clear();
+      if (!kIsWeb && mounted) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) BackgroundTracking.askOnce(context);
+        });
+      }
       if (kIsWeb && !_webTrackingNoticeShown && mounted) {
         _webTrackingNoticeShown = true;
         CustomSnackBar.show(context,
@@ -2901,6 +2907,9 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
           return;
         }
 
+        // Closing the app would stop GPS and take the truck offline, so on Android Back only minimises it.
+        if (await BackgroundTracking.moveToBack()) return;
+        if (!context.mounted) return;
         final bool shouldExit = await _showExitConfirmationDialog(context);
         if (shouldExit) {
           SystemNavigator.pop();
