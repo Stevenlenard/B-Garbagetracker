@@ -267,10 +267,7 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> with TickerProvid
     _syncPhpLocations();
     _phpSyncTimer = Timer.periodic(const Duration(seconds: 3), (_) => _syncPhpLocations());
     // Freshness changes without any event (a crashed driver writes nothing).
-    _fleetAgingTimer = Timer.periodic(const Duration(seconds: 15), (_) {
-      _refreshTrucklessDrivers();
-      _processMergedTrucks();
-    });
+    _fleetAgingTimer = Timer.periodic(const Duration(seconds: 15), (_) => _processMergedTrucks());
     _refreshRotationController = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 1),
@@ -945,7 +942,6 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> with TickerProvid
             _genuinelyOnlineDriverNamesUpper.addAll(genuinelyOnlineDriverNamesUpper);
           });
           _processMergedTrucks();
-          _refreshTrucklessDrivers();
         }
       }
     });
@@ -1004,60 +1000,6 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> with TickerProvid
       }
       _processMergedTrucks();
     });
-  }
-
-  /// Live trips of signed-in drivers that have no truck node on the map.
-  final Map<String, Map<String, dynamic>> _trucklessDrivers = {};
-  bool _trucklessBusy = false;
-
-  /// A driver without an assigned truck publishes no `truck_locations` node, only their live trip
-  /// (`driver_routes/{trip}`), so the fleet below never saw them. Those drivers are read from the trip
-  /// instead and shown as "No truck assigned". Simulated trips and ended trips are never shown.
-  Future<void> _refreshTrucklessDrivers() async {
-    if (_trucklessBusy || !mounted) return;
-    _trucklessBusy = true;
-    try {
-      final Set<String> covered = _trucks
-          .where((Map<dynamic, dynamic> t) => t['no_truck'] != true)
-          .map((Map<dynamic, dynamic> t) => t['driver_id'].toString())
-          .toSet();
-      final Map<String, Map<String, dynamic>> found = <String, Map<String, dynamic>>{};
-      for (final String id in _genuinelyOnlineDriverIds.where((String d) => !covered.contains(d)).take(20)) {
-        final Object? tripId = (await _database.ref('users/$id/current_trip_id').get()).value;
-        if (tripId == null || tripId.toString().isEmpty) continue;
-        final DatabaseReference trip = _database.ref('driver_routes/$tripId');
-        final List<Object?> v = (await Future.wait(<String>['last_lat', 'last_lng', 'last_seen', 'route_status', 'is_simulation']
-                .map((String k) => trip.child(k).get())))
-            .map((DataSnapshot x) => x.value)
-            .toList();
-        final double lat = double.tryParse('${v[0]}') ?? 0, lng = double.tryParse('${v[1]}') ?? 0;
-        final int seen = FleetStatus.parseTimestampMs(v[2]);
-        final String status = '${v[3]}'.toUpperCase();
-        if (lat == 0 || lng == 0 || v[4] == true || FleetStatus.isInactiveStatus(status)) continue;
-        found[id] = <String, dynamic>{
-          'truck_id': 'NO TRUCK',
-          'truckNumber': 'No truck assigned',
-          'plate_number': '',
-          'driver_name': _userNamesById[id] ?? 'Driver',
-          'driver_id': id,
-          'latitude': lat,
-          'longitude': lng,
-          'isOnline': true,
-          'status': status == 'NULL' ? 'ACTIVE' : status,
-          'lastSeen': seen,
-          'no_truck': true,
-        };
-      }
-      if (!mounted) return;
-      _trucklessDrivers
-        ..clear()
-        ..addAll(found);
-      _processMergedTrucks();
-    } catch (e) {
-      debugPrint('Truckless driver lookup failed: $e');
-    } finally {
-      _trucklessBusy = false;
-    }
   }
 
   void _processMergedTrucks() {
@@ -1196,13 +1138,6 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> with TickerProvid
 
     _phpLocations.forEach((key, value) {
       if (value is Map) processLocationNode(key, value);
-    });
-
-    // Drivers on a live trip with no truck assigned (see _refreshTrucklessDrivers).
-    _trucklessDrivers.forEach((String id, Map<String, dynamic> item) {
-      if (FleetStatus.isFresh((item['lastSeen'] as num?)?.toInt() ?? 0, now)) {
-        driverToLatestTruck.putIfAbsent(id.toUpperCase(), () => item);
-      }
     });
 
     final List<Map<dynamic, dynamic>> mergedList = driverToLatestTruck.values.toList();

@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter/foundation.dart';
 
+import 'truckless_drivers.dart';
+
 enum ChildEventType { added, changed, removed }
 
 class ChildEvent {
@@ -162,6 +164,7 @@ Stream<ChildEvent> _firebaseChildEvents() {
   final DatabaseReference ref = FirebaseDatabase.instance.ref('truck_locations');
   late final StreamController<ChildEvent> c;
   final List<StreamSubscription<DatabaseEvent>> subs = <StreamSubscription<DatabaseEvent>>[];
+  Object? lastUsers;
   c = StreamController<ChildEvent>(
     onListen: () {
       void forward(Stream<DatabaseEvent> s, ChildEventType t) {
@@ -175,6 +178,50 @@ Stream<ChildEvent> _firebaseChildEvents() {
       forward(ref.onChildAdded, ChildEventType.added);
       forward(ref.onChildChanged, ChildEventType.changed);
       forward(ref.onChildRemoved, ChildEventType.removed);
+
+      // Drivers on a live trip with no truck assigned have no node above; add a stand-in per driver
+      // (see TrucklessDrivers) and remove it again when they stop, get a truck or go offline.
+      final Set<String> shown = <String>{};
+      bool busy = false, again = false;
+      Future<void> sync(Object? usersValue) async {
+        if (busy) {
+          again = true;
+          return;
+        }
+        busy = true;
+        try {
+          final Map<dynamic, dynamic> users = usersValue is Map ? usersValue : <dynamic, dynamic>{};
+          final Map<String, String> cand = TrucklessDrivers.candidates(users, DateTime.now().millisecondsSinceEpoch);
+          final Set<String> now = <String>{};
+          for (final MapEntry<String, String> e in cand.entries) {
+            final Map<String, dynamic>? node =
+                await TrucklessDrivers.load(FirebaseDatabase.instance, e.key, e.value, users[e.key] as Map);
+            if (node == null) continue;
+            final String key = '${TrucklessDrivers.keyPrefix}${e.key}';
+            now.add(key);
+            if (!c.isClosed) c.add(ChildEvent(shown.contains(key) ? ChildEventType.changed : ChildEventType.added, key, node));
+          }
+          for (final String gone in shown.difference(now)) {
+            if (!c.isClosed) c.add(ChildEvent(ChildEventType.removed, gone));
+          }
+          shown
+            ..clear()
+            ..addAll(now);
+        } catch (e) {
+          debugPrint('[TRUCK FEED] no-truck drivers: $e');
+        } finally {
+          busy = false;
+        }
+        if (again && !c.isClosed) {
+          again = false;
+          await sync(lastUsers);
+        }
+      }
+
+      subs.add(FirebaseDatabase.instance.ref('users').onValue.listen((DatabaseEvent e) {
+        lastUsers = e.snapshot.value;
+        sync(lastUsers);
+      }, onError: (Object _) {}));
     },
     onCancel: () async {
       for (final StreamSubscription<DatabaseEvent> s in subs) {
