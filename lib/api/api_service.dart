@@ -24,6 +24,11 @@ class ApiService {
     return await _dio.get('get_users.php');
   }
 
+  /// Admin only. An empty [truckId] removes the assignment; a truck already used by another driver is refused.
+  Future<Response> assignDriverTruck(int driverId, String truckId) async {
+    return await _dio.post('assign_driver_truck.php', data: {'driver_id': driverId, 'truck_id': truckId});
+  }
+
   Future<Response> approveUser(int id, String role) async {
     return await _dio.post('approve_user.php', data: {
       'user_id': id,

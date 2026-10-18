@@ -6,6 +6,7 @@ import '../utils/app_theme.dart';
 import '../utils/responsive.dart';
 import '../utils/custom_notification.dart';
 import '../widgets/custom_snackbar.dart';
+import '../widgets/assign_truck_sheet.dart';
 
 class UserManagementScreen extends StatefulWidget {
   final bool isEmbedded;
@@ -1063,7 +1064,17 @@ class _UserManagementScreenState extends State<UserManagementScreen> with Ticker
                           const Text("DRIVER DETAILS", style: TextStyle(fontSize: 12, fontWeight: FontWeight.w900, color: Color(0xFFBDBDBD), letterSpacing: 1.2)),
                           const SizedBox(height: 16),
                           _buildDetailItem(Icons.badge_outlined, "License Number", user['license_number'] ?? "N/A"),
-                          _buildDetailItem(Icons.local_shipping_outlined, "Preferred Truck", user['preferred_truck'] ?? "N/A"),
+                          AssignedTruckTile(
+                            truckId: user['preferred_truck']?.toString(),
+                            onPressed: () async {
+                              final String? picked = await showAssignTruckSheet(context, driver: user as Map, users: _users, api: _apiService);
+                              if (picked == null || !mounted) return;
+                              user['preferred_truck'] = picked.isEmpty ? null : picked;
+                              setModalState(() {});
+                              CustomSnackBar.show(context, message: picked.isEmpty ? "Truck removed." : "Truck $picked assigned.");
+                              _fetchUsers(silent: true);
+                            },
+                          ),
                           const SizedBox(height: 8),
                         ],
                         
