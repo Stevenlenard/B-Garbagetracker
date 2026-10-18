@@ -111,7 +111,32 @@ class AnalyticsRecommendations {
           scope: scope,
           limitation: 'The absence of complaints does not measure resident satisfaction.',
         ));
+      } else {
+        out.add(Recommendation(
+          finding: 'All resident complaints filed in this period are resolved.',
+          evidence: '${i.totalResidentComplaints} of ${i.totalResidentComplaints} complaint(s) filed in the period are resolved.',
+          action: 'No complaint follow-up is needed.',
+          scope: scope,
+          limitation: 'Resolved complaints do not measure resident satisfaction.',
+        ));
       }
+    } else if (!noCollection) {
+      out.add(Recommendation(
+        finding: 'Complaint records could not be loaded.',
+        evidence: 'Complaint figures are left out of this period\'s recommendations.',
+        action: 'Check the connection and select the period again.',
+        scope: scope,
+      ));
+    }
+
+    // Complaints exist but no trip was recorded: say what was skipped instead of staying silent.
+    if (noCollection && !noComplaints) {
+      out.add(Recommendation(
+        finding: 'No collection trips were recorded in this period.',
+        evidence: i.collectionDataAvailable ? '0 collection trips, so visit and weight checks were skipped.' : 'Collection data could not be loaded, so visit and weight checks were skipped.',
+        action: 'Confirm that trips were made and that drivers were signed in and recording GPS.',
+        scope: scope,
+      ));
     }
 
     if (i.collectionDataAvailable && i.tripsConsidered > 0) {
@@ -141,6 +166,14 @@ class AnalyticsRecommendations {
           scope: scope,
           limitation: 'There is no schedule data, so it is not known whether these areas were due.',
         ));
+      } else if (i.truckStopAreas.isNotEmpty) {
+        out.add(Recommendation(
+          finding: 'Every collection area has a verified visit.',
+          evidence: '${i.truckStopAreas.length} of ${i.truckStopAreas.length} collection area(s) have at least one verified visit in the period.',
+          action: 'No coverage follow-up is needed.',
+          scope: scope,
+          limitation: 'A verified visit shows the truck stopped in the area, not that every household was served.',
+        ));
       }
 
       // 4. GPS evidence quality.
@@ -165,7 +198,24 @@ class AnalyticsRecommendations {
           scope: scope,
           limitation: 'The 5,000 kg capacity figure is an estimate, not verified truck data.',
         ));
+      } else if (i.completedTrips > 0) {
+        out.add(Recommendation(
+          finding: 'Waste volumes for this period are based on measured weights.',
+          evidence: '${i.measuredWeightTrips} of ${i.completedTrips} full load(s) have a recorded scale weight.',
+          action: 'Keep recording the scale weight for each full load.',
+          scope: scope,
+        ));
       }
+    }
+
+    if (out.isEmpty) {
+      out.add(Recommendation(
+        finding: 'No issues were found in this period.',
+        evidence: 'The recorded data raised no complaint, coverage, GPS or weight concern.',
+        action: 'Continue the routine checks.',
+        scope: scope,
+        limitation: 'This reflects the recorded data only.',
+      ));
     }
 
     return out;

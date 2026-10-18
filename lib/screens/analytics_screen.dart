@@ -7,6 +7,7 @@ import '../services/load_history_repository.dart';
 import '../utils/load_history.dart';
 import '../utils/collection_visits.dart';
 import '../utils/analytics_recommendations.dart';
+import '../utils/analytics_narrative.dart';
 import '../models/route_assignment.dart';
 import '../services/route_assignment_service.dart';
 import 'dart:async';
@@ -183,6 +184,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
   List<DriverTrip> _loadTrips = [];
   List<Map<String, dynamic>> _loadYearlyMonths = [];
   String _loadAiSummary = "";
+  bool _loadAiIsAi = false; // true only when the server returned a Gemini-written sentence, not its built-in one
   bool _isLoadAiLoading = false;
   double _measuredTodayVolume = 4200.0;
   double _measuredMonthlyVolume = 38600.0;
@@ -591,6 +593,36 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
       ? "${DateFormat('yyyy-MM-dd').format(_selectedDateRange.start)} to ${DateFormat('yyyy-MM-dd').format(_selectedDateRange.end)}"
       : DateFormat('yyyy-MM-dd').format(_selectedDateRange.start);
 
+  /// Everything the narrative blocks need, from the figures this screen already shows for the same area and period.
+  /// [combined]: complaint counts include driver truck issues (the operational blocks), not just resident complaints.
+  NarrativeInput _narrativeInput({bool combined = true}) {
+    final VisitSummary? v = _visitSummary;
+    final List<String> expected = _expectedVisitAreas;
+    final Map<String, int> counts = v?.countByArea() ?? const <String, int>{};
+    final int visited = expected.where((String a) => (counts[a] ?? 0) > 0).length;
+    final DateTime now = DateTime.now();
+    final bool includesToday = !_selectedDateRange.end.isBefore(DateTime(now.year, now.month, now.day));
+    final int unresolvedResident = _residentComplaintsUnresolved;
+    return NarrativeInput(
+      area: _selectedArea,
+      periodLabel: _periodLabel,
+      periodIncludesToday: includesToday,
+      loadTrips: _loadError == null ? _loadTripsCount : 0,
+      measuredLoads: _loadError == null ? _loadMeasuredCount : 0,
+      pending: combined ? (_complaintStatusData['Pending'] ?? 0).toInt() : unresolvedResident,
+      inProgress: combined ? (_complaintStatusData['In Progress'] ?? 0).toInt() : 0,
+      resolved: combined ? (_complaintStatusData['Resolved'] ?? 0).toInt() : (_residentComplaintsTotal - unresolvedResident),
+      expectedAreas: expected.length,
+      visitedAreas: visited,
+      verifiedVisits: v?.visits.length ?? 0,
+      tripsConsidered: v?.tripsConsidered ?? 0,
+      tripsWithoutEvidence: v?.tripsWithoutEvidence ?? 0,
+      collectionDataAvailable: v != null && _loadError == null,
+      complaintNoun: combined ? 'complaint/issue' : 'resident complaint',
+      complaintNounPlural: combined ? 'complaints/issues' : 'resident complaints',
+    );
+  }
+
   List<Recommendation> _buildRecommendations() {
     final VisitSummary? v = _visitSummary;
     return AnalyticsRecommendations.build(RecommendationInput(
@@ -728,7 +760,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
       'coll_time': "${_avgCollectionTime.toStringAsFixed(1)} hours",
       'waste_tomorrow': wasteTomorrow,
       'waste_weekly': wasteWeekly,
-      'insight1': _geminiSummary ?? "System performing normally.",
+      'insight1': _geminiSummary ?? AnalyticsNarrative.operationalSummary(_narrativeInput()),
       'insight2': _recommendations,
       'total_drivers': "${_allDriverRoutes.values.map((e) => e['driver_id']).toSet().length}",
     };
@@ -1208,6 +1240,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
         if (mounted) {
           setState(() {
             _loadAiSummary = response.data['summary'] ?? "";
+            _loadAiIsAi = response.data['is_ai_generated'] == true;
           });
         }
       }
@@ -4800,13 +4833,9 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
   }
 
   Widget _buildOperationalSummaryBlock() {
-    final int pendingComplaints = (_complaintStatusData['Pending'] ?? 0).toInt();
-    final int resolvedComplaints = (_complaintStatusData['Resolved'] ?? 0).toInt();
-    final bool hasLimitedActivity = _loadTripsCount == 0;
-
-    String dynamicFallback = hasLimitedActivity
-        ? "No full loads recorded for $_selectedArea during this period. $pendingComplaints pending and $resolvedComplaints resolved complaint(s)/issue(s) tracked. Verify log completeness."
-        : "$pendingComplaints complaint(s)/issue(s) remain pending and $resolvedComplaints were resolved during this period. $_loadTripsCount full load(s) were recorded in $_selectedArea.";
+    final String dynamicFallback = AnalyticsNarrative.operationalSummary(_narrativeInput());
+    final bool showAi = !_isAiLoading && _loadAiIsAi && _loadAiSummary.trim().isNotEmpty;
+    final String summaryText = showAi ? "$dynamicFallback\n\nAI summary: ${_loadAiSummary.trim()}" : dynamicFallback;
 
     return Container(
       padding: const EdgeInsets.all(20),
@@ -4824,7 +4853,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
               const SizedBox(width: 8),
               const Text("Operational summary", style: TextStyle(fontWeight: FontWeight.w900, fontSize: 14, color: Color(0xFF1A1A1A))),
               const Spacer(),
-              if (!_isAiLoading && _geminiSummary != null && _geminiSummary!.contains("EXECUTIVE OPERATIONAL CONTEXT REPORT"))
+              if (!_isAiLoading && ((_geminiSummary != null && _geminiSummary!.contains("EXECUTIVE OPERATIONAL CONTEXT REPORT")) || showAi))
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                   decoration: BoxDecoration(color: const Color(0xFFE0F2F1), borderRadius: BorderRadius.circular(6)),
@@ -4836,7 +4865,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
           _isAiLoading
               ? _buildShimmer(14, 0.8)
               : Text(
-                  _geminiSummary ?? dynamicFallback,
+                  _geminiSummary ?? summaryText,
                   style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: Color(0xFF2C3E50), height: 1.6),
                 ),
         ],
@@ -4845,22 +4874,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
   }
 
   Widget _buildRecommendedChecksBlock() {
-    final int pendingComplaints = (_complaintStatusData['Pending'] ?? 0).toInt();
-    final bool hasLimitedActivity = _loadTripsCount == 0;
-
-    String check1Title = pendingComplaints > 0
-        ? "Review $pendingComplaints pending complaint(s)"
-        : "Inspect routine collection schedule";
-    String check1Sub = pendingComplaints > 0
-        ? "Check category and location in $_selectedArea."
-        : "Zero pending issues recorded in $_selectedArea.";
-
-    String check2Title = hasLimitedActivity
-        ? "Verify collection logs"
-        : "Monitor fleet collection pace";
-    String check2Sub = hasLimitedActivity
-        ? "Confirm completed trips for selected period."
-        : "$_loadTripsCount full load(s) recorded.";
+    final List<NarrativeCheck> checks = AnalyticsNarrative.recommendedChecks(_narrativeInput());
 
     return Container(
       padding: const EdgeInsets.all(20),
@@ -4880,9 +4894,10 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
             ],
           ),
           const SizedBox(height: 14),
-          _checkItem("01", check1Title, check1Sub),
-          const SizedBox(height: 10),
-          _checkItem("02", check2Title, check2Sub),
+          for (int k = 0; k < checks.length; k++) ...<Widget>[
+            if (k > 0) const SizedBox(height: 10),
+            _checkItem('0${k + 1}', checks[k].title, checks[k].subtitle),
+          ],
         ],
       ),
     );
@@ -5895,16 +5910,24 @@ class _OperationalInsightsModalState extends State<_OperationalInsightsModal> wi
       }
     });
 
-    final summaryText = (widget.geminiSummary != null && widget.geminiSummary!.isNotEmpty && !widget.geminiSummary!.contains("Unable to generate"))
+    final int zeroVisitCount = activeAreas.where((a) => (widget.visitData[a] ?? 0) == 0 && a != "San Nicolas").length;
+    final String summaryText = (widget.geminiSummary != null && widget.geminiSummary!.isNotEmpty && !widget.geminiSummary!.contains("Unable to generate"))
         ? widget.geminiSummary!
-        : "${widget.selectedArea}: $totalVisits verified collection visit(s) and $totalComplaints resident complaint(s) in the selected period. "
-          "${needReviewArea.isNotEmpty ? "$needReviewArea has the most complaints ($needReviewComplaints) with $needReviewVisits verified visit(s)." : "No area has more than 2 complaints."}";
-
-    int zeroVisitCount = activeAreas.where((a) => (widget.visitData[a] ?? 0) == 0 && a != "San Nicolas").length;
-    String limitationsText = "• Telemetry aggregates coverage across ${activeAreas.length} active sector(s) in ${widget.selectedArea}.\n"
-        "${widget.selectedArea == "All Areas" ? "• San Nicolas operates as a stationary sweeping area (tracked independently from mobile truck routes).\n" : ""}"
-        "${zeroVisitCount > 0 ? "• $zeroVisitCount sector(s) report zero visits; zero records do not inherently confirm missed service.\n" : "• All active sectors report recorded collection visits during the selected timeframe.\n"}"
-        "• Area complaint counts include resident complaints only; driver truck issues are reported separately.";
+        : AnalyticsNarrative.areaSummary(
+            area: widget.selectedArea,
+            visits: totalVisits,
+            complaints: totalComplaints,
+            needsReviewArea: needReviewArea,
+            needsReviewComplaints: needReviewComplaints,
+            needsReviewVisits: needReviewVisits,
+            zeroVisitAreas: zeroVisitCount,
+            activeAreas: activeAreas.length,
+          );
+    final String limitationsText = AnalyticsNarrative.limitationLines(
+      area: widget.selectedArea,
+      activeAreas: activeAreas.length,
+      zeroVisitAreas: zeroVisitCount,
+    ).join('\n');
 
     final leftWidget = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
