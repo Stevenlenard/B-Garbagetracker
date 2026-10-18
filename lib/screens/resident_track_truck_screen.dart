@@ -24,6 +24,7 @@ import '../utils/custom_notification.dart';
 import '../services/truck_assignment_service.dart';
 import '../api/api_service.dart';
 import '../services/truck_locations_feed.dart';
+import '../utils/gps_quality.dart';
 import '../utils/marker_labels.dart';
 import '../widgets/map_style_toggle.dart';
 import '../widgets/mapbox_gate.dart';
@@ -641,7 +642,7 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
         data.forEach((key, value) => points.add(value as Map));
         points.sort((a, b) => (a['timestamp'] ?? 0).compareTo(b['timestamp'] ?? 0));
 
-        _lastRoutePoints[truckId] = points;
+        _lastRoutePoints[truckId] = RouteJitter.collapseMaps(points);
 
         if (_comparingTrucks.contains(truckId)) {
           _updateRoutePolyline(truckId, points);

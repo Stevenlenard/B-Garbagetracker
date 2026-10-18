@@ -34,6 +34,7 @@ import '../utils/app_localizations.dart';
 import '../utils/custom_notification.dart';
 import '../utils/fleet_status.dart';
 import '../utils/gps_fix_policy.dart';
+import '../utils/gps_quality.dart';
 import '../services/server_clock.dart';
 import '../utils/tracking_telemetry.dart';
 import '../services/rtdb_port.dart';
@@ -532,6 +533,9 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
   Map? _collectionRecord; // the frozen collection record (server copy)
   bool _isFinalizingFull = false;
   bool _autoStartPending = false; // login opens the collection trip by itself
+  /// Fixes received while no trip is open: the start point is chosen among them (StartFixPicker).
+  final List<_ArrivedFix> _startFixes = <_ArrivedFix>[];
+  bool _webTrackingNoticeShown = false;
   bool _completedThisLogin = false; // COMPLETED already confirmed in this login session
   int _lastAutoStartAttempt = 0;
   String? _newTripId; // stable id across retries of a failed create (no orphan trips)
@@ -1446,17 +1450,32 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       final Object driverId = _user?.userId ?? "Unknown";
       final int gen = guard.generation;
 
-      // The start coordinate is always a real fix: a fresh one already received, or
-      // one requested now. Nothing is invented when GPS is unavailable.
+      // The start coordinate is a CONFIRMED real fix (StartFixPicker): the very first fix after login is often a
+      // cached position from somewhere else, which used to become a START POINT far from the truck. While the
+      // receiver settles the trip waits for the next fix. Nothing is invented when GPS is unavailable.
       Position? startPos;
-      final Position? cur = _currentPosition;
-      if (cur != null && _lastGpsUpdateTime != null && DateTime.now().difference(_lastGpsUpdateTime!).inSeconds < 30) {
-        startPos = cur;
+      if (_isSimulationMode) {
+        startPos = _currentPosition ??
+            await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.bestForNavigation, timeLimit: const Duration(seconds: 20));
+      } else {
+        final DateTime nowT = DateTime.now();
+        _startFixes.removeWhere((_ArrivedFix f) => nowT.difference(f.at).inSeconds > 60);
+        final int? idx = StartFixPicker.pick(
+            _startFixes.map((_ArrivedFix f) => FixSample(f.pos.latitude, f.pos.longitude, f.pos.accuracy, f.at)).toList(),
+            now: nowT);
+        if (idx == null) {
+          if (_startFixes.isEmpty) {
+            try {
+              final Position first = await Geolocator.getCurrentPosition(
+                  desiredAccuracy: LocationAccuracy.bestForNavigation, timeLimit: const Duration(seconds: 10));
+              _startFixes.add(_ArrivedFix(first, DateTime.now()));
+            } catch (_) {}
+          }
+          _lastAutoStartAttempt = 0; // the next fix re-evaluates straight away
+          return;
+        }
+        startPos = _startFixes[idx].pos;
       }
-      startPos ??= await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.bestForNavigation,
-        timeLimit: const Duration(seconds: 20),
-      );
       if (!guard.isCurrent(gen)) return; // ownership changed while waiting for the fix
 
       // Trip identity: resume this driver's unfinished trip (re-verified now), or
@@ -1602,6 +1621,12 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       }
 
       _autoStartPending = false;
+      _startFixes.clear();
+      if (kIsWeb && !_webTrackingNoticeShown && mounted) {
+        _webTrackingNoticeShown = true;
+        CustomSnackBar.show(context,
+            message: "Keep this page open while collecting. A website cannot track the truck when the screen is off - use the Android app on the road.");
+      }
       _watchTripFinished(tripId, node);
       _setupPurokListener();
       _setupRoutePointsListener();
@@ -1618,6 +1643,26 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     } finally {
       _isStartingTrip = false;
     }
+  }
+
+  /// On Android the stream runs inside a foreground service (a visible "tracking" notification): without it the
+  /// system stops location updates, and the driver goes offline on every map, the moment the app is left.
+  LocationSettings _trackingSettings() {
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+      return AndroidSettings(
+        accuracy: LocationAccuracy.bestForNavigation,
+        distanceFilter: 0,
+        intervalDuration: const Duration(seconds: 2),
+        foregroundNotificationConfig: const ForegroundNotificationConfig(
+          notificationTitle: 'Garbage Truck Tracker',
+          notificationText: "Sharing this truck's live location. Open the app to finish the trip.",
+          notificationIcon: AndroidResource(name: 'ic_launcher', defType: 'mipmap'),
+          enableWakeLock: true,
+          setOngoing: true,
+        ),
+      );
+    }
+    return const LocationSettings(accuracy: LocationAccuracy.bestForNavigation, distanceFilter: 0);
   }
 
   void _startTracking() async {
@@ -1637,12 +1682,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       debugPrint("[GPS INITIAL FIX ERROR] $e");
     }
 
-    _positionSubscription = Geolocator.getPositionStream(
-      locationSettings: const LocationSettings(
-        accuracy: LocationAccuracy.bestForNavigation, 
-        distanceFilter: 0, // 0 for max sensitivity during tests
-      ),
-    ).listen((pos) => _processNewPosition(pos));
+    _positionSubscription = Geolocator.getPositionStream(locationSettings: _trackingSettings()).listen((pos) => _processNewPosition(pos));
   }
 
   void _processNewPosition(Position pos) {
@@ -1726,6 +1766,11 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       });
     }
 
+    if (_sessionId == null && !_isSimulationMode) {
+      _startFixes.add(_ArrivedFix(pos, now));
+      if (_startFixes.length > 12) _startFixes.removeAt(0);
+    }
+
     // First valid fix after login (or after a failed start): open the trip.
     if (_sessionId == null && _autoStartPending) _maybeAutoStart();
 
@@ -1744,9 +1789,29 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     final truckId = _user?.preferredTruck ?? "Unknown";
     double speedKmH = (pos.speed * 3.6);
 
-    // Cumulative trip distance calculation (Filter stationary micro-jitter < 1.5m and speed <= 1.0 km/h)
-    bool isMoving = speedKmH > 1.0 || _isSimulationMode;
-    double traveledKm = (isMoving && stepDistMeters >= 1.5) ? (stepDistMeters / 1000.0) : 0.0;
+    // Which fixes become route points and add distance (RoutePointPolicy): only real movement, not the 10-30 m
+    // wander of a receiver standing still. The live marker above is still updated by every fix.
+    _ensureLastRecordedRoutePosition(now);
+    final Position? lastRec = _lastRecordedRoutePosition;
+    final double distFromLastRecorded = lastRec == null
+        ? 0.0
+        : Geolocator.distanceBetween(lastRec.latitude, lastRec.longitude, pos.latitude, pos.longitude);
+    final int secsSinceRec = _lastRecordedRouteTime == null ? 1 << 30 : now.difference(_lastRecordedRouteTime!).inSeconds;
+    RouteRecordKind routeKind = _isSimulationMode
+        ? RouteRecordKind.moved
+        : RoutePointPolicy.decide(
+            hasLastRecorded: lastRec != null,
+            distFromLastM: distFromLastRecorded,
+            accuracyM: pos.accuracy,
+            lastAccuracyM: lastRec?.accuracy ?? 0,
+            secondsSinceLast: secsSinceRec);
+    // A jump no vehicle could make (> 144 km/h) is a bad fix, not travel. Slower jumps after a GPS outage are real.
+    if (!_isSimulationMode && lastRec != null && distFromLastRecorded > 500 && secsSinceRec > 0 && distFromLastRecorded / secsSinceRec > 40) {
+      routeKind = RouteRecordKind.skip;
+    }
+    double traveledKm = _isSimulationMode
+        ? (stepDistMeters >= 1.5 ? stepDistMeters / 1000.0 : 0.0)
+        : (routeKind == RouteRecordKind.moved ? distFromLastRecorded / 1000.0 : 0.0);
     if (_collectionFrozen) {
       // After FULL the collection metrics are final: further travel (e.g. to the
       // landfill) is tracked separately and never extends the collection.
@@ -1830,59 +1895,57 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       'last_seen': ServerValue.timestamp,
     };
 
-    // Determine if point should be appended to active trip's route point collection
-    if (_lastRecordedRoutePosition == null && _tripRoutePoints.isNotEmpty) {
-      final lastP = _tripRoutePoints.last;
-      final double lLat = (lastP['lat'] ?? lastP['latitude'] ?? 0.0).toDouble();
-      final double lLng = (lastP['lng'] ?? lastP['longitude'] ?? 0.0).toDouble();
-      if (lLat != 0 && lLng != 0) {
-        _lastRecordedRoutePosition = Position(
-          latitude: lLat,
-          longitude: lLng,
-          timestamp: now,
+    if (routeKind == RouteRecordKind.moved && _sessionId != null) {
+      _lastRecordedRoutePosition = pos;
+      _lastRecordedRouteTime = DateTime.now();
+      _appendRoutePoint(pos, effectiveStatus, trailColor, meta: tripMeta);
+    } else if (routeKind == RouteRecordKind.heartbeat && _sessionId != null && _lastRecordedRoutePosition != null) {
+      // Standing still: the SAME position again, so the timeline continues without a scribble.
+      final Position at = _lastRecordedRoutePosition!;
+      _lastRecordedRouteTime = DateTime.now();
+      _appendRoutePoint(
+        Position(
+          latitude: at.latitude,
+          longitude: at.longitude,
+          timestamp: pos.timestamp,
           altitude: 0,
-          accuracy: (lastP['accuracy'] ?? 0.0).toDouble(),
-          heading: 0,
+          accuracy: at.accuracy,
+          heading: at.heading,
           speed: 0,
           speedAccuracy: 0,
           altitudeAccuracy: 0,
           headingAccuracy: 0,
-        );
-      }
-    }
-
-    double distFromLastRecorded = 0.0;
-    if (_lastRecordedRoutePosition != null) {
-      distFromLastRecorded = Geolocator.distanceBetween(
-        _lastRecordedRoutePosition!.latitude,
-        _lastRecordedRoutePosition!.longitude,
-        pos.latitude,
-        pos.longitude
+        ),
+        effectiveStatus,
+        trailColor,
+        meta: tripMeta,
       );
-
-      if (distFromLastRecorded > 500.0 && !_isSimulationMode) {
-        debugPrint("[GPS REJECTED ROUTE APPEND] Large jump from last recorded route point: ${distFromLastRecorded.toStringAsFixed(1)}m");
-        _writeTrip(meta: tripMeta);
-        return;
-      }
-    }
-
-    bool timeElapsed = _lastRecordedRouteTime == null ||
-        now.difference(_lastRecordedRouteTime!).inSeconds >= 5;
-
-    bool shouldAppend = _lastRecordedRoutePosition == null ||
-        distFromLastRecorded >= 3.0 ||
-        _tripRoutePoints.isEmpty ||
-        timeElapsed ||
-        _isSimulationMode;
-
-    if (shouldAppend && _sessionId != null) {
-      _lastRecordedRoutePosition = pos;
-      _lastRecordedRouteTime = DateTime.now();
-      _appendRoutePoint(pos, effectiveStatus, trailColor, meta: tripMeta);
     } else {
       _writeTrip(meta: tripMeta);
     }
+  }
+
+  /// After a restart the last recorded point is read back from the trip's stored route.
+  void _ensureLastRecordedRoutePosition(DateTime now) {
+    if (_lastRecordedRoutePosition != null || _tripRoutePoints.isEmpty) return;
+    final Map lastP = _tripRoutePoints.last;
+    final double lLat = (lastP['lat'] ?? lastP['latitude'] ?? 0.0).toDouble();
+    final double lLng = (lastP['lng'] ?? lastP['longitude'] ?? 0.0).toDouble();
+    if (lLat == 0 || lLng == 0) return;
+    _lastRecordedRoutePosition = Position(
+      latitude: lLat,
+      longitude: lLng,
+      timestamp: now,
+      altitude: 0,
+      accuracy: (lastP['accuracy'] ?? 0.0).toDouble(),
+      heading: 0,
+      speed: 0,
+      speedAccuracy: 0,
+      altitudeAccuracy: 0,
+      headingAccuracy: 0,
+    );
+    final Object? ts = lastP['timestamp'];
+    if (_lastRecordedRouteTime == null && ts is num) _lastRecordedRouteTime = DateTime.fromMillisecondsSinceEpoch(ts.toInt());
   }
 
   String _getEffectiveRouteStatus() {
@@ -6770,4 +6833,11 @@ class _HoverZoomLinkState extends State<_HoverZoomLink> {
       ),
     );
   }
+}
+
+/// A GPS fix with the time it reached the app (used to confirm the trip's start point).
+class _ArrivedFix {
+  _ArrivedFix(this.pos, this.at);
+  final Position pos;
+  final DateTime at;
 }

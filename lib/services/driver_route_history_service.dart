@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:firebase_database/firebase_database.dart';
 import '../api/api_service.dart';
 import '../models/driver_trip.dart';
+import '../utils/gps_quality.dart';
 import '../models/user.dart';
 import '../utils/history_playback.dart';
 
@@ -58,6 +59,10 @@ class DriverRouteHistoryService {
           }
         });
         points.sort((a, b) => a.timestamp.compareTo(b.timestamp));
+        final List<GpsPoint> settled = RouteJitter.collapse(points);
+        points
+          ..clear()
+          ..addAll(settled);
       }
       final Map<String, dynamic> json = Map<String, dynamic>.from(value);
       json['trip_id'] = tripId;
@@ -177,6 +182,10 @@ class DriverRouteHistoryService {
                 }
               });
               points.sort((a, b) => a.timestamp.compareTo(b.timestamp));
+              final List<GpsPoint> settled = RouteJitter.collapse(points);
+              points
+                ..clear()
+                ..addAll(settled);
             }
 
             // Accurate tripDate determination from recorded GPS points or timestamp
@@ -438,6 +447,10 @@ class DriverRouteHistoryService {
     }
 
     if (cleanPoints.isEmpty) return trip;
+    final List<GpsPoint> settledPoints = RouteJitter.collapse(cleanPoints);
+    cleanPoints
+      ..clear()
+      ..addAll(settledPoints);
 
     // Detect Data Gaps (> 3 mins or > 300m jump)
     final List<DataGap> gaps = [];

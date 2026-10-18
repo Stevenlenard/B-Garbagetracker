@@ -15,6 +15,7 @@ import '../models/user.dart';
 import '../widgets/fade_slide_entrance.dart';
 import '../services/truck_assignment_service.dart';
 import '../services/truck_locations_feed.dart';
+import '../utils/gps_quality.dart';
 import '../utils/fleet_snapshot.dart';
 import '../services/service_area_service.dart';
 import '../widgets/map_style_toggle.dart';
@@ -512,6 +513,10 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> with Ti
           routeData.forEach((key, value) => points.add(value as Map));
           
           points.sort((a, b) => (a['timestamp'] ?? 0).compareTo(b['timestamp'] ?? 0));
+          final List<Map> settledPoints = RouteJitter.collapseMaps(points);
+          points
+            ..clear()
+            ..addAll(settledPoints);
           
           if (mounted && points.isNotEmpty) {
             if (points.length != _lastPoints.length) {

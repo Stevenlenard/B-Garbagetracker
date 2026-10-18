@@ -28,6 +28,7 @@ import '../services/driver_route_history_service.dart';
 import '../utils/session_manager.dart';
 import '../models/user.dart';
 import '../services/truck_locations_feed.dart';
+import '../utils/gps_quality.dart';
 import '../utils/marker_labels.dart';
 import '../widgets/map_style_toggle.dart';
 import '../widgets/mapbox_gate.dart';
@@ -1358,7 +1359,7 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> with TickerProvid
 
             if (mounted) {
               setState(() {
-                _lastRoutePoints[tid] = pointsList;
+                _lastRoutePoints[tid] = RouteJitter.collapseMaps(pointsList).cast<Map<dynamic, dynamic>>();
                 _visiblePaths.add(tid);
               });
               _refreshLiveRouteLines();
