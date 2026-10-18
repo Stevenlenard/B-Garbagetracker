@@ -7,6 +7,7 @@ import '../utils/responsive.dart';
 import '../utils/custom_notification.dart';
 import '../widgets/custom_snackbar.dart';
 import '../widgets/assign_truck_sheet.dart';
+import '../widgets/edit_driver_license_sheet.dart';
 
 class UserManagementScreen extends StatefulWidget {
   final bool isEmbedded;
@@ -1063,7 +1064,17 @@ class _UserManagementScreenState extends State<UserManagementScreen> with Ticker
                         ] else if (role == 'DRIVER') ...[
                           const Text("DRIVER DETAILS", style: TextStyle(fontSize: 12, fontWeight: FontWeight.w900, color: Color(0xFFBDBDBD), letterSpacing: 1.2)),
                           const SizedBox(height: 16),
-                          _buildDetailItem(Icons.badge_outlined, "License Number", user['license_number'] ?? "N/A"),
+                          DriverLicenseTile(
+                            license: user['license_number']?.toString(),
+                            onPressed: () async {
+                              final String? saved = await showEditDriverLicenseSheet(context, driver: user as Map, api: _apiService);
+                              if (saved == null || !mounted) return;
+                              user['license_number'] = saved;
+                              setModalState(() {});
+                              CustomSnackBar.show(context, message: "License number saved.");
+                              _fetchUsers(silent: true);
+                            },
+                          ),
                           AssignedTruckTile(
                             truckId: user['preferred_truck']?.toString(),
                             onPressed: () async {

@@ -24,6 +24,11 @@ class ApiService {
     return await _dio.get('get_users.php');
   }
 
+  /// Admin only. Changes a driver's own license number (never the truck).
+  Future<Response> updateDriverLicense(int driverId, String licenseNumber) async {
+    return await _dio.post('update_driver_license.php', data: {'driver_id': driverId, 'license_number': licenseNumber});
+  }
+
   /// Admin only. An empty [truckId] removes the assignment; a truck already used by another driver is refused.
   Future<Response> assignDriverTruck(int driverId, String truckId) async {
     return await _dio.post('assign_driver_truck.php', data: {'driver_id': driverId, 'truck_id': truckId});

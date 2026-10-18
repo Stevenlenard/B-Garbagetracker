@@ -75,6 +75,8 @@ class AssignedTruckTile extends StatelessWidget {
               Text(has ? truckId! : 'No truck assigned',
                   key: const ValueKey<String>('assigned-truck-value'),
                   style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: has ? _ink : const Color(0xFFB45309))),
+              const SizedBox(height: 2),
+              const Text('The truck this driver drives (Truck ID)', style: TextStyle(fontSize: 11, color: _muted, fontWeight: FontWeight.w500)),
             ]),
           ),
           const SizedBox(width: 8),
