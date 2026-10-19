@@ -710,21 +710,9 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> with TickerProvid
               ? "#FFC107"
               : (p.status == "FULL" ? "#2196F3" : "#6A1B9A");
 
-          if (p.isGapStart && currentSegment.length >= 2) {
-            features.add({
-              "type": "Feature",
-              "geometry": {
-                "type": "LineString",
-                "coordinates": List<List<double>>.from(currentSegment)
-              },
-              "properties": {"color": currentColor}
-            });
-            currentSegment = [[p.longitude, p.latitude]];
-            currentColor = colorHex;
-          } else {
-            currentSegment.add([p.longitude, p.latitude]);
-            currentColor = colorHex;
-          }
+          // one connected line: a GPS drop is drawn as a straight connection, never as a break
+          currentSegment.add([p.longitude, p.latitude]);
+          currentColor = colorHex;
         }
 
         if (currentSegment.length >= 2) {

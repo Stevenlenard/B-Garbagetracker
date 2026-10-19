@@ -176,14 +176,15 @@ void main() {
       expect(coords.every((c) => (c[1] as double) < 14.0), isTrue);
     });
 
-    test('a long gap splits the line instead of drawing across it', () {
+    test('a long gap never cuts the line: it stays one connected line', () {
       final f = RouteGeometry.lineFeatures([
         pt(13.7500, 121.05, 1000),
         pt(13.7502, 121.05, 6000),
         pt(13.7504, 121.05, 600000), // 10 min later
         pt(13.7506, 121.05, 605000),
       ]);
-      expect(f.length, 2);
+      expect(f.length, 1);
+      expect((f.first['geometry'] as Map)['coordinates'], hasLength(4));
     });
 
     test('two drivers never merge: geometry is built per trip', () {

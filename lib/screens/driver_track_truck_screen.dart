@@ -1186,39 +1186,14 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> with Ti
 
       for (int i = 1; i < validPoints.length; i++) {
         final curr = validPoints[i];
-        final prev = validPoints[i - 1];
 
         final double currLat = (curr['lat'] ?? curr['latitude'] ?? 0.0).toDouble();
         final double currLng = (curr['lng'] ?? curr['longitude'] ?? 0.0).toDouble();
-        final int currTs = parseTs(curr['timestamp']);
-
-        final double prevLat = (prev['lat'] ?? prev['latitude'] ?? 0.0).toDouble();
-        final double prevLng = (prev['lng'] ?? prev['longitude'] ?? 0.0).toDouble();
-        final int prevTs = parseTs(prev['timestamp']);
 
         String color = (curr['color'] ?? 'GREEN').toString().toUpperCase();
 
-        final double d = geo.Geolocator.distanceBetween(prevLat, prevLng, currLat, currLng);
-        final double dtSec = (currTs > 0 && prevTs > 0) ? ((currTs - prevTs) / 1000.0) : 0.0;
-
-        // GPS GAP / INTERRUPTION CHECK (> 3 min gap OR > 800m distance gap)
-        bool isGap = (dtSec > 180.0) || (d > 800.0);
-
-        if (isGap) {
-          if (currentSegmentCoords.length >= 2) {
-            features.add({
-              "type": "Feature",
-              "geometry": {
-                "type": "LineString",
-                "coordinates": List<List<double>>.from(currentSegmentCoords)
-              },
-              "properties": {"color": currentColor}
-            });
-          }
-          debugPrint("[MAP ROUTE] GPS gap split triggered (${d.toStringAsFixed(1)}m, ${dtSec.toStringAsFixed(1)}s gap). Starting new segment.");
-          currentColor = color;
-          currentSegmentCoords = [[currLng, currLat]];
-        } else if (color != currentColor) {
+        // The route line is never cut: a pause or a GPS drop is drawn as a straight connection.
+        if (color != currentColor) {
           currentSegmentCoords.add([currLng, currLat]);
           if (currentSegmentCoords.length >= 2) {
             features.add({

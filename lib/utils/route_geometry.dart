@@ -12,11 +12,6 @@ class RouteGeometry {
   /// Live-map policy (points with poorer accuracy are not drawn).
   static const double maxAccuracyM = 100.0;
 
-  /// A pause longer than this, or a hop longer than [gapDistanceM], starts a new segment
-  /// instead of drawing a line across the gap.
-  static const double gapSeconds = 180.0;
-  static const double gapDistanceM = 800.0;
-
   static int _ts(dynamic v) {
     if (v is num) return v.toInt();
     if (v is String) {
@@ -74,7 +69,8 @@ class RouteGeometry {
     return valid;
   }
 
-  /// GeoJSON LineString features (one per continuous, single-colour segment).
+  /// GeoJSON LineString features (one per single-colour stretch; neighbouring stretches share their joint point).
+  /// The line is NEVER cut: a pause or a GPS drop is drawn as a straight connection to the next recorded point.
   /// Empty when fewer than two valid points exist.
   static List<Map<String, dynamic>> lineFeatures(Iterable<Map> raw) {
     final List<Map> pts = cleanPoints(raw);
@@ -100,22 +96,11 @@ class RouteGeometry {
 
     for (int i = 1; i < pts.length; i++) {
       final Map curr = pts[i];
-      final Map prev = pts[i - 1];
       final double lat = _lat(curr);
       final double lng = _lng(curr);
       final String color = colorOf(curr);
 
-      final double d = distanceM(_lat(prev), _lng(prev), lat, lng);
-      final int cts = _ts(curr['timestamp']);
-      final int pts0 = _ts(prev['timestamp']);
-      final double dtSec = (cts > 0 && pts0 > 0) ? (cts - pts0) / 1000.0 : 0.0;
-      final bool gap = dtSec > gapSeconds || d > gapDistanceM;
-
-      if (gap) {
-        flush(current, currentColor);
-        currentColor = color;
-        current = <List<double>>[<double>[lng, lat]];
-      } else if (color != currentColor) {
+      if (color != currentColor) {
         current.add(<double>[lng, lat]);
         flush(current, currentColor);
         currentColor = color;
