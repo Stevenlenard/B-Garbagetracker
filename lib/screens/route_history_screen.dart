@@ -8,6 +8,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
+import 'package:flutter/foundation.dart' show Factory;
+import 'package:flutter/gestures.dart' show EagerGestureRecognizer, OneSequenceGestureRecognizer;
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart' hide Size, Visibility;
@@ -1924,14 +1926,14 @@ class _RouteHistoryScreenState extends State<RouteHistoryScreen> with TickerProv
             _mapboxMap?.setCamera(CameraOptions(center: Point(coordinates: Position(121.1620, 13.9565)), zoom: 13.8));
           }
         }),
-        // Phones zoom by pinching; the short map has room only for the essentials.
-        if (desktop) btn(Icons.add_rounded, 'Zoom in', () async {
+        // Phones get the same zoom buttons (pinching inside a scrolling page is unreliable).
+        btn(Icons.add_rounded, 'Zoom in', () async {
           if (_mapboxMap != null) {
             final state = await _mapboxMap!.getCameraState();
             _mapboxMap!.setCamera(CameraOptions(zoom: state.zoom + 1.0));
           }
         }),
-        if (desktop) btn(Icons.remove_rounded, 'Zoom out', () async {
+        btn(Icons.remove_rounded, 'Zoom out', () async {
           if (_mapboxMap != null) {
             final state = await _mapboxMap!.getCameraState();
             _mapboxMap!.setCamera(CameraOptions(zoom: state.zoom - 1.0));
@@ -1958,7 +1960,14 @@ class _RouteHistoryScreenState extends State<RouteHistoryScreen> with TickerProv
                   child: ClipRRect(
                     borderRadius: BorderRadius.circular(22),
                     child: Stack(children: [
-                      Positioned.fill(child: MapboxGate(child: MapWidget(onMapCreated: _onMapCreated, onStyleLoadedListener: _onStyleLoaded))),
+                      Positioned.fill(
+                          child: MapboxGate(
+                              child: MapWidget(
+                        // the map owns pan/pinch gestures; the page no longer scrolls while the finger is on the map
+                        gestureRecognizers: <Factory<OneSequenceGestureRecognizer>>{Factory<OneSequenceGestureRecognizer>(() => EagerGestureRecognizer())},
+                        onMapCreated: _onMapCreated,
+                        onStyleLoadedListener: _onStyleLoaded,
+                      ))),
                       Positioned(right: 10, top: 10, child: _buildMapControls(desktop: false)),
                       Positioned(
                         left: 10,

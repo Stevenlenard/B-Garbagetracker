@@ -2650,20 +2650,23 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> with TickerProvid
           // TARGET / GPS LOCATION BUTTON
           _buildMapControlButton(
             icon: Icons.gps_fixed_rounded,
-            isActive: _isTargetActive,
+            isActive: _isFollowLocked,
             size: btnSize,
             iconSize: iconSize,
+            // Recenter + follow: stays locked on the moving truck until tapped again (or another truck is followed).
             onTap: () {
-              setState(() => _isTargetActive = true);
               final activeTrucks = _trucks.where((t) => t['isOnline'] == true && (t['latitude'] ?? 0) != 0).toList();
-              if (activeTrucks.isNotEmpty) {
-                _focusOnTruck(activeTrucks.first, zoom: 16.5);
+              if (_isFollowLocked) {
+                setState(() {
+                  _isFollowLocked = false;
+                  _followedTruckId = null;
+                });
+              } else if (activeTrucks.isNotEmpty) {
+                final Map<dynamic, dynamic> t = activeTrucks.first;
+                _toggleFollowTruck((t['truck_id'] ?? t['truckId'] ?? '').toString(), t);
               } else {
                 _recenterToBalintawak();
               }
-              Future.delayed(const Duration(seconds: 2), () {
-                if (mounted) setState(() => _isTargetActive = false);
-              });
             },
           ),
           const SizedBox(height: 12),

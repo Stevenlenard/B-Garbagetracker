@@ -1092,15 +1092,27 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
           // TARGET / GPS LOCATION BUTTON (Recenter to Resident's GPS position)
           _buildMapControlButton(
             icon: Icons.gps_fixed_rounded,
-            isActive: _isTargetActive,
+            isActive: _isFollowLocked && _followedTruckId != null,
             size: btnSize,
             iconSize: iconSize,
+            // Recenter + follow the moving truck; tap again to stop. With no truck online it centres on the resident.
             onTap: () {
-              setState(() => _isTargetActive = true);
-              _recenterToResident();
-              Future.delayed(const Duration(seconds: 2), () {
-                if (mounted) setState(() => _isTargetActive = false);
-              });
+              final online = _trucks.where((t) => t['isOnline'] == true && (t['latitude'] ?? 0) != 0).toList();
+              if (_isFollowLocked && _followedTruckId != null) {
+                setState(() {
+                  _isFollowLocked = false;
+                  _followedTruckId = null;
+                });
+              } else if (online.isNotEmpty) {
+                final Map<dynamic, dynamic> t = online.first;
+                _toggleFollowTruck((t['truck_id'] ?? t['truckId'] ?? '').toString(), t);
+              } else {
+                setState(() => _isTargetActive = true);
+                _recenterToResident();
+                Future.delayed(const Duration(seconds: 2), () {
+                  if (mounted) setState(() => _isTargetActive = false);
+                });
+              }
             },
           ),
           const SizedBox(height: 12),

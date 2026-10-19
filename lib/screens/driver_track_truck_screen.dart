@@ -664,7 +664,7 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> with Ti
     if (widget.isHistorical) return;
     if (mapboxMap == null) return;
 
-    if (_isFollowLocked || _lastLocalPos == null) {
+    if (_lastLocalPos == null) {
       mapboxMap?.setCamera(CameraOptions(
         center: Point(coordinates: Position(pos.longitude, pos.latitude)),
         zoom: 16.5,
@@ -1609,12 +1609,21 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> with Ti
           ],
           _buildMapControlButton(
             icon: Icons.gps_fixed_rounded,
-            isActive: _isTargetActive,
+            isActive: _isTargetActive || _isFollowLocked,
             size: btnSize,
             iconSize: iconSize,
+            // Recenter + follow: the camera keeps following the moving truck until the button is tapped again.
             onTap: () async {
+              if (!widget.isHistorical && _isFollowLocked) {
+                setState(() {
+                  _isFollowLocked = false;
+                  _isTargetActive = false;
+                });
+                return;
+              }
               setState(() {
                 _isTargetActive = true;
+                if (!widget.isHistorical) _isFollowLocked = true;
               });
               geo.Position? targetPos = _lastLocalPos;
               if (targetPos == null) {
