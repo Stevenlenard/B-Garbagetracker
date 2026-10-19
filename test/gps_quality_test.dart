@@ -3,6 +3,7 @@ import 'package:garbage_tracking_app/models/driver_trip.dart';
 import 'package:garbage_tracking_app/utils/gps_quality.dart';
 
 void main() {
+  standingWanderTests();
   final DateTime t0 = DateTime(2026, 10, 18, 11, 20, 55);
   FixSample fix(double lat, double lng, double acc, int sec) => FixSample(lat, lng, acc, t0.add(Duration(seconds: sec)));
 
@@ -123,5 +124,18 @@ void main() {
       expect(clean[1]['speed'], 0.0);
       expect(clean[2]['lat'], 13.9560000);
     });
+  });
+}
+
+void standingWanderTests() {
+  test('standing still (receiver speed 0): a 50 m indoor wander is not recorded, a moving fix is', () {
+    expect(
+        RoutePointPolicy.decide(
+            hasLastRecorded: true, distFromLastM: 50, accuracyM: 20, lastAccuracyM: 20, secondsSinceLast: 5, speedMps: 0.0),
+        RouteRecordKind.skip);
+    expect(
+        RoutePointPolicy.decide(
+            hasLastRecorded: true, distFromLastM: 50, accuracyM: 20, lastAccuracyM: 20, secondsSinceLast: 5, speedMps: 6.0),
+        RouteRecordKind.moved);
   });
 }

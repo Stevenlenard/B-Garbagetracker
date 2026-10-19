@@ -90,6 +90,11 @@ class RoutePointPolicy {
   static const int minMovingIntervalSeconds = 2;
   static const double farEnoughToSkipIntervalM = 40;
 
+  /// The receiver's own (Doppler) speed below this means the vehicle is standing: position changes under
+  /// [standingWanderM] are signal wander (indoors, under roofs, weak signal), never travel.
+  static const double standingSpeedMps = 0.8;
+  static const double standingWanderM = 60;
+
   /// How far a fix must be from the last recorded point to count as movement.
   static double movementThresholdM(double accuracyM, double lastAccuracyM) =>
       math.max(minMoveM, noiseFactor * math.min(noiseCapM, math.max(accuracyM, lastAccuracyM)));
@@ -100,8 +105,12 @@ class RoutePointPolicy {
     required double accuracyM,
     required double lastAccuracyM,
     required int secondsSinceLast,
+    double? speedMps,
   }) {
     if (!hasLastRecorded) return RouteRecordKind.moved;
+    if (speedMps != null && speedMps >= 0 && speedMps < standingSpeedMps && distFromLastM < standingWanderM) {
+      return secondsSinceLast >= heartbeatSeconds ? RouteRecordKind.heartbeat : RouteRecordKind.skip;
+    }
     if (accuracyM > poorAccuracyM) {
       return secondsSinceLast >= poorFixPatienceSeconds ? RouteRecordKind.heartbeat : RouteRecordKind.skip;
     }
@@ -133,7 +142,8 @@ class RouteJitter {
         continue;
       }
       final double d = gpsDistanceM(anchor.latitude, anchor.longitude, p.latitude, p.longitude);
-      if (d < RoutePointPolicy.movementThresholdM(p.accuracyM, anchor.accuracyM)) {
+      final bool standing = p.speedKmh < RoutePointPolicy.standingSpeedMps * 3.6 && d < RoutePointPolicy.standingWanderM;
+      if (standing || d < RoutePointPolicy.movementThresholdM(p.accuracyM, anchor.accuracyM)) {
         out.add(p.copyWith(latitude: anchor.latitude, longitude: anchor.longitude, speedKmh: 0.0));
       } else {
         out.add(p);

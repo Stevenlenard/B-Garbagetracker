@@ -1850,7 +1850,8 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
             distFromLastM: distFromLastRecorded,
             accuracyM: pos.accuracy,
             lastAccuracyM: lastRec?.accuracy ?? 0,
-            secondsSinceLast: secsSinceRec);
+            secondsSinceLast: secsSinceRec,
+            speedMps: pos.speed);
     // A jump no vehicle could make (> 144 km/h) is a bad fix, not travel. Slower jumps after a GPS outage are real.
     if (!_isSimulationMode && lastRec != null && distFromLastRecorded > 500 && secsSinceRec > 0 && distFromLastRecorded / secsSinceRec > 40) {
       routeKind = RouteRecordKind.skip;
