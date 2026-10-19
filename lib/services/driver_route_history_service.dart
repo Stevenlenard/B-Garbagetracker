@@ -421,6 +421,15 @@ class DriverRouteHistoryService {
     return filtered.isNotEmpty ? filtered : inputPoints;
   }
 
+  /// A route line is cut only when GPS was missing for minutes, or the position jumped farther than any vehicle
+  /// could travel in that time. A short signal drop at normal speed (30 s at 36 km/h is 330 m) is travel, so the
+  /// line stays connected instead of breaking at every weak-signal moment.
+  static bool isRouteBreak(int dtSec, double distM) {
+    if (dtSec > 180) return true;
+    if (distM <= 300.0) return false;
+    return dtSec <= 0 || distM / dtSec > 40.0; // 40 m/s = 144 km/h
+  }
+
   /// Analyzes trip GPS points, detects data gaps, stops, and compiles event timeline.
   static DriverTrip analyzeTrip(DriverTrip trip) {
     final List<GpsPoint> rawPoints = List.from(trip.points);
@@ -465,7 +474,7 @@ class DriverRouteHistoryService {
           prevP.latitude, prevP.longitude, curr.latitude, curr.longitude,
         ) * 1000;
 
-        if (dtSec > 180 || distM > 300.0) {
+        if (isRouteBreak(dtSec, distM)) {
           gaps.add(DataGap(
             startTime: prevP.timestamp,
             endTime: curr.timestamp,
