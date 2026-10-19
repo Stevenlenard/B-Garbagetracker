@@ -177,3 +177,101 @@ class RouteJitter {
     return out;
   }
 }
+
+/// Verdict of [TrackGate.offer].
+enum TrackGateVerdict { accept, hold, reject }
+
+/// Rejects isolated GPS spikes (a single fix hundreds of metres away that no vehicle could reach in the elapsed
+/// time) while keeping genuine travel. A suspicious fix is held; it becomes real only when the next fix
+/// agrees with it (is near it), otherwise it is dropped as a spike and the track continues from the last good fix.
+class TrackGate {
+  /// A hop shorter than this is always plausible (receiver noise, walking, slow turns).
+  static const double freeHopM = 60;
+
+  /// Faster than this (m/s, ~90 km/h) over a longer hop is a spike for a garbage truck or motorcycle.
+  static const double maxPlausibleMps = 25;
+
+  double? _lat, _lng;
+  int? _tsMs;
+  double? _sLat, _sLng;
+  int? _sTsMs;
+
+  /// Offers a fix. [accept] means use it (also returns true when a held suspect is confirmed, see [confirmed]).
+  /// [hold] means it looks like a spike and must not be drawn yet; [reject] means a previously held spike was disproved
+  /// and this fix is simply the continuation of the real path.
+  TrackGateVerdict offer(double lat, double lng, int tsMs, {double accuracyM = 0}) {
+    if (_lat == null) {
+      _set(lat, lng, tsMs);
+      return TrackGateVerdict.accept;
+    }
+    final double dt = ((tsMs - _tsMs!) / 1000.0).clamp(0.5, 1e9);
+    final double d = gpsDistanceM(_lat!, _lng!, lat, lng);
+    final bool plausible = d <= freeHopM || d / dt <= maxPlausibleMps;
+
+    if (_sLat != null) {
+      final double ds = gpsDistanceM(_sLat!, _sLng!, lat, lng);
+      final double tol = (accuracyM * 2).clamp(80.0, 200.0);
+      if (ds <= tol) {
+        // the new area was confirmed by a second fix: it is real travel
+        _sLat = null;
+        _set(lat, lng, tsMs);
+        return TrackGateVerdict.accept;
+      }
+      // the suspect was a spike
+      _sLat = null;
+      if (plausible) {
+        _set(lat, lng, tsMs);
+        return TrackGateVerdict.reject;
+      }
+    }
+    if (plausible) {
+      _set(lat, lng, tsMs);
+      return TrackGateVerdict.accept;
+    }
+    _sLat = lat;
+    _sLng = lng;
+    _sTsMs = tsMs;
+    return TrackGateVerdict.hold;
+  }
+
+  /// The held fix that was just confirmed is the previous suspect position (for drawing it before the current fix).
+  bool get hasSuspect => _sLat != null;
+  int? get suspectTsMs => _sTsMs;
+
+  void _set(double lat, double lng, int ts) {
+    _lat = lat;
+    _lng = lng;
+    _tsMs = ts;
+  }
+
+  void reset() {
+    _lat = _lng = _sLat = _sLng = null;
+    _tsMs = _sTsMs = null;
+  }
+}
+
+/// Smoothed travel speed (km/h) from recent moving fixes: the median over a short window, so a single noisy
+/// reading, a stop at a corner, or a trip-average never decides the arrival estimate.
+class SpeedSmoother {
+  SpeedSmoother({this.windowMs = 90000, this.movingKmh = 3.0});
+
+  final int windowMs;
+  final double movingKmh;
+  final List<MapEntry<int, double>> _s = <MapEntry<int, double>>[];
+
+  void add(int tsMs, double kmh) {
+    if (kmh.isNaN || kmh < movingKmh || kmh > 120) return;
+    _s.add(MapEntry<int, double>(tsMs, kmh));
+    _s.removeWhere((e) => tsMs - e.key > windowMs);
+  }
+
+  /// Median of the window, or null while fewer than 3 moving samples exist.
+  double? valueAt(int nowMs) {
+    final List<double> v = _s.where((e) => nowMs - e.key <= windowMs).map((e) => e.value).toList()..sort();
+    if (v.length < 3) return null;
+    final int m = v.length ~/ 2;
+    return v.length.isOdd ? v[m] : (v[m - 1] + v[m]) / 2;
+  }
+
+  void clear() => _s.clear();
+}

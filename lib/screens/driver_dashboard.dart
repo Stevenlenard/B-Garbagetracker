@@ -59,7 +59,7 @@ class DriverDashboard extends StatefulWidget {
   State<DriverDashboard> createState() => _DriverDashboardState();
 }
 
-class _DriverDashboardState extends State<DriverDashboard> with TickerProviderStateMixin {
+class _DriverDashboardState extends State<DriverDashboard> with TickerProviderStateMixin, WidgetsBindingObserver {
   final FirebaseDatabase _database = FirebaseDatabase.instance;
   final ApiService _apiService = ApiService();
   UserData? _user;
@@ -83,6 +83,29 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
   bool _isDebugPanelExpanded = false; // Collapsible Debug Panel
   final ValueNotifier<String> _currentTime = ValueNotifier<String>("");
   Timer? _clockTimer;
+  Timer? _gpsWatchdog;
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _ensureGpsAlive(force: true);
+  }
+
+  /// Keeps recording continuous: if an open trip has received no fix for 20 s (the stream was dropped by the
+  /// system), the stream is re-armed and a fresh fix is requested immediately.
+  void _ensureGpsAlive({bool force = false}) {
+    if (!mounted || kIsWeb || _isSimulationMode) return;
+    if (_sessionId == null || _status == "OFFLINE" || _status == "FINISHED") return;
+    final DateTime? last = _lastGpsUpdateTime;
+    final bool stale = last == null || DateTime.now().difference(last).inSeconds > 20;
+    if (!stale && !force) return;
+    if (!stale && _positionSubscription != null) return;
+    debugPrint("[GPS WATCHDOG] re-arming position stream");
+    _positionSubscription?.cancel();
+    _positionSubscription = Geolocator.getPositionStream(locationSettings: _trackingSettings()).listen((pos) => _processNewPosition(pos));
+    Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.bestForNavigation)
+        .then(_processNewPosition)
+        .catchError((Object e) => debugPrint("[GPS WATCHDOG] fix failed: $e"));
+  }
   Map<String, dynamic> _maintenanceData = {};
   String? _truckPlateNumber;
   StreamSubscription? _truckSubscription;
@@ -152,6 +175,8 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _gpsWatchdog = Timer.periodic(const Duration(seconds: 15), (_) => _ensureGpsAlive());
     NotificationService.openHomeRequests.addListener(_openHomeFromNotification);
     _startClock();
     _circleController = AnimationController(
@@ -183,6 +208,8 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _gpsWatchdog?.cancel();
     NotificationService.openHomeRequests.removeListener(_openHomeFromNotification);
     _clockTimer?.cancel();
     _currentTime.dispose();
@@ -1623,6 +1650,8 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
 
       _autoStartPending = false;
       _startFixes.clear();
+      _trackGate.reset();
+      _speedSmoother.clear();
       if (!kIsWeb && mounted) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) BackgroundTracking.askOnce(context);
@@ -1763,6 +1792,15 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       }
     }
 
+    // Spike filter: a lone fix no vehicle could reach is held; it only becomes part of the track when the next fix agrees.
+    if (!_isSimulationMode) {
+      final TrackGateVerdict gate = _trackGate.offer(pos.latitude, pos.longitude, now.millisecondsSinceEpoch, accuracyM: pos.accuracy);
+      if (gate == TrackGateVerdict.hold) {
+        debugPrint("[GPS HELD] possible spike ${stepDistMeters.toStringAsFixed(0)}m");
+        return;
+      }
+    }
+
     // Now accept valid new position
     if (mounted) {
       setState(() {
@@ -1794,6 +1832,8 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
 
     final truckId = _user?.preferredTruck ?? "Unknown";
     double speedKmH = (pos.speed * 3.6);
+    _speedSmoother.add(now.millisecondsSinceEpoch, speedKmH);
+    final double? smoothSpeed = _speedSmoother.valueAt(now.millisecondsSinceEpoch);
 
     // Which fixes become route points and add distance (RoutePointPolicy): only real movement, not the 10-30 m
     // wander of a receiver standing still. The live marker above is still updated by every fix.
@@ -1869,6 +1909,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       'distance': _distance,
       'speed': speedKmH,
       'avg_speed': avgSpeed,
+      if (smoothSpeed != null) 'eta_speed': smoothSpeed,
       'heading': pos.heading,
       'accuracy': pos.accuracy,
       'fix_time': pos.timestamp.millisecondsSinceEpoch, // when the receiver took the fix
@@ -2078,6 +2119,8 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
   final Map<String, double> _lastPurokDistance = <String, double>{}; // is the truck getting closer?
   final Set<String> _publishedArrivalKeys = <String>{}; // local guard in front of the once-only write
   double _lastAvgSpeedKmh = 0.0;
+  final TrackGate _trackGate = TrackGate();
+  final SpeedSmoother _speedSmoother = SpeedSmoother();
 
   /// "Arrived" notification: once per trip and area (deterministic key), so a restart,
   /// resume or second runtime can never repeat it; a new trip alerts again.
@@ -2123,7 +2166,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       status: _status,
       gpsAgeMs: 0, // this very fix was just accepted
       distanceKm: (distM - radiusM) / 1000.0,
-      speedKmh: pos.speed * 3.6,
+      speedKmh: _speedSmoother.valueAt(DateTime.now().millisecondsSinceEpoch),
       averageSpeedKmh: _lastAvgSpeedKmh,
       arrivalRadiusM: 0,
     );

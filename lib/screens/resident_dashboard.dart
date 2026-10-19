@@ -444,7 +444,7 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
             status: FleetStatus.collectionState(val),
             gpsAgeMs: FleetStatus.gpsAgeMs(val, nowMs: nowMs),
             distanceKm: distKm,
-            speedKmh: double.tryParse('${val['speed']}'),
+            speedKmh: double.tryParse('${val['eta_speed']}') ?? double.tryParse('${val['speed']}'),
             averageSpeedKmh: double.tryParse('${val['avg_speed']}'),
           );
           if (best == null || (r.isAvailable && (!best.isAvailable || rank(r) < rank(best)))) best = r;
