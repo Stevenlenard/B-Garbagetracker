@@ -366,7 +366,9 @@ class _CollectionRouteOptimizationScreenState extends State<CollectionRouteOptim
     if (d == null || !mounted) return;
     final DateTime today = HistoryDates.manilaToday(_now());
     final DateTime start = today.subtract(Duration(days: widget.config.windowDays));
-    final VisitSummary v = CollectionVisits.detect(trips: d.trips, areas: d.areas, start: start, end: today);
+    // Admin and drivers also see SIMULATION trips here (labelled), so the status change can be tested; residents
+    // and the public page see real visits only. Analytics never counts simulations.
+    final VisitSummary v = CollectionVisits.detect(trips: d.trips, areas: d.areas, start: start, end: today, includeSimulated: !_viewOnly);
     final Set<String> names = d.areas.where((AreaGeofence a) => a.isTruckStop).map((AreaGeofence a) => a.name).toSet();
     final Map<String, String> byKey = <String, String>{
       for (final MapEntry<String, String> e in d.areaIdToName.entries)
@@ -376,7 +378,8 @@ class _CollectionRouteOptimizationScreenState extends State<CollectionRouteOptim
     };
     _visits = v.visits;
     _activity = CollectionStatus.activityFromWeeklyProgress(
-        d.weeklyProgress, (String k) => byKey[k] ?? byKey[ServiceAreaService.canonicalizeAreaName(k) ?? '']);
+        d.weeklyProgress, (String k) => byKey[k] ?? byKey[ServiceAreaService.canonicalizeAreaName(k) ?? ''],
+        includeSimulated: !_viewOnly);
     if (_canComparePaths) {
       Map trips = d.trips;
       if (_role == 'driver' && widget.userId != null) {
@@ -1193,7 +1196,8 @@ class _CollectionRouteOptimizationScreenState extends State<CollectionRouteOptim
                   Expanded(
                     child: Text(
                       '${CollectionStatus.formatManila(v.firstFixMs)} · ${(v.dwellMs / 60000).toStringAsFixed(0)} min in area'
-                      '${!_viewOnly && v.truckId != null && v.truckId != 'Unknown' ? ' · ${v.truckId}' : ''}',
+                      '${!_viewOnly && v.truckId != null && v.truckId != 'Unknown' ? ' · ${v.truckId}' : ''}'
+                      '${v.simulated ? ' · simulation test' : ''}',
                       style: const TextStyle(fontSize: 12, color: Color(0xFF475569)),
                     ),
                   ),

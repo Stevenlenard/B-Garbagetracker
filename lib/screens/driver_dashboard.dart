@@ -2086,7 +2086,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       
       // 2. PASS CONDITION: the travelled step touches the area (entrance point, or the whole road segment for
       // highway areas), at any speed. A verified visit (dwell) is still judged separately and stays strict.
-      final bool touched = _isSimulationMode ||
+      final bool touched =
           AreaPass.touches(
             lat: pos.latitude,
             lng: pos.longitude,

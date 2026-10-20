@@ -108,6 +108,7 @@ class CollectionVisit {
     required this.fixes,
     this.truckId,
     this.driverId,
+    this.simulated = false,
   });
 
   final String tripId;
@@ -117,6 +118,10 @@ class CollectionVisit {
   final int fixes;
   final String? truckId;
   final String? driverId;
+
+  /// From a SIMULATION trip: shown on the collection-status screen (to test the status change) but never used by
+  /// Analytics or the evaluation.
+  final bool simulated;
 
   int get dwellMs => lastFixMs - firstFixMs;
 }
@@ -188,14 +193,14 @@ class CollectionVisits {
   }
 
   /// Valid ACTIVE fixes of one trip, oldest first, de-duplicated by time.
-  static List<_Fix> _activeFixes(Map trip, VisitPolicy policy) {
+  static List<_Fix> _activeFixes(Map trip, VisitPolicy policy, {bool includeSimulated = false}) {
     final Object? route = trip['route'];
     final Iterable<Object?> raw = route is Map ? route.values : (route is List ? route : const <Object?>[]);
     final int? finalizedAt = _ms(trip['collection'] is Map ? (trip['collection'] as Map)['finalized_at_ms'] : null);
     final Map<int, _Fix> byTime = <int, _Fix>{};
     for (final Object? p in raw) {
       if (p is! Map) continue;
-      if (p['is_simulation'] == true) continue;
+      if (p['is_simulation'] == true && !includeSimulated) continue;
       if (!_isActive(p['status'])) continue;
       final double? lat = _num(p['latitude'] ?? p['lat']);
       final double? lng = _num(p['longitude'] ?? p['lng']);
@@ -254,6 +259,15 @@ class CollectionVisits {
     return best;
   }
 
+  static bool _hasSimulatedPoints(Map trip) {
+    final Object? route = trip['route'];
+    final Iterable<Object?> raw = route is Map ? route.values : (route is List ? route : const <Object?>[]);
+    for (final Object? p in raw) {
+      if (p is Map && p['is_simulation'] == true) return true;
+    }
+    return false;
+  }
+
   static String _tripDay(Map trip, List<_Fix> fixes) {
     final String d = (trip['date'] ?? '').toString();
     if (d.length >= 10) return d.substring(0, 10);
@@ -273,6 +287,7 @@ class CollectionVisits {
     required DateTime end,
     String? areaFilter,
     VisitPolicy policy = const VisitPolicy(),
+    bool includeSimulated = false,
   }) {
     final String from = _day(start);
     final String to = _day(end);
@@ -288,8 +303,13 @@ class CollectionVisits {
 
     trips.forEach((Object? key, Object? value) {
       if (value is! Map) return;
-      if (value['is_simulation'] == true) return;
-      final List<_Fix> fixes = _activeFixes(value, policy);
+      final bool simTrip = value['is_simulation'] == true || _hasSimulatedPoints(value);
+      if (simTrip && !includeSimulated) return;
+      // a simulated drive-by counts once it has two fixes inside the area (no dwell), so the status change can be tested
+      final VisitPolicy tripPolicy = simTrip
+          ? VisitPolicy(minFixes: 2, minDwellMs: 0, maxAccuracyM: 1000, maxGapMs: policy.maxGapMs, outsideTolerance: policy.outsideTolerance)
+          : policy;
+      final List<_Fix> fixes = _activeFixes(value, tripPolicy, includeSimulated: simTrip);
       final String tripDay = _tripDay(value, fixes);
       final bool tripInRange = inRange(tripDay) || fixes.any((_Fix f) => inRange(manilaDay(f.ms)));
       if (!tripInRange) return;
@@ -301,7 +321,7 @@ class CollectionVisits {
       final String tripId = key.toString();
       for (final AreaGeofence area in targets) {
         bool entered = false;
-        final ({int first, int last, int count})? stay = _bestStay(fixes, area, policy, () => entered = true);
+        final ({int first, int last, int count})? stay = _bestStay(fixes, area, tripPolicy, () => entered = true);
         if (stay != null) {
           if (!inRange(manilaDay(stay.first))) continue;
           visits.add(CollectionVisit(
@@ -312,6 +332,7 @@ class CollectionVisits {
             fixes: stay.count,
             truckId: (value['truck_id'] ?? value['truckId'])?.toString(),
             driverId: (value['driver_id'] ?? value['driverId'])?.toString(),
+            simulated: simTrip,
           ));
         } else if (entered) {
           unconfirmed[area.name] = (unconfirmed[area.name] ?? 0) + 1;

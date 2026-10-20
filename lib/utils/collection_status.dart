@@ -187,7 +187,8 @@ class CollectionStatus {
   /// Weekly-progress marks as ACTIVITY (never as a verified visit). [progress] is
   /// `weekly_collection_progress` (week -> driver -> {areas: {key: record}}); [areaOf] maps a
   /// record key (area name or id) to the canonical area name.
-  static Map<String, List<AreaActivity>> activityFromWeeklyProgress(Object? progress, String? Function(String key) areaOf) {
+  static Map<String, List<AreaActivity>> activityFromWeeklyProgress(Object? progress, String? Function(String key) areaOf,
+      {bool includeSimulated = false}) {
     final Map<String, List<AreaActivity>> out = <String, List<AreaActivity>>{};
     if (progress is! Map) return out;
     for (final Object? week in progress.values) {
@@ -198,14 +199,16 @@ class CollectionStatus {
         areas.forEach((Object? key, Object? rec) {
           if (rec is! Map || rec['completed'] != true) return;
           final String source = (rec['completionSource'] ?? '').toString();
-          if (source == 'SIMULATION') return;
+          if (source == 'SIMULATION' && !includeSimulated) return;
           final Object? ts = rec['timestamp'];
           if (ts is! num || ts <= 0) return;
           final String? area = areaOf(key.toString());
           if (area == null) return;
           out.putIfAbsent(area, () => <AreaActivity>[]).add(AreaActivity(
               ms: ts.toInt(),
-              source: source == 'MANUAL_ALERT' ? 'Driver approach alert' : 'Weekly progress mark (GPS proximity)'));
+              source: source == 'MANUAL_ALERT'
+                  ? 'Driver approach alert'
+                  : (source == 'SIMULATION' ? 'Simulation test' : 'Weekly progress mark (GPS proximity)')));
         });
       }
     }
