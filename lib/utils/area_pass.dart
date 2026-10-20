@@ -12,7 +12,7 @@ class AreaPass {
   /// A step longer than this, or older than [maxStepSeconds], is not trusted as a straight path (GPS outage).
   static const double maxStepM = 400;
   static const int maxStepSeconds = 120;
-  static const double minRadiusM = 50;
+  static const double minRadiusM = 100; // the collection-area radius (AreaGeofence.areaRadiusM)
 
   static bool touches({
     required double lat,

@@ -2065,7 +2065,8 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       final String legacyKey = p['name'].toString().replaceAll('/', '_');
       
       double dist = Geolocator.distanceBetween(pos.latitude, pos.longitude, p['lat'], p['lng']);
-      double geofenceRadius = (p['radius'] ?? 60.0).toDouble();
+      // one 100 m circle per collection area (same as the verified-visit rule on the status and analytics screens)
+      double geofenceRadius = 100.0;
 
       final bool completedThisWeek = _purokStatus[key]?['completed'] == true || _purokStatus[legacyKey]?['completed'] == true;
 

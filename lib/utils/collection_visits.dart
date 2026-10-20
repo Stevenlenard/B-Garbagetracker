@@ -49,6 +49,11 @@ class AreaGeofence {
   /// from its own area (Central). Such a polygon is ignored and the circle around the verified area point is used.
   static const double maxPolygonSideM = 400;
 
+  /// Every collection area is the circle of this radius around its verified point (owner decision, 21 Oct 2026).
+  /// Neighbouring areas closer than 200 m (Riverside and T.M. Kalaw) overlap; a stay there counts for both, which
+  /// matches practice: the crew collects in both while passing.
+  static const double areaRadiusM = 100;
+
   bool get usesPolygon {
     if (polygon.length < 3) return false;
     if (!_inPolygon(lng, lat, polygon)) return false; // the boundary must contain its own area point

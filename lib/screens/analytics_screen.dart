@@ -1368,8 +1368,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
         name: ServiceAreaService.canonicalizeAreaName(a.name) ?? a.name,
         lat: a.entranceLat,
         lng: a.entranceLng,
-        radiusM: a.radius,
-        polygon: a.boundaryGeometry,
+        radiusM: AreaGeofence.areaRadiusM, // the stored boundaries are placeholders; one 100 m circle per area
         isTruckStop: a.isTruckStop && a.verificationStatus.toUpperCase() == 'VERIFIED',
       );
 
