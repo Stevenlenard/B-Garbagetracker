@@ -87,7 +87,12 @@ class RoutePointPolicy {
   static const double poorAccuracyM = 50;
   static const int heartbeatSeconds = 60;
   static const int poorFixPatienceSeconds = 90;
-  static const int minMovingIntervalSeconds = 2;
+  static const int minMovingIntervalSeconds = 1;
+
+  /// Receiver speed above this means the vehicle is really moving: every fix that advanced a couple of metres is
+  /// recorded (Strava-like), without the stationary-noise threshold.
+  static const double movingSpeedMps = 1.5;
+  static const double movingStepM = 2;
   static const double farEnoughToSkipIntervalM = 40;
 
   /// The receiver's own (Doppler) speed below this means the vehicle is standing: position changes under
@@ -113,6 +118,9 @@ class RoutePointPolicy {
     }
     if (accuracyM > poorAccuracyM) {
       return secondsSinceLast >= poorFixPatienceSeconds ? RouteRecordKind.heartbeat : RouteRecordKind.skip;
+    }
+    if (speedMps != null && speedMps >= movingSpeedMps && distFromLastM >= movingStepM && secondsSinceLast >= minMovingIntervalSeconds) {
+      return RouteRecordKind.moved;
     }
     if (distFromLastM >= movementThresholdM(accuracyM, lastAccuracyM) &&
         (secondsSinceLast >= minMovingIntervalSeconds || distFromLastM >= farEnoughToSkipIntervalM)) {

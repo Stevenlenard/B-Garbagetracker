@@ -58,7 +58,7 @@ void main() {
     test('real movement is recorded; a standing truck gets one heartbeat a minute', () {
       expect(d(20), RouteRecordKind.moved);
       expect(d(50, sec: 1), RouteRecordKind.moved);
-      expect(d(20, sec: 1), RouteRecordKind.skip);
+      expect(d(20, sec: 0), RouteRecordKind.skip);
       expect(d(3, sec: 60), RouteRecordKind.heartbeat);
     });
 

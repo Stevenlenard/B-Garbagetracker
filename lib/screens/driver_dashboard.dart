@@ -35,6 +35,7 @@ import '../utils/custom_notification.dart';
 import '../utils/fleet_status.dart';
 import '../utils/gps_fix_policy.dart';
 import '../utils/gps_quality.dart';
+import '../utils/area_pass.dart';
 import '../services/background_tracking.dart';
 import '../services/server_clock.dart';
 import '../utils/tracking_telemetry.dart';
@@ -409,6 +410,8 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
           'lng': s.entranceLng,
           'radius': s.radius,
           'type': s.type,
+          'endLat': s.endLat,
+          'endLng': s.endLng,
           'isTruckStop': s.isTruckStop,
           'verificationStatus': s.verificationStatus,
         });
@@ -1341,7 +1344,21 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
         if (mounted) {
           setState(() {
             _purokStatus = Map<String, dynamic>.from(data);
-            _completedCount = completed;
+            // Older GPS marks were saved under the area NAME: show them on the id as well.
+            for (final Map<String, dynamic> cfg in _purokConfigs) {
+              final String id = cfg['id'].toString();
+              final dynamic byName = _purokStatus[cfg['name'].toString().replaceAll('/', '_')];
+              if (byName is Map && byName['completed'] == true && _purokStatus[id]?['completed'] != true) {
+                _purokStatus[id] = Map<String, dynamic>.from(byName);
+              }
+            }
+            if (_purokConfigs.isNotEmpty) {
+              _completedCount = _purokStatus.entries
+                  .where((e) => e.value is Map && e.value['completed'] == true && _purokConfigs.any((c) => c['id'].toString() == e.key))
+                  .length;
+            } else {
+              _completedCount = completed;
+            }
           });
           
           // Trigger re-optimization when progress changes
@@ -1687,7 +1704,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       return AndroidSettings(
         accuracy: LocationAccuracy.bestForNavigation,
         distanceFilter: 0,
-        intervalDuration: const Duration(seconds: 2),
+        intervalDuration: const Duration(seconds: 1),
         foregroundNotificationConfig: const ForegroundNotificationConfig(
           notificationTitle: 'Garbage Truck Tracker',
           notificationText: "Sharing this truck's live location. Open the app to finish the trip.",
@@ -2030,12 +2047,14 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     final String driverId = _user!.userId.toString();
 
     for (var p in _purokConfigs) {
-      String key = p['name'].replaceAll('/', '_');
+      // Canonical id: the weekly records, the maps and the analytics all read areas by id.
+      final String key = p['id'].toString();
+      final String legacyKey = p['name'].toString().replaceAll('/', '_');
       
       double dist = Geolocator.distanceBetween(pos.latitude, pos.longitude, p['lat'], p['lng']);
       double geofenceRadius = (p['radius'] ?? 60.0).toDouble();
 
-      final bool completedThisWeek = _purokStatus[key]?['completed'] == true;
+      final bool completedThisWeek = _purokStatus[key]?['completed'] == true || _purokStatus[legacyKey]?['completed'] == true;
 
       // --- STAGED APPROACH (15 / 10 / 5 min) ---
       // Only while collecting, with a fresh fix, for an area still to be collected, and
@@ -2052,16 +2071,28 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
         continue;
       }
       
-      // 2. STABLE CONDITION: Must be within geofence at low speed
-      // Speed check: < 25 km/h ensures they are actually collecting, not just flying by.
-      bool speedValid = _isSimulationMode || (pos.speed * 3.6) < 25.0; 
+      // 2. PASS CONDITION: the travelled step touches the area (entrance point, or the whole road segment for
+      // highway areas), at any speed. A verified visit (dwell) is still judged separately and stays strict.
+      final bool touched = _isSimulationMode ||
+          AreaPass.touches(
+            lat: pos.latitude,
+            lng: pos.longitude,
+            prevLat: _proxPrev?.latitude,
+            prevLng: _proxPrev?.longitude,
+            stepSeconds: _proxPrevAt == null ? null : DateTime.now().difference(_proxPrevAt!).inSeconds,
+            entranceLat: (p['lat'] as num).toDouble(),
+            entranceLng: (p['lng'] as num).toDouble(),
+            endLat: (p['endLat'] as num?)?.toDouble(),
+            endLng: (p['endLng'] as num?)?.toDouble(),
+            radiusM: geofenceRadius,
+          );
 
-      if (dist <= geofenceRadius && speedValid) {
+      if (touched) {
         // Increment consecutive valid points inside this Purok
         _purokConsecutivePoints[key] = (_purokConsecutivePoints[key] ?? 0) + 1;
         
         // 3. PREVENT FALSE POSITIVES: Require 3 consecutive valid points (approx 6-15 seconds)
-        if (_purokConsecutivePoints[key]! >= 3 || _isSimulationMode) {
+        if (_purokConsecutivePoints[key]! >= 2 || _isSimulationMode) {
           debugPrint("[WEEKLY] Robust detection confirmed for ${p['name']}. Marking COMPLETED.");
 
           _database.ref('weekly_collection_progress/$_currentWeekKey/$driverId/areas/$key').update({
@@ -2081,14 +2112,19 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
           // Reset counter after completion
           _purokConsecutivePoints[key] = 0;
         } else {
-          debugPrint("[PROXIMITY] Inside ${p['name']}. Points: ${_purokConsecutivePoints[key]}/3");
+          debugPrint("[PROXIMITY] Inside ${p['name']}. Points: ${_purokConsecutivePoints[key]}/2");
         }
       } else {
-        // Reset counter if they leave or speed up
+        // Reset counter if they leave
         _purokConsecutivePoints[key] = 0;
       }
     }
+    _proxPrev = pos;
+    _proxPrevAt = DateTime.now();
   }
+
+  Position? _proxPrev;
+  DateTime? _proxPrevAt;
 
   final Set<String> _autoNotifiedPuroks = {};
   NotificationInbox? _inbox; // this driver's own read/dismiss/clear state
@@ -2301,8 +2337,12 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       };
       _userPub?.publish(beat);
       if (_status != "OFFLINE") {
+        // Self-heal: an open trip is always bound to the live truck node, so every map can find its route line.
+        final bool openTrip = _sessionId != null && !_tripFinished && _status != "COMPLETED" && _status != "FINISHED";
         _truckPublisher(truckId)?.publish(<String, Object?>{
           ...beat,
+          if (openTrip) 'current_session': _sessionId,
+          if (openTrip) 'trip_active': true,
           'updatedAt': DateTime.now().toIso8601String(),
         });
       }
