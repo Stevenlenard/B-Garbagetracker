@@ -22,6 +22,8 @@ import '../utils/marker_labels.dart';
 import '../utils/truck_identity.dart';
 import '../widgets/mapbox_gate.dart';
 import '../utils/map_home.dart';
+import '../utils/route_geometry.dart';
+import '../utils/gps_quality.dart';
 
 /// Standalone Web GIS Page for Resident Garbage Truck Tracking
 ///
@@ -151,6 +153,9 @@ class _StandaloneGisWebScreenState extends State<StandaloneGisWebScreen> with Ti
 
   @override
   void dispose() {
+    for (final StreamSubscription<DatabaseEvent> sub in _webRouteSubs.values) {
+      sub.cancel();
+    }
     _truckLocationsSubscription?.cancel();
     _connectionSubscription?.cancel();
     _notificationsSubscription?.cancel();
@@ -580,8 +585,88 @@ class _StandaloneGisWebScreenState extends State<StandaloneGisWebScreen> with Ti
   }
 
 
+  // --- live route lines (what each truck has passed), same source of truth as the admin map ---
+  final Map<String, StreamSubscription<DatabaseEvent>> _webRouteSubs = <String, StreamSubscription<DatabaseEvent>>{};
+  final Map<String, String> _webRouteSession = <String, String>{};
+  final Map<String, List<Map<dynamic, dynamic>>> _webRoutePts = <String, List<Map<dynamic, dynamic>>>{};
+
+  void _syncWebRoutes() {
+    final Set<String> live = <String>{};
+    for (final truck in _activeTrucks) {
+      final String tid = (truck['truck_id'] ?? '').toString();
+      final String sid = (truck['current_session'] ?? '').toString();
+      if (tid.isEmpty || sid.isEmpty) continue;
+      live.add(tid);
+      if (_webRouteSession[tid] == sid) continue;
+      _webRouteSubs.remove(tid)?.cancel();
+      _webRoutePts.remove(tid);
+      _webRouteSession[tid] = sid;
+      _webRouteSubs[tid] = FirebaseDatabase.instance.ref('driver_routes/$sid/route').onValue.listen((DatabaseEvent e) {
+        final Object? v = e.snapshot.value;
+        if (v is! Map) return;
+        final List<Map<dynamic, dynamic>> pts = <Map<dynamic, dynamic>>[
+          for (final Object? p in v.values)
+            if (p is Map) Map<dynamic, dynamic>.from(p)
+        ]..sort((a, b) => ((a['timestamp'] ?? 0) as num).compareTo((b['timestamp'] ?? 0) as num));
+        _webRoutePts[tid] = RouteJitter.collapseMaps(pts).cast<Map<dynamic, dynamic>>();
+        _drawWebRoutes();
+      });
+    }
+    for (final String tid in _webRouteSession.keys.toList()) {
+      if (live.contains(tid)) continue;
+      _webRouteSubs.remove(tid)?.cancel();
+      _webRoutePts.remove(tid);
+      _webRouteSession.remove(tid);
+      _drawWebRoutes();
+    }
+  }
+
+  bool _drawingWebRoutes = false;
+  Future<void> _drawWebRoutes() async {
+    final MapboxMap? map = _mapboxMap;
+    if (map == null || _drawingWebRoutes) return;
+    _drawingWebRoutes = true;
+    try {
+      final style = map.style;
+      if (!await style.isStyleLoaded()) return;
+      final List<Map<String, dynamic>> features = <Map<String, dynamic>>[];
+      _webRoutePts.forEach((String tid, List<Map<dynamic, dynamic>> pts) {
+        for (final Map<String, dynamic> f in RouteGeometry.lineFeatures(pts)) {
+          (f['properties'] as Map<String, dynamic>)['truckColor'] = TruckIdentity.hex(tid);
+          features.add(f);
+        }
+      });
+      final String data = jsonEncode({"type": "FeatureCollection", "features": features});
+      if (!(await style.styleSourceExists("web-routes-source"))) {
+        await style.addSource(GeoJsonSource(id: "web-routes-source", data: data));
+        final LineLayer layer = LineLayer(
+          id: "web-routes-layer",
+          sourceId: "web-routes-source",
+          lineColor: Colors.green.toARGB32(),
+          lineWidth: 5.0,
+          lineOpacity: 0.9,
+          lineCap: LineCap.ROUND,
+          lineJoin: LineJoin.ROUND,
+        );
+        if (await style.styleLayerExists("web-trucks-pulse-layer")) {
+          await style.addLayer(layer, LayerPosition(below: "web-trucks-pulse-layer"));
+        } else {
+          await style.addLayer(layer);
+        }
+        await style.setStyleLayerProperty("web-routes-layer", "line-color", ["get", "truckColor"]);
+      } else {
+        await style.setStyleSourceProperty("web-routes-source", "data", data);
+      }
+    } catch (_) {
+    } finally {
+      _drawingWebRoutes = false;
+    }
+  }
+
   Future<void> _updateMapMarkers([BuildContext? ctx]) async {
     if (_mapboxMap == null) return;
+    _syncWebRoutes();
+    _drawWebRoutes();
     if (_isUpdatingMarkers) {
       _markersDirty = true;
       return;

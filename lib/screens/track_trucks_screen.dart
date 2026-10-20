@@ -1115,6 +1115,13 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> with TickerProvid
           final existing = driverToLatestTruck[driverKey]!;
           final int existingSeen = (existing['lastSeen'] ?? 0) as int;
           if (lastSeen >= existingSeen) {
+            // The newer node may be the legacy server row, which knows no trip: keep the trip binding so the
+            // route line (driver_routes/<session>) is still found.
+            final String keptSession = (existing['current_session'] ?? '').toString();
+            if (keptSession.isNotEmpty && (item['current_session'] ?? '').toString().isEmpty) {
+              item['current_session'] = keptSession;
+              item['trip_active'] = existing['trip_active'];
+            }
             driverToLatestTruck[driverKey] = item;
           }
         }

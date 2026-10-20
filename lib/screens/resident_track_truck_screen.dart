@@ -631,7 +631,10 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
     }
   }
 
+  final Set<String> _autoShownRoutes = <String>{};
+
   void _setupRouteSubscription(String truckId, String sessionId) {
+    if (_routeSessionByTruck[truckId] != sessionId) _autoShownRoutes.remove(truckId);
     _routeSubscriptions[truckId]?.cancel();
     _tripMetaSubscriptions.remove(truckId)?.cancel();
     _routeSessionByTruck[truckId] = sessionId;
@@ -643,6 +646,9 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
         points.sort((a, b) => (a['timestamp'] ?? 0).compareTo(b['timestamp'] ?? 0));
 
         _lastRoutePoints[truckId] = RouteJitter.collapseMaps(points);
+
+        // A truck's live route is shown as soon as it exists (what it has passed); the card can still hide it.
+        if (_autoShownRoutes.add(truckId)) _comparingTrucks.add(truckId);
 
         if (_comparingTrucks.contains(truckId)) {
           _updateRoutePolyline(truckId, points);
