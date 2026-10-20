@@ -1,3 +1,4 @@
+import '../utils/rtdb_map.dart';
 import '../services/server_clock.dart';
 import '../widgets/truck_legend.dart';
 import '../widgets/floating_map_legend.dart';
@@ -332,7 +333,7 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
     _usersSubscription?.cancel();
     _usersSubscription = _database.ref('users').onValue.listen((event) {
       if (event.snapshot.exists && event.snapshot.value != null) {
-        final Map data = event.snapshot.value as Map;
+        final Map data = rtdbMap(event.snapshot.value)!;
         final Set<String> validDriverIds = {};
         final Set<String> validDriverNames = {};
 

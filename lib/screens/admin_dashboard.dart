@@ -1,3 +1,4 @@
+import '../utils/rtdb_map.dart';
 import '../services/server_clock.dart';
 import '../widgets/logout_choice_dialog.dart';
 import '../utils/relative_time.dart';
@@ -373,7 +374,7 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
   void _listenToUsersPresence() {
     _usersPresenceSubscription?.cancel();
     _usersPresenceSubscription = _database.ref('users').onValue.listen((event) {
-      _rawUsers = (event.snapshot.exists && event.snapshot.value is Map) ? event.snapshot.value as Map : null;
+      _rawUsers = event.snapshot.exists ? rtdbMap(event.snapshot.value) : null;
       _applyUsersPresence();
     });
     // Presence ages without any event (a crashed driver writes nothing), so it is

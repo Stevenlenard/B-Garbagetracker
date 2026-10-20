@@ -1,3 +1,4 @@
+import '../utils/rtdb_map.dart';
 import '../services/server_clock.dart';
 import '../widgets/logout_choice_dialog.dart';
 import '../services/rtdb_port.dart';
@@ -342,7 +343,7 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
     _totalTruckSubscription?.cancel();
     _totalTruckSubscription = _database.ref('users').onValue.listen((event) {
       if (event.snapshot.exists && event.snapshot.value != null) {
-        final Map data = event.snapshot.value as Map;
+        final Map data = rtdbMap(event.snapshot.value)!;
         int driverCount = 0;
         data.forEach((key, value) {
           if (value is Map) {

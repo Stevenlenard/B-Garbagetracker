@@ -1,4 +1,5 @@
 // Fleet Tracking Screen for Garbage Tracker
+import '../utils/rtdb_map.dart';
 import '../services/server_clock.dart';
 import '../widgets/truck_legend.dart';
 import '../widgets/floating_map_legend.dart';
@@ -193,7 +194,7 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> with TickerProvid
 
         final usersSnapshot = await _database.ref('users').get();
         if (usersSnapshot.exists) {
-          final Map data = usersSnapshot.value as Map;
+          final Map data = rtdbMap(usersSnapshot.value)!;
           final Map<String, String> currentAssignments = {};
           data.forEach((key, value) {
             if (value is Map && value['role'] == 'driver') {
@@ -862,7 +863,7 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> with TickerProvid
     _usersSubscription?.cancel();
     _usersSubscription = _database.ref('users').onValue.listen((event) {
       if (event.snapshot.exists && event.snapshot.value != null) {
-        final Map data = event.snapshot.value as Map;
+        final Map data = rtdbMap(event.snapshot.value)!;
         final Map<String, String> currentAssignments = {};
         final Map<String, String> userNames = {};
         final Set<String> archivedIds = {};

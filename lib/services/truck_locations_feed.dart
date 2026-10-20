@@ -1,3 +1,4 @@
+import '../utils/rtdb_map.dart';
 import 'dart:async';
 
 import 'package:firebase_database/firebase_database.dart';
@@ -219,7 +220,7 @@ Stream<ChildEvent> _firebaseChildEvents() {
       }
 
       subs.add(FirebaseDatabase.instance.ref('users').onValue.listen((DatabaseEvent e) {
-        lastUsers = e.snapshot.value;
+        lastUsers = rtdbMap(e.snapshot.value);
         sync(lastUsers);
       }, onError: (Object _) {}));
     },
