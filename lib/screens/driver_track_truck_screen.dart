@@ -1,3 +1,4 @@
+import '../utils/route_geometry.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
@@ -431,6 +432,7 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> with Ti
         });
       }
       _updateLocalDriverMarker(pos);
+      if (_lastPoints.isNotEmpty) _updateRoutePolyline(_lastPoints);
     });
   }
 
@@ -1073,6 +1075,10 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> with Ti
     }
 
     final List<Map> rawPoints = [];
+    if (!widget.isHistorical && _lastLocalPos != null) {
+      // the line reaches the driver's own live position (no trailing gap until the next saved point)
+      points = RouteGeometry.withLiveTail(points, _lastLocalPos!.latitude, _lastLocalPos!.longitude);
+    }
     
     // Only include start point if points is empty OR start point is within 300m of points.first
     if (_lastSessionData != null &&
@@ -1153,6 +1159,7 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> with Ti
 
         // Skip exact duplicate consecutive points (< 0.5 meters)
         if (d < 0.5) continue;
+        if (p['live_tail'] != true) {
 
         // Reject impossible GPS jump (implied speed > 120 km/h or > 400m in < 10s)
         if (dtSec > 0) {
@@ -1165,6 +1172,7 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> with Ti
             debugPrint("[MAP ROUTE] Skipping sudden jump: ${d.toStringAsFixed(1)}m in ${dtSec.toStringAsFixed(1)}s");
             continue;
           }
+        }
         }
       }
 

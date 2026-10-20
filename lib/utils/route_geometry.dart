@@ -58,6 +58,10 @@ class RouteGeometry {
         final double dtSec = (ts > 0 && prevTs > 0) ? (ts - prevTs) / 1000.0 : 0.0;
 
         if (d < 0.5) continue; // exact duplicate fix
+        if (p['live_tail'] == true) {
+          valid.add(p); // the live position is already filtered by the driver app: never treated as a jump
+          continue;
+        }
         if (dtSec > 0) {
           final double kmh = (d / dtSec) * 3.6;
           if (kmh > 120.0 && d > 100.0) continue; // impossible jump
@@ -67,6 +71,28 @@ class RouteGeometry {
       valid.add(p);
     }
     return valid;
+  }
+
+  /// The recorded route with the truck's LIVE position appended as its last vertex, so the drawn line always
+  /// reaches the marker instead of trailing behind it until the next route point is saved. Nothing is added when the
+  /// live position is missing, (almost) the same as the last point, or implausibly far from it.
+  static List<Map> withLiveTail(List<Map> points, double? lat, double? lng) {
+    if (points.isEmpty || lat == null || lng == null || (lat == 0 && lng == 0)) return points;
+    final Map last = points.reduce((a, b) => _ts(a['timestamp']) >= _ts(b['timestamp']) ? a : b);
+    final double d = distanceM(_lat(last), _lng(last), lat, lng);
+    if (d < 3 || d > 2000) return points;
+    return <Map>[
+      ...points,
+      <String, Object?>{
+        'lat': lat,
+        'lng': lng,
+        'timestamp': _ts(last['timestamp']) + 1000,
+        'accuracy': 0,
+        'status': last['status'],
+        'color': last['color'],
+        'live_tail': true,
+      },
+    ];
   }
 
   /// GeoJSON LineString features (one per single-colour stretch; neighbouring stretches share their joint point).

@@ -575,6 +575,10 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
     if (mounted) {
       setState(() => _trucks = mergedList);
       _updateTruckMarkers();
+      // the line follows the marker on every position update
+      _lastRoutePoints.forEach((tid, pts) {
+        if (_comparingTrucks.contains(tid)) _updateRoutePolyline(tid, pts);
+      });
 
       // Real-time camera follow for targeted driver
       if (_isFollowLocked && _followedTruckId != null) {
@@ -716,7 +720,11 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
 
     // Same geometry rules as the Admin live map (utils/route_geometry.dart). Fewer than
     // two valid points draws nothing: no line is ever invented.
-    final List<Map<String, dynamic>> features = RouteGeometry.lineFeatures(points);
+    final Map<dynamic, dynamic>? live = _trucks.cast<Map<dynamic, dynamic>?>().firstWhere(
+        (t) => t != null && t['isOnline'] == true && (t['truck_id'] ?? '').toString() == truckId,
+        orElse: () => null);
+    final List<Map<String, dynamic>> features = RouteGeometry.lineFeatures(RouteGeometry.withLiveTail(
+        points, (live?['latitude'] as num?)?.toDouble(), (live?['longitude'] as num?)?.toDouble()));
     final String sourceId = "route-source-$truckId";
     final featureCollection = {"type": "FeatureCollection", "features": features};
     try {

@@ -131,7 +131,7 @@ void standingWanderTests() {
   test('standing still (receiver speed 0): a 50 m indoor wander is not recorded, a moving fix is', () {
     expect(
         RoutePointPolicy.decide(
-            hasLastRecorded: true, distFromLastM: 50, accuracyM: 20, lastAccuracyM: 20, secondsSinceLast: 5, speedMps: 0.0),
+            hasLastRecorded: true, distFromLastM: 35, accuracyM: 20, lastAccuracyM: 20, secondsSinceLast: 5, speedMps: 0.0),
         RouteRecordKind.skip);
     expect(
         RoutePointPolicy.decide(

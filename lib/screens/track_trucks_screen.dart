@@ -546,8 +546,13 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> with TickerProvid
 
       final List<Map<String, dynamic>> features = <Map<String, dynamic>>[];
       for (final String tid in _visiblePaths) {
-        final List<Map<dynamic, dynamic>>? pts = _lastRoutePoints[tid];
-        if (pts == null) continue;
+        final List<Map<dynamic, dynamic>>? recorded = _lastRoutePoints[tid];
+        if (recorded == null) continue;
+        final Map<dynamic, dynamic>? live = _trucks.cast<Map<dynamic, dynamic>?>().firstWhere(
+            (t) => t != null && t['isOnline'] == true && (t['truck_id'] ?? '').toString() == tid,
+            orElse: () => null);
+        final List<Map> pts = RouteGeometry.withLiveTail(
+            recorded, (live?['latitude'] as num?)?.toDouble(), (live?['longitude'] as num?)?.toDouble());
         final bool selected = _highlightedTruckId != null && TruckIdentity.normalize(_highlightedTruckId!) == TruckIdentity.normalize(tid);
         final bool dim = _highlightedTruckId != null && !selected;
         for (final Map<String, dynamic> f in RouteGeometry.lineFeatures(pts)) {
@@ -1167,6 +1172,7 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> with TickerProvid
 
     _syncRouteSubscriptions();
     _updateTruckMarkers();
+    _refreshLiveRouteLines(); // the line follows the marker on every position update
   }
 
   // Set when new truck data arrives during an in-flight marker update; the update

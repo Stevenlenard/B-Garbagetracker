@@ -91,13 +91,13 @@ class RoutePointPolicy {
 
   /// Receiver speed above this means the vehicle is really moving: every fix that advanced a couple of metres is
   /// recorded (Strava-like), without the stationary-noise threshold.
-  static const double movingSpeedMps = 1.5;
+  static const double movingSpeedMps = 1.0;
   static const double movingStepM = 2;
   static const double farEnoughToSkipIntervalM = 40;
 
   /// The receiver's own (Doppler) speed below this means the vehicle is standing: position changes under
   /// [standingWanderM] are signal wander (indoors, under roofs, weak signal), never travel.
-  static const double standingSpeedMps = 0.8;
+  static const double standingSpeedMps = 0.5;
   static const double standingWanderM = 60;
 
   /// How far a fix must be from the last recorded point to count as movement.
@@ -113,7 +113,9 @@ class RoutePointPolicy {
     double? speedMps,
   }) {
     if (!hasLastRecorded) return RouteRecordKind.moved;
-    if (speedMps != null && speedMps >= 0 && speedMps < standingSpeedMps && distFromLastM < standingWanderM) {
+    // the wander radius scales with the fix quality: indoors (30-50 m accuracy) up to 60 m, outdoors about 20 m
+    final double wanderM = (2 * math.max(accuracyM, lastAccuracyM)).clamp(20.0, standingWanderM).toDouble();
+    if (speedMps != null && speedMps >= 0 && speedMps < standingSpeedMps && distFromLastM < wanderM) {
       return secondsSinceLast >= heartbeatSeconds ? RouteRecordKind.heartbeat : RouteRecordKind.skip;
     }
     if (accuracyM > poorAccuracyM) {
