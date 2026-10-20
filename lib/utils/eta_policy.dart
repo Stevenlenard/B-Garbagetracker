@@ -10,7 +10,7 @@
 enum EtaKind { minutes, arrived, unavailable }
 
 class EtaResult {
-  const EtaResult.minutes(this.minutes, {this.approximate = true, this.stage})
+  const EtaResult.minutes(this.minutes, {this.approximate = true, this.stage, this.seconds})
       : kind = EtaKind.minutes,
         reason = null;
 
@@ -19,16 +19,21 @@ class EtaResult {
         minutes = null,
         approximate = false,
         stage = null,
+        seconds = null,
         reason = null;
 
   const EtaResult.unavailable(this.reason)
       : kind = EtaKind.unavailable,
         minutes = null,
         approximate = false,
-        stage = null;
+        stage = null,
+        seconds = null;
 
   final EtaKind kind;
   final int? minutes;
+
+  /// Unrounded estimate in seconds (for a live countdown between updates).
+  final int? seconds;
   final bool approximate;
 
   /// Notification stage reached (15 / 10 / 5 minutes), when it applies.
@@ -91,7 +96,7 @@ class EtaPolicy {
     final double raw = distanceKm / speed * 60.0;
     final int minutes = raw <= 1.0 ? 1 : raw.ceil();
     if (minutes > maxMinutes) return const EtaResult.unavailable('The truck is too far for a useful estimate.');
-    return EtaResult.minutes(minutes, approximate: !distanceIsRoute, stage: stageFor(minutes));
+    return EtaResult.minutes(minutes, approximate: !distanceIsRoute, stage: stageFor(minutes), seconds: (raw * 60).round());
   }
 
   /// 15 / 10 / 5 minute stage for [minutes], or null while farther than 15 minutes.

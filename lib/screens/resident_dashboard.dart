@@ -70,6 +70,41 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
   String? _targetComplaintId;
   bool _shouldShowDataManagement = false;
   String _etaText = "--";
+
+  // Live countdown: each new estimate (every truck update) re-anchors it, so it runs faster or slower with the
+  // truck's real speed and distance; between updates it ticks down every second.
+  int? _etaTargetMs;
+  String? _etaTrend; // 'faster' / 'slower' than the previous estimate
+  Timer? _etaTicker;
+
+  void _anchorEta(EtaResult? best) {
+    final int now = ServerClock.instance.nowMs();
+    if (best == null || best.kind != EtaKind.minutes || best.seconds == null) {
+      _etaTargetMs = null;
+      _etaTrend = null;
+      _etaTicker?.cancel();
+      _etaTicker = null;
+      return;
+    }
+    final int target = now + best.seconds! * 1000;
+    final int? previous = _etaTargetMs;
+    if (previous != null) {
+      final int diff = target - previous; // later arrival than the countdown expected -> slower
+      _etaTrend = diff < -20000 ? 'faster' : (diff > 20000 ? 'slower' : _etaTrend);
+    }
+    _etaTargetMs = target;
+    _etaTicker ??= Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted || _etaTargetMs == null) return;
+      setState(() => _etaText = _countdownLabel());
+    });
+  }
+
+  String _countdownLabel() {
+    final int left = ((_etaTargetMs! - ServerClock.instance.nowMs()) / 1000).round();
+    if (left <= 30) return '< 1 min';
+    final String mmss = '${left ~/ 60}:${(left % 60).toString().padLeft(2, '0')}';
+    return _etaTrend == 'faster' ? '~$mmss ↓' : (_etaTrend == 'slower' ? '~$mmss ↑' : '~$mmss');
+  }
   String _currentTime = "";
   Timer? _clockTimer;
   Future<Response>? _complaintsFuture;
@@ -138,6 +173,7 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
 
   @override
   void dispose() {
+    _etaTicker?.cancel();
     NotificationService.openHomeRequests.removeListener(_openHomeFromNotification);
     _scheduleSub?.cancel();
     _clockTimer?.cancel();
@@ -451,7 +487,10 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
           );
           if (best == null || (r.isAvailable && (!best.isAvailable || rank(r) < rank(best)))) best = r;
         }
-        final String etaDisplay = activeCount == 0 ? "--" : (best?.label ?? "ETA unavailable");
+        _anchorEta(activeCount == 0 ? null : best);
+        final String etaDisplay = activeCount == 0
+            ? "--"
+            : (_etaTargetMs != null ? _countdownLabel() : (best?.label ?? "ETA unavailable"));
         if (mounted) setState(() { _activeTrucks = activeCount; _etaText = etaDisplay; });
         if (telemetryClock != null) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -461,6 +500,7 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
       }
     } else if (mounted) {
       // No truck data at all: clear the count instead of leaving a stale value.
+      _anchorEta(null);
       setState(() { _activeTrucks = 0; _etaText = "--"; });
     }
   }
