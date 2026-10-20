@@ -44,7 +44,18 @@ class AreaGeofence {
   /// false = stationary street-sweeping area (not serviced by the truck): never visited.
   final bool isTruckStop;
 
-  bool get usesPolygon => polygon.length >= 3;
+  /// Largest plausible boundary of one collection area. The stored boxes of about 650 x 670 m are placeholders
+  /// that overlap their neighbours (a walk near Dali counted as a Brixton Homes visit), and one box lies 1.2 km away
+  /// from its own area (Central). Such a polygon is ignored and the circle around the verified area point is used.
+  static const double maxPolygonSideM = 400;
+
+  bool get usesPolygon {
+    if (polygon.length < 3) return false;
+    if (!_inPolygon(lng, lat, polygon)) return false; // the boundary must contain its own area point
+    final double minLng = polygon.map((p) => p[0]).reduce(math.min), maxLng = polygon.map((p) => p[0]).reduce(math.max);
+    final double minLat = polygon.map((p) => p[1]).reduce(math.min), maxLat = polygon.map((p) => p[1]).reduce(math.max);
+    return _distanceM(lat, minLng, lat, maxLng) <= maxPolygonSideM && _distanceM(minLat, lng, maxLat, lng) <= maxPolygonSideM;
+  }
 
   bool contains(double pLat, double pLng) {
     if (usesPolygon) return _inPolygon(pLng, pLat, polygon);
