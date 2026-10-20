@@ -88,23 +88,35 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    _inForeground = state == AppLifecycleState.resumed;
     if (state == AppLifecycleState.resumed) _ensureGpsAlive(force: true);
   }
 
-  /// Keeps recording continuous: if an open trip has received no fix for 20 s (the stream was dropped by the
-  /// system), the stream is re-armed and a fresh fix is requested immediately.
+  bool _inForeground = true;
+  DateTime? _lastRawFixAt; // any fix from the receiver, before filtering (a filtered fix still proves GPS is alive)
+
+  void _onRawFix(Position pos) {
+    _lastRawFixAt = DateTime.now();
+    _processNewPosition(pos);
+  }
+
+  /// Keeps recording continuous while the app is OPEN: if no fix at all arrived for 30 s, the stream is re-armed
+  /// and a fresh fix requested. In the background it never touches the stream: cancelling it would stop the
+  /// foreground location service, and Android does not allow starting it again from the background (that was
+  /// what stopped background tracking).
   void _ensureGpsAlive({bool force = false}) {
     if (!mounted || kIsWeb || _isSimulationMode) return;
+    if (!_inForeground) return;
     if (_sessionId == null || _status == "OFFLINE" || _status == "FINISHED") return;
-    final DateTime? last = _lastGpsUpdateTime;
-    final bool stale = last == null || DateTime.now().difference(last).inSeconds > 20;
-    if (!stale && !force) return;
+    final DateTime? last = _lastRawFixAt;
+    final bool stale = last == null || DateTime.now().difference(last).inSeconds > 30;
     if (!stale && _positionSubscription != null) return;
+    if (!stale && !force) return;
     debugPrint("[GPS WATCHDOG] re-arming position stream");
     _positionSubscription?.cancel();
-    _positionSubscription = Geolocator.getPositionStream(locationSettings: _trackingSettings()).listen((pos) => _processNewPosition(pos));
+    _positionSubscription = Geolocator.getPositionStream(locationSettings: _trackingSettings()).listen(_onRawFix);
     Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.bestForNavigation)
-        .then(_processNewPosition)
+        .then(_onRawFix)
         .catchError((Object e) => debugPrint("[GPS WATCHDOG] fix failed: $e"));
   }
   Map<String, dynamic> _maintenanceData = {};
@@ -1734,7 +1746,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       debugPrint("[GPS INITIAL FIX ERROR] $e");
     }
 
-    _positionSubscription = Geolocator.getPositionStream(locationSettings: _trackingSettings()).listen((pos) => _processNewPosition(pos));
+    _positionSubscription = Geolocator.getPositionStream(locationSettings: _trackingSettings()).listen(_onRawFix);
   }
 
   void _processNewPosition(Position pos) {
