@@ -56,6 +56,24 @@ html = open(index, encoding='utf-8').read()
 tag = '<script src="flutter_bootstrap.js" async></script>'
 if html.count(tag) != 1:
     sys.exit('web_cache_bust: bootstrap <script> tag not found in index.html')
-html = html.replace(tag, CLEANUP + '<script src="flutter_bootstrap.js?v=%s" async></script>' % v)
+UPDATE = """<script>
+    // An open page reloads itself once a newer build is deployed (checked every 5 minutes and when the tab is shown).
+    (function () {
+      var current = '%s';
+      function check() {
+        fetch('flutter_bootstrap.js?check=' + Date.now(), { cache: 'no-store' })
+          .then(function (r) { return r.ok ? r.text() : ''; })
+          .then(function (t) {
+            var m = /main\\.dart\\.js\\?v=([0-9a-f]+)/.exec(t);
+            if (m && m[1] !== current) location.reload();
+          })
+          .catch(function () {});
+      }
+      setInterval(check, 5 * 60 * 1000);
+      document.addEventListener('visibilitychange', function () { if (!document.hidden) check(); });
+    })();
+  </script>
+  """ % v
+html = html.replace(tag, CLEANUP + UPDATE + '<script src="flutter_bootstrap.js?v=%s" async></script>' % v)
 open(index, 'w', encoding='utf-8', newline='').write(html)
 print('web_cache_bust: build %s (main.dart.js + flutter_bootstrap.js versioned, service worker off)' % v)

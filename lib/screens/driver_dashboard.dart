@@ -2050,6 +2050,12 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     if (_sessionId == null || _currentWeekKey == null || _user == null) {
       return;
     }
+    // A FULL truck (or a paused one) is not collecting: passing an area neither marks it nor alerts its residents.
+    if (_collectionFrozen || _status.toUpperCase() != 'ACTIVE') {
+      _proxPrev = pos;
+      _proxPrevAt = DateTime.now();
+      return;
+    }
     
     // 1. GPS QUALITY CHECK: Ignore bad accuracy or stale events
     if (pos.accuracy > 40 && !_isSimulationMode) {
