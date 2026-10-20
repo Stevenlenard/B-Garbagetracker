@@ -2729,7 +2729,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
         longitude: targetPurok['lng'], 
         timestamp: DateTime.now(), 
         accuracy: 5.0, // High accuracy for simulation
-        altitude: 0, heading: 0, speed: 15.0,
+        altitude: 0, heading: 0, speed: 2.0, // collection pace
         speedAccuracy: 0, altitudeAccuracy: 0, headingAccuracy: 0
       );
       
@@ -2744,8 +2744,20 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       _processNewPosition(pos);
     }
 
-    // Move to the selected Purok instantly
+    // Move to the selected Purok instantly, then stay there with a fix every 5 s (like a truck collecting), so the
+    // simulation leaves real simulated route points: the area turns green as a "simulation test" visit.
     sendSimulatedUpdate(config);
+    int tick = 0;
+    _simulationTimer = Timer.periodic(const Duration(seconds: 5), (Timer t) {
+      if (!mounted || !_isSimulationMode) {
+        t.cancel();
+        return;
+      }
+      tick++;
+      // a few metres of movement inside the area, so each fix is a new recorded point
+      final double off = 0.00003 * ((tick % 4) - 1.5);
+      sendSimulatedUpdate(<String, dynamic>{...config, 'lat': (config['lat'] as num).toDouble() + off, 'lng': (config['lng'] as num).toDouble() - off});
+    });
   }
 
   void _sendManualAlert(String area) async {
