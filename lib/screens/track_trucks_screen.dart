@@ -1,4 +1,5 @@
 // Fleet Tracking Screen for Garbage Tracker
+import '../utils/map_fit.dart';
 import '../utils/rtdb_map.dart';
 import '../services/server_clock.dart';
 import '../widgets/truck_legend.dart';
@@ -1173,6 +1174,13 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> with TickerProvid
     _syncRouteSubscriptions();
     _updateTruckMarkers();
     _refreshLiveRouteLines(); // the line follows the marker on every position update
+    // Follow (the TRACKING button of a truck card): the camera glides with the truck on every update.
+    if (_isFollowLocked && _followedTruckId != null) {
+      for (final Map<dynamic, dynamic> t in _trucks) {
+        if ((t['truck_id'] ?? '').toString().toUpperCase() != _followedTruckId!.toUpperCase()) continue;
+        MapFit.glide(mapboxMap, (t['latitude'] as num?)?.toDouble() ?? 0, (t['longitude'] as num?)?.toDouble() ?? 0);
+      }
+    }
   }
 
   // Set when new truck data arrives during an in-flight marker update; the update
@@ -2696,23 +2704,29 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> with TickerProvid
           // TARGET / GPS LOCATION BUTTON
           _buildMapControlButton(
             icon: Icons.gps_fixed_rounded,
-            isActive: _isFollowLocked,
+            isActive: _isTargetActive,
             size: btnSize,
             iconSize: iconSize,
-            // Recenter + follow: stays locked on the moving truck until tapped again (or another truck is followed).
+            // Recenter on the FLEET: frames every online truck (one or many). Following one truck is the
+            // TRACKING button on that truck's card.
             onTap: () {
-              final activeTrucks = _trucks.where((t) => t['isOnline'] == true && (t['latitude'] ?? 0) != 0).toList();
-              if (_isFollowLocked) {
-                setState(() {
-                  _isFollowLocked = false;
-                  _followedTruckId = null;
-                });
-              } else if (activeTrucks.isNotEmpty) {
-                final Map<dynamic, dynamic> t = activeTrucks.first;
-                _toggleFollowTruck((t['truck_id'] ?? t['truckId'] ?? '').toString(), t);
-              } else {
+              final List<List<double>> pts = _trucks
+                  .where((t) => t['isOnline'] == true && (t['latitude'] ?? 0) != 0)
+                  .map((t) => <double>[(t['longitude'] as num).toDouble(), (t['latitude'] as num).toDouble()])
+                  .toList();
+              setState(() {
+                _isTargetActive = true;
+                _isFollowLocked = false;
+                _followedTruckId = null;
+              });
+              if (pts.isEmpty) {
                 _recenterToBalintawak();
+              } else {
+                mapboxMap?.easeTo(MapFit.camera(pts), MapAnimationOptions(duration: 900));
               }
+              Future.delayed(const Duration(seconds: 2), () {
+                if (mounted) setState(() => _isTargetActive = false);
+              });
             },
           ),
           const SizedBox(height: 12),

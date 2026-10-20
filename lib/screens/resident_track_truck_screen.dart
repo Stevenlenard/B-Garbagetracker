@@ -1,3 +1,4 @@
+import '../utils/map_fit.dart';
 import '../utils/rtdb_map.dart';
 import '../services/server_clock.dart';
 import '../widgets/truck_legend.dart';
@@ -429,8 +430,9 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
       if (mounted) {
         setState(() => _residentPosition = pos);
         _updateTruckMarkers();
-        if (_isFollowLocked && mapboxMap != null) {
-          mapboxMap?.setCamera(CameraOptions(center: Point(coordinates: Position(pos.longitude, pos.latitude))));
+        // follows the resident only while no truck is followed (otherwise the camera would jump between both)
+        if (_isFollowLocked && _followedTruckId == null && mapboxMap != null) {
+          MapFit.glide(mapboxMap, pos.latitude, pos.longitude);
         }
       }
     });
@@ -589,9 +591,7 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
         if (followed.isNotEmpty) {
           final double lat = (followed['latitude'] ?? 0.0).toDouble();
           final double lng = (followed['longitude'] ?? 0.0).toDouble();
-          if (lat != 0 && lng != 0) {
-            mapboxMap?.setCamera(CameraOptions(center: Point(coordinates: Position(lng, lat))));
-          }
+          if (lat != 0 && lng != 0) MapFit.glide(mapboxMap, lat, lng);
         }
       }
       
@@ -1108,27 +1108,30 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
           // TARGET / GPS LOCATION BUTTON (Recenter to Resident's GPS position)
           _buildMapControlButton(
             icon: Icons.gps_fixed_rounded,
-            isActive: _isFollowLocked && _followedTruckId != null,
+            isActive: _isTargetActive,
             size: btnSize,
             iconSize: iconSize,
-            // Recenter + follow the moving truck; tap again to stop. With no truck online it centres on the resident.
+            // Recenter: frames you and every online truck. Following one truck is the button on that truck's card.
             onTap: () {
-              final online = _trucks.where((t) => t['isOnline'] == true && (t['latitude'] ?? 0) != 0).toList();
-              if (_isFollowLocked && _followedTruckId != null) {
-                setState(() {
-                  _isFollowLocked = false;
-                  _followedTruckId = null;
-                });
-              } else if (online.isNotEmpty) {
-                final Map<dynamic, dynamic> t = online.first;
-                _toggleFollowTruck((t['truck_id'] ?? t['truckId'] ?? '').toString(), t);
+              final List<List<double>> pts = <List<double>>[
+                for (final t in _trucks)
+                  if (t['isOnline'] == true && (t['latitude'] ?? 0) != 0)
+                    <double>[(t['longitude'] as num).toDouble(), (t['latitude'] as num).toDouble()],
+                if (_residentPosition != null) <double>[_residentPosition!.longitude, _residentPosition!.latitude],
+              ];
+              setState(() {
+                _isTargetActive = true;
+                _isFollowLocked = false;
+                _followedTruckId = null;
+              });
+              if (pts.isEmpty) {
+                _recenterToBalintawak();
               } else {
-                setState(() => _isTargetActive = true);
-                _recenterToResident();
-                Future.delayed(const Duration(seconds: 2), () {
-                  if (mounted) setState(() => _isTargetActive = false);
-                });
+                mapboxMap?.easeTo(MapFit.camera(pts), MapAnimationOptions(duration: 900));
               }
+              Future.delayed(const Duration(seconds: 2), () {
+                if (mounted) setState(() => _isTargetActive = false);
+              });
             },
           ),
           const SizedBox(height: 12),

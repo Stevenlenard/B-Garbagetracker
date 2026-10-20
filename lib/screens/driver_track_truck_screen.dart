@@ -1,3 +1,4 @@
+import '../utils/map_fit.dart';
 import '../utils/route_geometry.dart';
 import 'dart:async';
 import 'dart:convert';
@@ -808,9 +809,7 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> with Ti
       }
 
       // ENSURE CAMERA FOLLOWS IF LOCKED - Applied immediately after source update
-      if (_isFollowLocked) {
-        mapboxMap?.setCamera(CameraOptions(center: Point(coordinates: Position(pos.longitude, pos.latitude))));
-      }
+      if (_isFollowLocked) MapFit.glide(mapboxMap, pos.latitude, pos.longitude);
     } catch (e) {}
   }
 
