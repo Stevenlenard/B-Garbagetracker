@@ -2493,6 +2493,9 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
             lng: _currentPosition?.longitude,
           ),
           'finishTime': ServerValue.timestamp,
+          // trace: which control finished the trip, and how long after FULL (to find unintended completions)
+          'finish_source': _finishSource,
+          if (_fullConfirmedAt != null) 'finish_after_full_s': DateTime.now().difference(_fullConfirmedAt!).inSeconds,
         },
       );
       if (fr == FinishResult.notOwner) {
@@ -5411,7 +5414,14 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       confirmColor: Colors.pink,
     );
     if (!confirmed || !mounted) return;
-    await _finalizeCollection(via: 'FULL');
+    final bool saved = await _finalizeCollection(via: 'FULL');
+    if (saved) {
+      _fullConfirmedAt = DateTime.now();
+      if (mounted) {
+        CustomSnackBar.show(context,
+            message: "FULL saved. Your route continues in red; press COMPLETED only after unloading.", isError: false);
+      }
+    }
   }
 
   /// Freezes the collection (duration, distance, route, load) exactly once and
@@ -5550,7 +5560,20 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     }
   }
 
+  DateTime? _fullConfirmedAt; // when this runtime saved FULL (guards an immediate, unintended COMPLETED)
+  String _finishSource = 'completed_button';
+
   void _showFinishConfirmation() async {
+    // A tap on COMPLETED within a few seconds of FULL is treated as accidental (e.g. a repeated tap on the FULL
+    // dialog): the trip would end and the truck would leave every map while the driver is still driving FULL.
+    final DateTime? fullAt = _fullConfirmedAt;
+    if (fullAt != null && DateTime.now().difference(fullAt).inSeconds < 15) {
+      if (mounted) {
+        CustomSnackBar.show(context,
+            message: "FULL was just saved. Drive to the disposal site, then press COMPLETED after unloading.", isError: false);
+      }
+      return;
+    }
     debugPrint("[FINISH] DONE button clicked. Attempting to resolve session state...");
     
     // We no longer block the button if session Id is null.

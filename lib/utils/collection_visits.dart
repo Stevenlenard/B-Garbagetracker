@@ -90,7 +90,7 @@ class AreaGeofence {
 
 class VisitPolicy {
   const VisitPolicy({
-    this.minFixes = 3,
+    this.minFixes = 2, // with minDwellMs: two fixes at least one minute apart (phones that report every 45 s)
     this.minDwellMs = 60 * 1000,
     this.maxAccuracyM = 40.0,
     this.maxGapMs = 3 * 60 * 1000,
