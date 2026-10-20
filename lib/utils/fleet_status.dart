@@ -142,7 +142,11 @@ class FleetStatus {
   /// only by GPS publishes; the 30 s heartbeat refreshes `lastSeen` (connectivity)
   /// and never `gps_at`. Legacy nodes without `gps_at` fall back to `lastSeen`.
   static int? gpsAgeMs(Map node, {int? nowMs}) {
-    final int at = parseTimestampMs(node['gps_at'] ?? node['lastSeen'] ?? node['last_seen']);
+    // newest of the server GPS stamp and the receiver fix time (older apps stamped `gps_at` only at trip start)
+    final int gpsAt = parseTimestampMs(node['gps_at']);
+    final int fixAt = parseTimestampMs(node['fix_time']);
+    int at = gpsAt > fixAt ? gpsAt : fixAt;
+    if (at == 0) at = parseTimestampMs(node['lastSeen'] ?? node['last_seen']);
     if (at == 0) return null;
     return (nowMs ?? ServerClock.instance.nowMs()) - at;
   }

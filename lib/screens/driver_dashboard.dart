@@ -1931,6 +1931,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       'heading': pos.heading,
       'accuracy': pos.accuracy,
       'fix_time': pos.timestamp.millisecondsSinceEpoch, // when the receiver took the fix
+      'gps_at': ServerValue.timestamp, // server time of this GPS publish (GPS freshness, ETA)
       'status': effectiveStatus,
       'isOnline': true,
       'trip_active': true,
