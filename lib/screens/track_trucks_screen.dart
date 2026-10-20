@@ -1,5 +1,4 @@
 // Fleet Tracking Screen for Garbage Tracker
-import '../utils/route_casing.dart';
 import '../utils/map_fit.dart';
 import '../utils/rtdb_map.dart';
 import '../services/server_clock.dart';
@@ -591,11 +590,6 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> with TickerProvid
         await style.setStyleLayerProperty(_liveRouteLayerId, "line-width", ["to-number", ["coalesce", ["get", "width"], "5"]]);
         await style.setStyleLayerProperty(_liveRouteLayerId, "line-opacity", ["to-number", ["coalesce", ["get", "opacity"], "0.9"]]);
         await style.setStyleLayerProperty(_liveRouteLayerId, "line-sort-key", ["to-number", ["coalesce", ["get", "sortKey"], "0"]]);
-        await RouteCasing.ensure(style,
-            lineLayerId: _liveRouteLayerId,
-            sourceId: _liveRouteSourceId,
-            color: ["get", "truckColor"],
-            width: ["+", ["to-number", ["coalesce", ["get", "width"], "5"]], 7]);
       } else {
         await style.setStyleSourceProperty(_liveRouteSourceId, "data", data);
       }
@@ -757,7 +751,6 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> with TickerProvid
             lineCap: LineCap.ROUND,
             lineJoin: LineJoin.ROUND,
           ));
-          await RouteCasing.ensure(style, lineLayerId: layerId, sourceId: sourceId, color: '#9C27B0');
         }
       }
 
