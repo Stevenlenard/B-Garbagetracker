@@ -1,3 +1,4 @@
+import '../utils/route_casing.dart';
 import '../utils/map_fit.dart';
 import '../utils/rtdb_map.dart';
 import '../services/server_clock.dart';
@@ -745,6 +746,8 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
       await style.setStyleLayerProperty(layerId, "line-color", TruckIdentity.hex(truckId));
       await style.setStyleLayerProperty(layerId, "line-width", selected ? 10.0 : 6.0);
       await style.setStyleLayerProperty(layerId, "line-opacity", dim ? 0.35 : 0.9);
+      await RouteCasing.ensure(style,
+          lineLayerId: layerId, sourceId: sourceId, color: TruckIdentity.hex(truckId), width: selected ? 17.0 : 13.0);
       if (selected && await style.styleLayerExists("trucks-pulse-layer")) {
         await style.moveStyleLayer(layerId, LayerPosition(below: "trucks-pulse-layer"));
       }

@@ -1,3 +1,4 @@
+import '../utils/route_casing.dart';
 import '../services/server_clock.dart';
 import 'dart:async';
 import 'dart:convert';
@@ -660,6 +661,7 @@ class _StandaloneGisWebScreenState extends State<StandaloneGisWebScreen> with Ti
           await style.addLayer(layer);
         }
         await style.setStyleLayerProperty("web-routes-layer", "line-color", ["get", "truckColor"]);
+        await RouteCasing.ensure(style, lineLayerId: "web-routes-layer", sourceId: "web-routes-source", color: ["get", "truckColor"]);
       } else {
         await style.setStyleSourceProperty("web-routes-source", "data", data);
       }

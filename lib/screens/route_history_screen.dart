@@ -1,3 +1,4 @@
+import '../utils/route_casing.dart';
 import '../utils/truck_identity.dart';
 import '../utils/route_history_navigation.dart';
 import 'analytics_screen.dart' show showLoadHistoryDialog;
@@ -601,6 +602,7 @@ class _RouteHistoryScreenState extends State<RouteHistoryScreen> with TickerProv
             lineCap: LineCap.ROUND,
             lineJoin: LineJoin.ROUND,
           ));
+          await RouteCasing.ensure(style, lineLayerId: replayRouteLayerId, sourceId: replayRouteSourceId, color: '#00796B');
         }
       }
 
@@ -779,6 +781,7 @@ class _RouteHistoryScreenState extends State<RouteHistoryScreen> with TickerProv
         await style.setStyleSourceProperty(fullRouteSourceId, "data", jsonEncode(fullFeature));
         // Same colour as this truck on the live maps.
         await style.setStyleLayerProperty(fullRouteLayerId, "line-color", TruckIdentity.hex(trip.truckId));
+        await RouteCasing.ensure(style, lineLayerId: fullRouteLayerId, sourceId: fullRouteSourceId, color: TruckIdentity.hex(trip.truckId), width: 12.0);
       } else {
         await style.addSource(GeoJsonSource(id: fullRouteSourceId, data: jsonEncode(fullFeature)));
         if (!(await style.styleLayerExists(fullRouteLayerId))) {
@@ -791,6 +794,7 @@ class _RouteHistoryScreenState extends State<RouteHistoryScreen> with TickerProv
             lineCap: LineCap.ROUND,
             lineJoin: LineJoin.ROUND,
           ));
+          await RouteCasing.ensure(style, lineLayerId: fullRouteLayerId, sourceId: fullRouteSourceId, color: TruckIdentity.hex(trip.truckId), width: 12.0);
         }
       }
 

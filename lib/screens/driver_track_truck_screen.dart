@@ -1,3 +1,4 @@
+import '../utils/route_casing.dart';
 import '../utils/map_fit.dart';
 import '../utils/route_geometry.dart';
 import 'dart:async';
@@ -1253,6 +1254,15 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> with Ti
             "YELLOW", "#FFEB3B", 
             "PINK", "#E91E63", 
             "BLACK", "#212121", 
+            "#4CAF50"
+          ]);
+          await RouteCasing.ensure(style, lineLayerId: "driver-route-layer", sourceId: sourceId, color: [
+            "match", ["get", "color"],
+            "BLUE", "#2196F3",
+            "GREEN", "#4CAF50",
+            "YELLOW", "#FFEB3B",
+            "PINK", "#E91E63",
+            "BLACK", "#212121",
             "#4CAF50"
           ]);
         }
