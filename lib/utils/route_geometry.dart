@@ -95,6 +95,13 @@ class RouteGeometry {
     ];
   }
 
+  /// Colour of the part of a route driven while the truck is FULL (to the disposal site): the same red on every map.
+  static const String fullHex = '#E53935';
+
+  /// True for a stretch recorded while the truck was FULL (route point colour PINK / status FULL).
+  static bool isFullStretch(Map<String, dynamic> feature) =>
+      ((feature['properties'] as Map?)?['color'] ?? '').toString().toUpperCase() == 'PINK';
+
   /// GeoJSON LineString features (one per single-colour stretch; neighbouring stretches share their joint point).
   /// The line is NEVER cut: a pause or a GPS drop is drawn as a straight connection to the next recorded point.
   /// Empty when fewer than two valid points exist.

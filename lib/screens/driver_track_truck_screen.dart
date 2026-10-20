@@ -1251,7 +1251,7 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> with Ti
             "BLUE", "#2196F3",
             "GREEN", "#4CAF50", 
             "YELLOW", "#FFEB3B", 
-            "PINK", "#E91E63", 
+            "PINK", "#E53935", 
             "BLACK", "#212121", 
             "#4CAF50"
           ]);

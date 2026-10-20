@@ -140,7 +140,8 @@ void main() {
       final admin = src('lib/screens/track_trucks_screen.dart');
       final resident = src('lib/screens/resident_track_truck_screen.dart');
       final history = src('lib/screens/route_history_screen.dart');
-      expect(admin.contains("props['truckColor'] = TruckIdentity.hex(tid)"), isTrue);
+      // truck colour, except the stretch driven while FULL (red on every map)
+      expect(admin.contains("props['truckColor'] = RouteGeometry.isFullStretch(f) ? RouteGeometry.fullHex : TruckIdentity.hex(tid)"), isTrue);
       expect(admin.contains('"line-color", ["get", "truckColor"]'), isTrue);
       expect(resident.contains('TruckIdentity.hex(truckId)'), isTrue);
       expect(history.contains('TruckIdentity.hex(trip.truckId)'), isTrue);

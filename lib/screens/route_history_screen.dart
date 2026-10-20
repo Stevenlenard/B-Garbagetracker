@@ -761,24 +761,35 @@ class _RouteHistoryScreenState extends State<RouteHistoryScreen> with TickerProv
       // Full Route Line Feature
       final cleanDisplayPoints = DriverRouteHistoryService.filterStationaryGpsJitter(points);
       final List<List<double>> fullCoords = cleanDisplayPoints.map((p) => [p.longitude, p.latitude]).toList();
+      // Travel while FULL (to the disposal site) is its own red stretch; it starts at the last collecting point so the
+      // line stays connected.
+      final int firstFull = cleanDisplayPoints.indexWhere((p) => p.status.toUpperCase() == 'FULL');
+      final List<List<double>> collectingCoords = firstFull < 0 ? fullCoords : fullCoords.sublist(0, firstFull + 1);
+      final List<List<double>> fullStretch = firstFull < 0 ? const <List<double>>[] : fullCoords.sublist(firstFull > 0 ? firstFull - 1 : 0);
       // A single recorded point is not a route: draw no line rather than an invalid one.
       final fullFeature = {
         "type": "FeatureCollection",
-        "features": fullCoords.length >= 2
-            ? [
-                {
-                  "type": "Feature",
-                  "geometry": {"type": "LineString", "coordinates": fullCoords},
-                  "properties": {"color": "#80CBC4"}
-                }
-              ]
-            : []
+        "features": [
+          if (collectingCoords.length >= 2)
+            {
+              "type": "Feature",
+              "geometry": {"type": "LineString", "coordinates": collectingCoords},
+              "properties": {"full": false}
+            },
+          if (fullStretch.length >= 2)
+            {
+              "type": "Feature",
+              "geometry": {"type": "LineString", "coordinates": fullStretch},
+              "properties": {"full": true}
+            },
+        ]
       };
 
       if (await style.styleSourceExists(fullRouteSourceId)) {
         await style.setStyleSourceProperty(fullRouteSourceId, "data", jsonEncode(fullFeature));
         // Same colour as this truck on the live maps.
-        await style.setStyleLayerProperty(fullRouteLayerId, "line-color", TruckIdentity.hex(trip.truckId));
+        await style.setStyleLayerProperty(
+            fullRouteLayerId, "line-color", ["case", ["==", ["get", "full"], true], RouteGeometry.fullHex, TruckIdentity.hex(trip.truckId)]);
       } else {
         await style.addSource(GeoJsonSource(id: fullRouteSourceId, data: jsonEncode(fullFeature)));
         if (!(await style.styleLayerExists(fullRouteLayerId))) {
@@ -791,6 +802,8 @@ class _RouteHistoryScreenState extends State<RouteHistoryScreen> with TickerProv
             lineCap: LineCap.ROUND,
             lineJoin: LineJoin.ROUND,
           ));
+          await style.setStyleLayerProperty(
+              fullRouteLayerId, "line-color", ["case", ["==", ["get", "full"], true], RouteGeometry.fullHex, TruckIdentity.hex(trip.truckId)]);
         }
       }
 

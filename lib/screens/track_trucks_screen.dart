@@ -560,7 +560,7 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> with TickerProvid
           final Map<String, dynamic> props = f['properties'] as Map<String, dynamic>;
           props['truckId'] = tid;
           // The route is drawn in its truck's colour; status segments are not a colour.
-          props['truckColor'] = TruckIdentity.hex(tid);
+          props['truckColor'] = RouteGeometry.isFullStretch(f) ? RouteGeometry.fullHex : TruckIdentity.hex(tid);
           props['width'] = selected ? '9' : '5';
           props['opacity'] = dim ? '0.35' : '0.9';
           props['sortKey'] = selected ? '10' : '0';
@@ -716,7 +716,7 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> with TickerProvid
           final p = points[i];
           final colorHex = p.status == "PAUSED" || p.status == "IDLE"
               ? "#FFC107"
-              : (p.status == "FULL" ? "#2196F3" : "#6A1B9A");
+              : (p.status == "FULL" ? RouteGeometry.fullHex : "#6A1B9A");
 
           // one connected line: a GPS drop is drawn as a straight connection, never as a break
           currentSegment.add([p.longitude, p.latitude]);

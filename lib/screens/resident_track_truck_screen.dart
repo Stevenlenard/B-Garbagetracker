@@ -742,7 +742,8 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
           TruckIdentity.normalize(_highlightedTruckId!) == TruckIdentity.normalize(truckId);
       final bool dim = _highlightedTruckId != null && !selected;
       final String layerId = "route-layer-$truckId";
-      await style.setStyleLayerProperty(layerId, "line-color", TruckIdentity.hex(truckId));
+      // the stretch driven while FULL is red on every map
+      await style.setStyleLayerProperty(layerId, "line-color", ["case", ["==", ["get", "color"], "PINK"], RouteGeometry.fullHex, TruckIdentity.hex(truckId)]);
       await style.setStyleLayerProperty(layerId, "line-width", selected ? 10.0 : 6.0);
       await style.setStyleLayerProperty(layerId, "line-opacity", dim ? 0.35 : 0.9);
       if (selected && await style.styleLayerExists("trucks-pulse-layer")) {
