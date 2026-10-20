@@ -5,11 +5,31 @@ import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
+import android.content.Context
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.embedding.engine.FlutterEngineCache
+import io.flutter.embedding.engine.dart.DartExecutor
 import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
+    // The Flutter engine lives with the PROCESS, not with this screen. Swiping the app away from recent apps destroys
+    // the activity only; the engine (Dart: GPS stream, publishing, heartbeat) keeps running inside the process that the
+    // foreground location service keeps alive. Opening the app again re-attaches to the same running engine.
+    override fun provideFlutterEngine(context: Context): FlutterEngine {
+        FlutterEngineCache.getInstance().get(ENGINE_ID)?.let { return it }
+        val engine = FlutterEngine(context.applicationContext)
+        engine.dartExecutor.executeDartEntrypoint(DartExecutor.DartEntrypoint.createDefault())
+        FlutterEngineCache.getInstance().put(ENGINE_ID, engine)
+        return engine
+    }
+
+    override fun shouldDestroyEngineWithHost(): Boolean = false
+
+    companion object {
+        private const val ENGINE_ID = "gt_main_engine"
+    }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         // Lets a signed-in driver leave the app WITHOUT closing it: finishing the activity would stop GPS and
