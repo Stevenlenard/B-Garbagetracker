@@ -67,7 +67,9 @@ class FirebaseCollectionDataSource implements CollectionDataSource {
   Stream<CollectionData> watch({required DateTime start, required DateTime end}) {
     late StreamController<CollectionData> c;
     StreamSubscription<DatabaseEvent>? trips;
+    StreamSubscription<DatabaseEvent>? simTrips;
     StreamSubscription<DatabaseEvent>? weekly;
+    Map simMap = const <Object?, Object?>{};
     List<AreaGeofence>? areas;
     final Map<String, String> ids = <String, String>{};
     bool defaults = false;
@@ -77,7 +79,16 @@ class FirebaseCollectionDataSource implements CollectionDataSource {
 
     void emit() {
       if (areas != null && tripsLoaded && !c.isClosed) {
-        c.add(CollectionData(areas: areas!, trips: tripMap, weeklyProgress: weeklyValue, areasFromDefaults: defaults, areaIdToName: ids));
+        // Simulation trips are stored apart (simulation_routes); they join as labelled simulation trips. Which views
+        // count them is decided by the screen (admin and drivers only).
+        final Map merged = simMap.isEmpty
+            ? tripMap
+            : <Object?, Object?>{
+                ...tripMap,
+                for (final MapEntry<Object?, Object?> e in simMap.entries)
+                  if (e.value is Map) 'sim:${e.key}': <Object?, Object?>{...(e.value as Map), 'is_simulation': true},
+              };
+        c.add(CollectionData(areas: areas!, trips: merged, weeklyProgress: weeklyValue, areasFromDefaults: defaults, areaIdToName: ids));
       }
     }
 
@@ -113,6 +124,10 @@ class FirebaseCollectionDataSource implements CollectionDataSource {
           },
           onError: (Object e) => c.addError(e),
         );
+        simTrips = _database.ref('simulation_routes').orderByKey().startAt(from).endAt(to).onValue.listen((DatabaseEvent e) {
+          simMap = e.snapshot.value is Map ? e.snapshot.value as Map : const <Object?, Object?>{};
+          emit();
+        }, onError: (_) {});
         weekly = _database.ref('weekly_collection_progress').onValue.listen((DatabaseEvent e) {
           weeklyValue = e.snapshot.value;
           emit();
@@ -120,6 +135,7 @@ class FirebaseCollectionDataSource implements CollectionDataSource {
       },
       onCancel: () async {
         await trips?.cancel();
+        await simTrips?.cancel();
         await weekly?.cancel();
       },
     );
