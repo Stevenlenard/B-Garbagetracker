@@ -997,6 +997,7 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> with TickerProvid
 
     final int now = ServerClock.instance.nowMs();
     final Map<String, Map<String, dynamic>> driverToLatestTruck = {};
+    _fleetDiag.clear();
 
     void processLocationNode(String nodeKey, Map liveData) {
       final Map<String, dynamic> value = Map<String, dynamic>.from(liveData);
@@ -1074,6 +1075,16 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> with TickerProvid
           isSessionValid &&
           isFresh &&
           isUserAccountOnline;
+
+      if (!isGenuinelyOnline && isOnlineField && status != 'OFFLINE' && status != 'COMPLETED' && status != 'FINISHED') {
+        final List<String> why = <String>[
+          if (!hasValidCoords) 'no GPS position yet',
+          if (!isSessionValid) 'session older than 12 h',
+          if (!isFresh) 'last update ${((now - lastSeen).abs() / 1000).round()} s apart from the clock of this phone',
+          if (!isUserAccountOnline) 'driver account not seen online',
+        ];
+        _fleetDiag[nodeTid] = '$nodeTid ($driverName): ${why.join(', ')}';
+      }
 
       if (isGenuinelyOnline) {
         final resolved = TruckAssignmentService.resolveFleetNode(
@@ -1310,6 +1321,18 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> with TickerProvid
         _updateTruckMarkers();
       }
     }
+  }
+
+  final Map<String, String> _fleetDiag = <String, String>{};
+
+  List<String> _fleetDiagLines() {
+    final List<String> out = <String>[];
+    final int? off = ServerClock.instance.offsetMs;
+    if (off != null && off.abs() > 60000) {
+      out.add("This phone's clock is ${(off.abs() / 60000).round()} min ${off > 0 ? 'behind' : 'ahead of'} the server - set Date & time to automatic.");
+    }
+    out.addAll(_fleetDiag.values.take(3));
+    return out;
   }
 
   final Map<String, String> _routeSessionByTruck = {}; // trip each route line is bound to
@@ -2026,13 +2049,21 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> with TickerProvid
       ];
     } else if (activeTrucks.isEmpty) {
       items = [
-        const Padding(
-          padding: EdgeInsets.symmetric(vertical: 16),
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 20),
           child: Center(
-            child: Text(
-              "No online active truck",
-              style: TextStyle(color: Colors.grey, fontSize: 12.5, fontWeight: FontWeight.w700),
-            ),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              const Text(
+                "No online active truck",
+                style: TextStyle(color: Colors.grey, fontSize: 12.5, fontWeight: FontWeight.w700),
+              ),
+              // Why a truck is hidden (so a missing truck is never a mystery): shown only while nothing is online.
+              for (final String line in _fleetDiagLines())
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text(line, textAlign: TextAlign.center, style: const TextStyle(color: Colors.black45, fontSize: 11, height: 1.25)),
+                ),
+            ]),
           ),
         ),
       ];
