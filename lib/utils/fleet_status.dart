@@ -1,3 +1,4 @@
+import '../services/server_clock.dart';
 /// Shared rules for deciding whether a `truck_locations` node describes a truck
 /// that is currently live. Every dashboard card and map uses these rules so the
 /// Active Fleets list, online-driver count and map markers always agree.
@@ -43,13 +44,13 @@ class FleetStatus {
   /// dashboard behaviour for nodes that never carried a `lastSeen`.
   static bool isFresh(int lastSeenMs, [int? nowMs]) {
     if (lastSeenMs == 0) return true;
-    final int now = nowMs ?? DateTime.now().millisecondsSinceEpoch;
+    final int now = nowMs ?? ServerClock.instance.nowMs();
     return (now - lastSeenMs).abs() < freshnessWindowMs;
   }
 
   static bool isSessionValid(int loginMs, [int? nowMs]) {
     if (loginMs == 0) return true;
-    final int now = nowMs ?? DateTime.now().millisecondsSinceEpoch;
+    final int now = nowMs ?? ServerClock.instance.nowMs();
     return (now - loginMs) < sessionLimitMs;
   }
 
@@ -101,7 +102,7 @@ class FleetStatus {
   /// True when the node is online, in service (not OFFLINE/COMPLETED/FINISHED),
   /// within the freshness window and within the session limit.
   static bool isLive(Map node, {int? nowMs}) {
-    final int now = nowMs ?? DateTime.now().millisecondsSinceEpoch;
+    final int now = nowMs ?? ServerClock.instance.nowMs();
     if (!hasOnlineFlag(node)) return false;
     if (isInactiveStatus(normalizeStatus(node['status']))) return false;
     final int lastSeen = parseTimestampMs(node['lastSeen'] ?? node['last_seen']);
@@ -143,7 +144,7 @@ class FleetStatus {
   static int? gpsAgeMs(Map node, {int? nowMs}) {
     final int at = parseTimestampMs(node['gps_at'] ?? node['lastSeen'] ?? node['last_seen']);
     if (at == 0) return null;
-    return (nowMs ?? DateTime.now().millisecondsSinceEpoch) - at;
+    return (nowMs ?? ServerClock.instance.nowMs()) - at;
   }
 
   /// GPS freshness uses the same canonical window as connectivity. Unknown age is

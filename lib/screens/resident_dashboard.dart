@@ -1,3 +1,4 @@
+import '../services/server_clock.dart';
 import '../widgets/logout_choice_dialog.dart';
 import '../services/rtdb_port.dart';
 import '../services/notification_inbox.dart';
@@ -432,7 +433,7 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
         // alerts are the driver app's job (once per trip, area and stage); the resident app
         // no longer broadcasts its own.
         EtaResult? best;
-        final int nowMs = DateTime.now().millisecondsSinceEpoch;
+        final int nowMs = ServerClock.instance.nowMs();
         int rank(EtaResult r) => r.kind == EtaKind.arrived ? -1 : (r.minutes ?? 1 << 30);
         for (final Map<dynamic, dynamic> val in onlineTrucks) {
           if (_currentPosition == null) break;

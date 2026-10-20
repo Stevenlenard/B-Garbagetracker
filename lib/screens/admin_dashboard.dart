@@ -1,3 +1,4 @@
+import '../services/server_clock.dart';
 import '../widgets/logout_choice_dialog.dart';
 import '../utils/relative_time.dart';
 import '../services/rtdb_port.dart';
@@ -387,7 +388,7 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
         final Map data = _rawUsers!;
 
         int onlineCount = 0;
-        final int now = DateTime.now().millisecondsSinceEpoch;
+        final int now = ServerClock.instance.nowMs();
         final Set<String> archivedIds = {};
         final Set<String> archivedNames = {};
         final Set<String> validDriverIds = {};
@@ -485,7 +486,7 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
       {
         final Map<dynamic, dynamic> data = _rawTruckLocations;
 
-        final int now = DateTime.now().millisecondsSinceEpoch;
+        final int now = ServerClock.instance.nowMs();
 
         // Shared fleet snapshot (same function as the Resident cards and the live map).
         // Admin adds account validity from `users` (role == driver, not archived) and

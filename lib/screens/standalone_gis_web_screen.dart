@@ -1,3 +1,4 @@
+import '../services/server_clock.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
@@ -259,7 +260,7 @@ class _StandaloneGisWebScreenState extends State<StandaloneGisWebScreen> with Ti
 
       if (phpLocations != null && mounted) {
         final Map<String, dynamic> phpMap = {};
-        final int now = DateTime.now().millisecondsSinceEpoch;
+        final int now = ServerClock.instance.nowMs();
 
         for (var loc in phpLocations) {
           if (loc == null || loc is! Map) continue;
@@ -315,7 +316,7 @@ class _StandaloneGisWebScreenState extends State<StandaloneGisWebScreen> with Ti
 
   void _reprocessTruckData() {
     final List<Map<String, dynamic>> parsedTrucks = [];
-    final int now = DateTime.now().millisecondsSinceEpoch;
+    final int now = ServerClock.instance.nowMs();
 
     // 1. Merge Firebase RTDB (authoritative) and PHP fallback locations
     final Map<String, Map<String, dynamic>> canonicalMap = {};
@@ -1906,7 +1907,7 @@ class _StandaloneGisWebScreenState extends State<StandaloneGisWebScreen> with Ti
       if (parsed != null) timeMs = parsed.millisecondsSinceEpoch;
     }
     if (timeMs <= 0) return true;
-    final int now = DateTime.now().millisecondsSinceEpoch;
+    final int now = ServerClock.instance.nowMs();
     return (now - timeMs).abs() <= 12 * 3600 * 1000;
   }
 

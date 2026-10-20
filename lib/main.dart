@@ -1,3 +1,4 @@
+import 'services/server_clock.dart';
 import 'screens/route_history_entry.dart';
 import 'package:flutter/foundation.dart' show kIsWeb, debugPrint, DebugPrintCallback;
 import 'package:flutter/material.dart';
@@ -56,7 +57,8 @@ void main() async {
   // Initialize Firebase with the config from google-services.json
   try {
   await Firebase.initializeApp(
-    // Production options by default (unchanged); the isolated test project only in explicit test mode.
+    // Production options by default (unchanged);
+    // the isolated test project only in explicit test mode.
     options: AppConfig.isTestMode ? AppConfig.testFirebaseOptions : const FirebaseOptions(
       apiKey: "AIzaSyAMvvefK0z-cpBLdWQaNpRvDfGtqv0GFe4",
       appId: "1:410975851749:android:56415852013793e1b2300c", // Using Android App ID for compatibility
@@ -65,6 +67,7 @@ void main() async {
       databaseURL: "https://garbagesis-78d39-default-rtdb.asia-southeast1.firebasedatabase.app",
     ),
   );
+  ServerClock.instance.start(); // freshness checks use server time, so a wrong phone clock cannot hide live trucks
   } catch (e) {
     if (!AppConfig.isTestMode) rethrow; // production behaviour unchanged
     runApp(const _ConfigErrorApp(problems: ['Firebase initialisation failed. Check the GT_FIREBASE_* values.']));

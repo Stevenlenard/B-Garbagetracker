@@ -1,3 +1,4 @@
+import '../services/server_clock.dart';
 import '../widgets/truck_legend.dart';
 import '../widgets/floating_map_legend.dart';
 import '../utils/truck_identity.dart';
@@ -146,7 +147,7 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
       if (response.data != null && response.data['locations'] != null) {
         final List phpLocations = response.data['locations'] as List;
         final Map<String, dynamic> phpMap = {};
-        final int nowMs = DateTime.now().millisecondsSinceEpoch;
+        final int nowMs = ServerClock.instance.nowMs();
         for (var loc in phpLocations) {
           final String driverName = (loc['driver_name'] ?? loc['driverName'] ?? '').toString();
 
@@ -494,7 +495,7 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
       final double lat = double.tryParse(liveData['latitude']?.toString() ?? liveData['lat']?.toString() ?? '0') ?? 0.0;
       final double lng = double.tryParse(liveData['longitude']?.toString() ?? liveData['lng']?.toString() ?? '0') ?? 0.0;
       final bool hasValidCoords = (lat != 0.0 && lng != 0.0);
-      final int now = DateTime.now().millisecondsSinceEpoch;
+      final int now = ServerClock.instance.nowMs();
       // Shared "live" definition (same as the admin Active Fleet cards and maps).
       final bool isGenuinelyOnline = hasValidCoords && FleetStatus.isLive(liveData, nowMs: now);
 

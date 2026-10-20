@@ -1,4 +1,5 @@
 // Fleet Tracking Screen for Garbage Tracker
+import '../services/server_clock.dart';
 import '../widgets/truck_legend.dart';
 import '../widgets/floating_map_legend.dart';
 import '../utils/truck_identity.dart';
@@ -770,7 +771,7 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> with TickerProvid
 
       if (phpLocations != null && mounted) {
         final Map<String, dynamic> phpMap = {};
-        final int now = DateTime.now().millisecondsSinceEpoch;
+        final int now = ServerClock.instance.nowMs();
 
         for (var loc in phpLocations) {
           if (loc == null || loc is! Map) continue;
@@ -870,7 +871,7 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> with TickerProvid
         final Set<String> validDriverNames = {};
         final Set<String> genuinelyOnlineDriverIds = {};
         final Set<String> genuinelyOnlineDriverNamesUpper = {};
-        final int now = DateTime.now().millisecondsSinceEpoch;
+        final int now = ServerClock.instance.nowMs();
 
         data.forEach((key, value) {
           if (value is Map) {
@@ -994,7 +995,7 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> with TickerProvid
   void _processMergedTrucks() {
     if (!mounted || _mapMode == "HISTORY") return;
 
-    final int now = DateTime.now().millisecondsSinceEpoch;
+    final int now = ServerClock.instance.nowMs();
     final Map<String, Map<String, dynamic>> driverToLatestTruck = {};
 
     void processLocationNode(String nodeKey, Map liveData) {
