@@ -37,6 +37,7 @@ import '../models/user.dart';
 import '../services/driver_route_history_service.dart';
 import 'route_history_screen.dart';
 import '../widgets/app_date_range_picker.dart';
+import '../widgets/predictive_models_card.dart';
 
 class AnalyticsScreen extends StatefulWidget {
   final bool isEmbedded;
@@ -3410,6 +3411,13 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
         _buildWasteCollectionSummaryCard(isMobile),
         const SizedBox(height: 16),
         _buildRedesignedEtaPerformanceCard(isMobile),
+        const SizedBox(height: 16),
+        PredictiveModelsCard(
+          trips: _allDriverRoutes,
+          areas: _geofences,
+          range: _selectedDateRange,
+          etaVisits: _etaFilteredVisits,
+        ),
         const SizedBox(height: 16),
         _buildScheduledRoutesCard(),
         _buildPredictionCard("Recommendations", [
@@ -8008,8 +8016,8 @@ class _EtaPerformanceModalState extends State<_EtaPerformanceModal> {
           },
         ),
 
-        if (isDesktop) const Spacer(),
-
+        // (A Spacer here broke the whole dialog on wide screens: a Spacer is only valid inside a Row or Column,
+        // not inside a Wrap, so the web version showed a grey box.)
         const Text(
           "Period based on notification sent date.",
           style: TextStyle(fontSize: 12, color: Color(0xFF94A3B8), fontWeight: FontWeight.w400),
