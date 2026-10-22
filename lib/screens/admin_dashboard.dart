@@ -18,6 +18,8 @@ import '../widgets/truck_chat_widget.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/cupertino.dart' show CupertinoSliverRefreshControl;
 import 'package:firebase_database/firebase_database.dart';
+import '../utils/collection_visits.dart';
+import '../services/service_area_service.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:intl/intl.dart';
 import '../utils/custom_notification.dart';
@@ -96,7 +98,11 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
   int _inProgressComplaints = 0;
   int _residentsCount = 0;
   int _unreadNotificationsCount = 0;
-  double _coveragePercent = 0.0;
+  double _coveragePercent = 0.0; // collection areas with a verified visit in the last 7 days
+  int _coverageVisited = 0;
+  int _coverageAreas = 0;
+  List<AreaGeofence>? _coverageGeofences;
+  Map _coverageTrips = const <dynamic, dynamic>{};
   late int _selectedIndex = widget.initialIndex;
   String? _routeHistoryTripId; // trip requested by Load History / fleet panels
   DriverTrip? _routeHistoryTrip;
@@ -573,26 +579,11 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
       }
     });
 
+    // Route Coverage = share of the collection areas with a verified visit in the last 7 days
+    // (the same visit rule as Analytics and Purok Coverage).
     _database.ref('driver_routes').onValue.listen((event) {
-      if (event.snapshot.exists && event.snapshot.value != null) {
-        final Map? data = event.snapshot.value as Map?;
-        if (data == null) return;
-        int total = 0;
-        int completed = 0;
-        data.forEach((key, value) {
-          if (value != null && value is Map) {
-            total++;
-            // FULL finalizes the collection; COMPLETED only confirms unloading.
-            final String rs = (value['route_status'] ?? value['status'] ?? '').toString().toUpperCase();
-            if (rs == 'COMPLETED' || rs == 'FULL' || value['collection_finalized'] == true) completed++;
-          }
-        });
-        if (mounted) {
-          setState(() {
-            _coveragePercent = total > 0 ? (completed / total) * 100 : 0.0;
-          });
-        }
-      }
+      _coverageTrips = (event.snapshot.exists && event.snapshot.value is Map) ? event.snapshot.value as Map : const <dynamic, dynamic>{};
+      _updateRouteCoverage();
     });
 
     // Complaint counts come ONLY from the MySQL complaints table (get_complaints.php), the same
@@ -2102,12 +2093,61 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
             Icons.person_pin_circle_rounded, const Color(0xFF43A047)),
         _buildModernStatCard("Pending Issues", "$_pendingComplaints",
             Icons.warning_amber_rounded, const Color(0xFFE53935)),
-        _buildModernStatCard("Route Coverage", "${_coveragePercent.toInt()}%",
-            Icons.map_rounded, const Color(0xFFFB8C00)),
+        _buildModernStatCard("Route Coverage", "${_coveragePercent.round()}%",
+            Icons.map_rounded, const Color(0xFFFB8C00),
+            badge: _coverageAreas == 0 ? null : "$_coverageVisited/$_coverageAreas areas, 7 days"),
         _buildModernStatCard("Total Residents", "$_residentsCount",
             Icons.people_alt_rounded, const Color(0xFF8E24AA)),
       ],
     );
+  }
+
+  Future<void> _updateRouteCoverage() async {
+    if (_coverageGeofences == null) {
+      final List<AreaGeofence> list = <AreaGeofence>[];
+      try {
+        final DataSnapshot snap = await _database.ref('puroks').get().timeout(const Duration(seconds: 10));
+        if (snap.value is Map) {
+          (snap.value as Map).forEach((k, v) {
+            if (v is! Map) return;
+            try {
+              final Map<String, dynamic> m = Map<String, dynamic>.from(v);
+              m['id'] ??= k.toString();
+              final ServiceArea a = ServiceArea.fromJson(m);
+              list.add(AreaGeofence(
+                name: ServiceAreaService.canonicalizeAreaName(a.name) ?? a.name,
+                lat: a.entranceLat,
+                lng: a.entranceLng,
+                radiusM: AreaGeofence.areaRadiusM,
+                isTruckStop: a.isTruckStop && a.verificationStatus.toUpperCase() == 'VERIFIED',
+              ));
+            } catch (_) {}
+          });
+        }
+      } catch (e) {
+        debugPrint('[DASHBOARD] service areas could not be read: $e');
+      }
+      _coverageGeofences = list;
+    }
+    final List<AreaGeofence> areas = _coverageGeofences!;
+    final Set<String> stops = areas.where((AreaGeofence g) => g.isTruckStop).map((AreaGeofence g) => g.name).toSet();
+    if (stops.isEmpty) return;
+    final DateTime now = DateTime.now();
+    final DateTime today = DateTime(now.year, now.month, now.day);
+    final VisitSummary v = CollectionVisits.detect(
+      trips: _coverageTrips,
+      areas: areas,
+      start: today.subtract(const Duration(days: 6)),
+      end: today,
+    );
+    final Map<String, int> counts = v.countByArea();
+    final int visited = stops.where((String a) => (counts[a] ?? 0) > 0).length;
+    if (!mounted) return;
+    setState(() {
+      _coverageVisited = visited;
+      _coverageAreas = stops.length;
+      _coveragePercent = visited * 100.0 / stops.length;
+    });
   }
 
   Widget _buildModernStatCard(String title, String value, IconData icon,

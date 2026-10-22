@@ -681,11 +681,15 @@ class AnalyticsPdfBuilder {
         _sec('B.3', 'Operations and Missed Pickups', objective: '2.1'),
         _tiles(<List<String>>[
           <String>['Distance covered', o.distanceKm == null ? 'n/a' : '${o.distanceKm!.toStringAsFixed(1)} km', 'from recorded GPS routes'],
-          <String>['Stops per route', o.stopsPerRoute == null ? 'n/a' : '${o.stopsPerRoute}', 'collection areas per route'],
+          <String>['Areas per trip', o.stopsPerRoute == null ? 'n/a' : '${o.stopsPerRoute}', 'with a verified visit'],
           <String>[
-            'Average collection time',
-            o.avgCollectionHours == null ? 'n/a' : '${o.avgCollectionHours!.toStringAsFixed(1)} h',
-            'per trip',
+            'Typical collection time',
+            o.avgCollectionHours == null
+                ? 'n/a'
+                : (o.avgCollectionHours! * 60 < 90
+                    ? '${(o.avgCollectionHours! * 60).round()} min'
+                    : '${o.avgCollectionHours!.toStringAsFixed(1)} h'),
+            'median, start to FULL',
           ],
           <String>[
             'Missed pickups',
@@ -694,7 +698,9 @@ class AnalyticsPdfBuilder {
           ],
         ]),
       ]),
-      _p('Missed pickups are resident reports of uncollected garbage in the period. n/a = not enough recorded data for the figure.',
+      _p('Distance is the sum of the recorded trip distances. Areas per trip is the average number of areas with a verified visit per '
+          'trip that visited at least one. Collection time is the median from the start of a trip to FULL. Missed pickups are resident '
+          'reports of uncollected garbage in the period. n/a = not enough recorded data for the figure.',
           size: 8, color: muted),
     ];
   }

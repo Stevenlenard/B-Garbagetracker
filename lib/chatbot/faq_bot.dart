@@ -1212,8 +1212,8 @@ const List<FaqEntry> faqKnowledgeBase = <FaqEntry>[
     id: 'admin_dashboard',
     question: 'What do the numbers on the admin dashboard mean?',
     answer: '• Online Drivers: drivers signed in right now\n'
-        '• Pending Issues: complaints not yet resolved\n'
-        '• Route Coverage: share of collection areas with a verified visit\n'
+        '• Pending Issues: resident complaints still pending (all time)\n'
+        '• Route Coverage: share of collection areas with a verified visit in the last 7 days\n'
         '• Total Residents: registered resident accounts\n'
         'Recent Activity lists the latest system events.',
     roles: _admin,

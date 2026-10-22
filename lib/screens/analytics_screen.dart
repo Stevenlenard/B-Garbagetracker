@@ -93,7 +93,8 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
 
   bool _isDateRange = true;
 
-  double _avgCollectionTime = 0.0;
+  double _avgCollectionTime = 0.0; // median collection duration (hours) of the period's FULL trips
+  int _collectionDurationTrips = 0;
   int _stopsPerRoute = 0;
   double _distanceCovered = 0.0;
 
@@ -425,6 +426,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
     int matchedDrivers = 0;
     int residentTotalAll = 0;
     int residentUnresolvedAll = 0;
+    // Resident complaints only: driver truck issues are not complaints and are counted separately.
     final Map<String, double> filteredStatusCounts = {"Pending": 0, "In Progress": 0, "Resolved": 0};
 
     for (var item in normalizedItems) {
@@ -446,7 +448,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
 
       // 3. Update Counts for Chart & Statistics
       String status = item['status'] as String;
-      filteredStatusCounts[status] = filteredStatusCounts[status]! + 1;
+      if (item['source'] == 'RESIDENT') filteredStatusCounts[status] = filteredStatusCounts[status]! + 1;
 
       if (item['source'] == 'RESIDENT') {
         if (item['isUncollectedGarbage'] == true) {
@@ -477,7 +479,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
         _complaintStatusData = filteredStatusCounts;
 
         // Use REAL FILTERED counts for the info text breakdown
-        _complaintSourceData = {"Residents": matchedResidents.toDouble(), "Drivers": matchedDrivers.toDouble()};
+        _complaintSourceData = {"Residents": residentTotalAll.toDouble(), "Drivers": matchedDrivers.toDouble()};
         _purokComplaintData = purokCounts;
         _residentComplaintsTotal = residentTotalAll;
         _residentComplaintsUnresolved = residentUnresolvedAll;
@@ -589,6 +591,13 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
   int get _areasVisitedCount {
     final Map<String, int> c = _visitSummary?.countByArea() ?? const <String, int>{};
     return _expectedVisitAreas.where((String a) => (c[a] ?? 0) > 0).length;
+  }
+
+  /// "42 min" / "1.6 h" / "n/a", from the median collection duration.
+  String get _collectionTimeText {
+    if (_avgCollectionTime <= 0) return "n/a";
+    final double m = _avgCollectionTime * 60;
+    return m < 90 ? "${m.round()} min" : "${_avgCollectionTime.toStringAsFixed(1)} h";
   }
 
   String get _periodLabel => _isDateRange
@@ -911,7 +920,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
       waste = const ReportWaste.unavailable('collection data has not finished loading');
     } else {
       waste = ReportWaste.available(
-        rows: _loadTrips
+        rows: _timedFirst(_loadTrips
             .map((DriverTrip t) => ReportLoadRow(
                   tripId: t.tripId,
                   driver: t.driverName,
@@ -926,7 +935,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
                       t.points.isEmpty &&
                       DateTime.now().difference(t.startTime).inMinutes.abs() < 10),
                 ))
-            .toList(),
+            .toList()),
         partial: _loadPartial,
         ongoingUnfinished: _loadOngoingCount,
         staleUnfinished: _loadStaleCount,
@@ -1020,7 +1029,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
       eta: eta,
       complaints: complaints,
       forecast: forecast,
-      aiNarrative: _geminiSummary,
+      aiNarrative: _geminiSummary ?? (_loadAiIsAi && _loadAiSummary.trim().isNotEmpty ? _loadAiSummary.trim() : null),
       operations: ReportOperations(
         distanceKm: _distanceCovered > 0 ? _distanceCovered : null,
         stopsPerRoute: _stopsPerRoute > 0 ? _stopsPerRoute : null,
@@ -1033,6 +1042,12 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
       predictive: _reportPredictive(),
     );
   }
+
+  /// Trips with no recorded time have no place in a newest-first list: they go last (order kept).
+  static List<ReportLoadRow> _timedFirst(List<ReportLoadRow> rows) => <ReportLoadRow>[
+        ...rows.where((ReportLoadRow r) => r.timeRecorded),
+        ...rows.where((ReportLoadRow r) => !r.timeRecorded),
+      ];
 
   /// Scheduled routes with the same rules as the Scheduled Routes card.
   ReportAssignments _reportAssignments() {
@@ -1129,86 +1144,55 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
   }
 
 
+  /// Operational figures of the selected period, from the recorded trips (driver_routes):
+  ///   distance  = sum of the recorded trip distances (simulations excluded)
+  ///   avg time  = median collection duration of the trips finalized FULL (start to FULL; a median,
+  ///               so one trip left running for hours does not distort it; under 1 minute ignored)
+  ///   stops     = average number of areas with a verified visit per trip that visited any area
+  /// (The old `collection_logs` node has not been written since August and is no longer read.)
   Future<void> _calculateAnalytics() async {
-    final startStr = DateFormat('yyyy-MM-dd').format(_selectedDateRange.start);
-    final endStr = DateFormat('yyyy-MM-dd').format(_selectedDateRange.end);
-
-    final Query query = _database.ref('collection_logs').orderByChild('date');
-    final event = await (_isDateRange ? query.startAt(startStr).endAt(endStr) : query.equalTo(startStr)).once();
-
+    final String startStr = DateFormat('yyyy-MM-dd').format(_selectedDateRange.start);
+    final String endStr = DateFormat('yyyy-MM-dd').format(_selectedDateRange.end);
+    final bool allAreas = _selectedArea == "All Areas";
     double totalDist = 0.0;
-    int stopsCount = 0;
-    double totalDuration = 0.0;
-    int durationSessions = 0;
-
-    if (event.snapshot.exists) {
-      final Map data = event.snapshot.value as Map;
-      data.forEach((key, value) {
-        if (value is Map) {
-          final zone = value['zoneName']?.toString() ?? "";
-          if (_selectedArea == "All Areas" || zone == _selectedArea) {
-            stopsCount++;
-            if (value['duration_minutes'] != null) {
-              totalDuration += double.tryParse(value['duration_minutes'].toString()) ?? 0;
-              durationSessions++;
-            }
-            if (value['distance_km'] != null) {
-              totalDist += double.tryParse(value['distance_km'].toString()) ?? 0;
-            }
-          }
-        }
-      });
+    final List<double> durationsMin = <double>[];
+    _allDriverRoutes.forEach((key, data) {
+      if (data is! Map) return;
+      if (data['is_simulation'] == true || data['is_simulation'] == 'true') return;
+      final String dateStr = data['date']?.toString() ?? "";
+      if (dateStr.compareTo(startStr) < 0 || dateStr.compareTo(endStr) > 0) return;
+      if (!allAreas) {
+        final String purok = ServiceAreaService.canonicalizeAreaName(data['purok']?.toString()) ?? (data['purok']?.toString() ?? '');
+        final bool visited = _visitSummary?.visits.any((CollectionVisit v) => v.tripId == key.toString()) ?? false;
+        if (purok != _selectedArea && !visited) return;
+      }
+      totalDist += double.tryParse((data['final_distance'] ?? data['total_distance'] ?? 0).toString()) ?? 0.0;
+      final String rs = (data['route_status'] ?? '').toString().toUpperCase();
+      final double? secs = double.tryParse((data['collection_duration_s'] ?? '').toString());
+      if ((rs == 'FULL' || rs == 'COMPLETED' || data['collection_finalized'] == true) && secs != null && secs >= 60) {
+        durationsMin.add(secs / 60.0);
+      }
+    });
+    durationsMin.sort();
+    final double medianMin = durationsMin.isEmpty
+        ? 0.0
+        : (durationsMin.length.isOdd
+            ? durationsMin[durationsMin.length ~/ 2]
+            : (durationsMin[durationsMin.length ~/ 2 - 1] + durationsMin[durationsMin.length ~/ 2]) / 2);
+    final Map<String, Set<String>> areasByTrip = <String, Set<String>>{};
+    for (final CollectionVisit v in _visitSummary?.visits ?? const <CollectionVisit>[]) {
+      (areasByTrip[v.tripId] ??= <String>{}).add(v.area);
     }
-
-    // Fallback/Supplement with driver_routes if needed
-    if (stopsCount == 0 || totalDist == 0) {
-      _allDriverRoutes.forEach((sessionId, data) {
-        if (data is Map) {
-          final dateStr = data['date']?.toString() ?? "";
-          if (dateStr.compareTo(startStr) >= 0 && dateStr.compareTo(endStr) <= 0) {
-            totalDist += (data['final_distance'] ?? 0.0).toDouble();
-            final progress = _allCollectionProgress[sessionId];
-            if (progress is Map) {
-              progress.forEach((k, v) {
-                if (v is Map && v['completed'] == true) {
-                  final areaName = v['name']?.toString() ?? "";
-                  if (_selectedArea == "All Areas" || areaName == _selectedArea) {
-                    stopsCount++;
-                  }
-                }
-              });
-            }
-          }
-        }
-      });
-    }
-
+    final int stops = areasByTrip.isEmpty
+        ? 0
+        : (areasByTrip.values.fold<int>(0, (int a, Set<String> x) => a + x.length) / areasByTrip.length).round();
     if (mounted) {
       setState(() {
-        _avgCollectionTime = durationSessions > 0 ? (totalDuration / durationSessions) / 60 : 0.0;
+        _avgCollectionTime = medianMin / 60.0; // hours
+        _collectionDurationTrips = durationsMin.length;
         _distanceCovered = totalDist;
-        _stopsPerRoute = stopsCount;
+        _stopsPerRoute = stops;
       });
-    }
-
-    final freqEvent = await _database.ref('collection_logs').once();
-    if (freqEvent.snapshot.exists) {
-      final Map data = freqEvent.snapshot.value as Map;
-      final Map<String, int> freq = {};
-      final thirtyDaysAgo = DateTime.now().subtract(const Duration(days: 30));
-      data.forEach((key, value) {
-        if (value is Map) {
-          final dStr = value['date']?.toString() ?? "";
-          final zone = value['zoneName']?.toString() ?? "";
-          try {
-            final date = DateFormat("yyyy-MM-dd").parse(dStr);
-            if (date.isAfter(thirtyDaysAgo)) {
-              freq[zone] = (freq[zone] ?? 0) + 1;
-            }
-          } catch (_) {}
-        }
-      });
-      // if (mounted) setState(() => _purokFrequencyData = freq); // Removed to avoid overwriting coverage chart
     }
   }
 
@@ -1480,6 +1464,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
     _visitSummary = v;
     _purokFrequencyData = <String, int>{for (final String a in _purokNames) a: counts[a] ?? 0};
     _purokVisitCounts = Map<String, int>.from(_purokFrequencyData);
+    Future<void>.microtask(_calculateAnalytics); // stops per route use the visits
   }
 
   /// driver_routes changes with every GPS point while trucks are out: recompute at most
@@ -2106,7 +2091,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
                                     _buildChartSection("Truck Status", _buildTruckDonutChart(), legend: [
                                       _buildLegendItem("Active", (_truckStatusData['Active'] ?? 0).toInt(), Colors.green),
                                       _buildLegendItem("Full", (_truckStatusData['Full'] ?? 0).toInt(), Colors.amber),
-                                      _buildLegendItem("Idle", (_truckStatusData['Idle'] ?? 0).toInt(), Colors.grey.shade300),
+                                      _buildLegendItem("Not collecting", (_truckStatusData['Idle'] ?? 0).toInt(), Colors.grey.shade300),
                                     ], onView: () => widget.onNavigate?.call(1)),
                                     const SizedBox(height: 24),
                                     _buildChartSection("Complaints", Column(
@@ -2117,7 +2102,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
                                         Container(
                                           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                                           decoration: BoxDecoration(color: Colors.grey.shade100, borderRadius: BorderRadius.circular(8)),
-                                          child: Text("Matched: ${_complaintSourceData['Residents']?.toInt()} Residents, ${_complaintSourceData['Drivers']?.toInt()} Drivers",
+                                          child: Text("${_complaintSourceData['Residents']?.toInt() ?? 0} resident complaint(s)  ·  ${_complaintSourceData['Drivers']?.toInt() ?? 0} driver truck issue(s), shown separately",
                                               style: const TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: Colors.blueGrey)),
                                         ),
                                       ],
@@ -2152,7 +2137,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
                                               _buildChartSection("Truck Status", _buildTruckDonutChart(), legend: [
                                                 _buildLegendItem("Active", (_truckStatusData['Active'] ?? 0).toInt(), Colors.green),
                                                 _buildLegendItem("Full", (_truckStatusData['Full'] ?? 0).toInt(), Colors.amber),
-                                                _buildLegendItem("Idle", (_truckStatusData['Idle'] ?? 0).toInt(), Colors.grey.shade300),
+                                                _buildLegendItem("Not collecting", (_truckStatusData['Idle'] ?? 0).toInt(), Colors.grey.shade300),
                                               ], onView: () => widget.onNavigate?.call(1)),
                                               const SizedBox(height: 24),
                                               _buildChartSection("Complaints", Column(
@@ -2163,7 +2148,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
                                                   Container(
                                                     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                                                     decoration: BoxDecoration(color: Colors.grey.shade100, borderRadius: BorderRadius.circular(8)),
-                                                    child: Text("Matched: ${_complaintSourceData['Residents']?.toInt()} Residents, ${_complaintSourceData['Drivers']?.toInt()} Drivers",
+                                                    child: Text("${_complaintSourceData['Residents']?.toInt() ?? 0} resident complaint(s)  ·  ${_complaintSourceData['Drivers']?.toInt() ?? 0} driver truck issue(s), shown separately",
                                                         style: const TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: Colors.blueGrey)),
                                                   ),
                                                 ],
@@ -2760,7 +2745,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
           Text(
             _loadError ??
                 "Distinct collection trips that reached FULL capacity in this period, counted once per trip ID. "
-                    "FULL stops collection; the trip is finalized later when the driver marks it COMPLETED. "
+                    "FULL stops collection and finalizes the load; COMPLETED only confirms unloading. "
                     "The same records as Load History and the Waste Collection Summary.",
             style: TextStyle(fontSize: 13, color: Colors.grey.shade700, height: 1.4),
           ),
@@ -2792,8 +2777,8 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
           ),
           const SizedBox(height: 12),
           Text(
-            "Collection areas with at least one verified visit in this period. A visit needs at least 3 accurate "
-            "GPS fixes inside the area over at least 60 seconds while the trip is ACTIVE (paused, full and completed "
+            "Collection areas with at least one verified visit in this period. A visit needs at least 2 accurate "
+            "GPS fixes inside the area, at least 1 minute apart, while the trip is ACTIVE (paused, full and completed "
             "travel is excluded), counted once per trip and area. It shows the truck was there to collect, not that "
             "every household was serviced. There is no schedule data, so no completion rate is shown.",
             style: TextStyle(fontSize: 13, color: Colors.grey.shade700, height: 1.4),
@@ -4707,7 +4692,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
           if (maxWidth >= 700)
             Row(
               children: [
-                Expanded(child: _buildOpMetricCard("Completed routes", "$_completedRoutes", "Recorded in selected period", Icons.local_shipping_rounded, const Color(0xFF00897B))),
+                Expanded(child: _buildOpMetricCard("Verified visits", "${_visitSummary?.visits.length ?? 0}", "GPS-confirmed, in selected period", Icons.where_to_vote_rounded, const Color(0xFF00897B))),
                 const SizedBox(width: 12),
                 Expanded(child: _buildOpMetricCard("Pending complaints", "$pendingComplaints", "Open at end of period", Icons.chat_bubble_rounded, const Color(0xFFE53935))),
                 const SizedBox(width: 12),
@@ -4717,7 +4702,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
           else
             Column(
               children: [
-                _buildOpMetricCard("Completed routes", "$_completedRoutes", "Recorded in selected period", Icons.local_shipping_rounded, const Color(0xFF00897B)),
+                _buildOpMetricCard("Verified visits", "${_visitSummary?.visits.length ?? 0}", "GPS-confirmed, in selected period", Icons.where_to_vote_rounded, const Color(0xFF00897B)),
                 const SizedBox(height: 10),
                 _buildOpMetricCard("Pending complaints", "$pendingComplaints", "Open at end of period", Icons.chat_bubble_rounded, const Color(0xFFE53935)),
                 const SizedBox(height: 10),
@@ -4806,10 +4791,9 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
               children: [
                 Text(_complaintInsight, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Color(0xFF2C3E50), height: 1.5)),
                 const SizedBox(height: 10),
-                _detailBullet("Resident Complaints: ${_complaintSourceData['Residents']?.toInt() ?? 0}"),
-                _detailBullet("Driver Incidents: ${_complaintSourceData['Drivers']?.toInt() ?? 0}"),
-                _detailBullet("Active Pending: $pendingComplaints"),
-                _detailBullet("Resolved Issues: $resolvedComplaints"),
+                _detailBullet("Resident complaints: ${_complaintSourceData['Residents']?.toInt() ?? 0}"),
+                _detailBullet("Pending: $pendingComplaints  ·  In progress: $inProgressComplaints  ·  Resolved: $resolvedComplaints"),
+                _detailBullet("Driver truck issues (not complaints): ${_complaintSourceData['Drivers']?.toInt() ?? 0}"),
               ],
             ),
           ),
@@ -4817,7 +4801,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
 
           _buildExpandableSection(
             title: "Fleet & prediction quality",
-            subtitle: "ETA: $_etaWithin5Text | Avg time: ${_avgCollectionTime.toStringAsFixed(1)}h",
+            subtitle: "ETA: $_etaWithin5Text | Typical collection time: $_collectionTimeText",
             isExpanded: _expFleetPrediction,
             onToggle: () => setState(() => _expFleetPrediction = !_expFleetPrediction),
             content: Column(
@@ -4827,8 +4811,9 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
                 const SizedBox(height: 10),
                 _detailBullet("ETA accuracy (measured): $_etaWithin5Text"),
                 _detailBullet("ETA Mean Absolute Error (measured): $_etaMaeText"),
-                _detailBullet("Average Collection Duration: ${_avgCollectionTime.toStringAsFixed(1)} hours"),
-                _detailBullet("Active Fleet Units: ${(_truckStatusData['Active'] ?? 0).toInt()} active, ${(_truckStatusData['Full'] ?? 0).toInt()} full, ${(_truckStatusData['Idle'] ?? 0).toInt()} idle"),
+                _detailBullet("Typical collection duration (median, start to FULL): $_collectionTimeText"
+                    "${_collectionDurationTrips > 0 ? ' over $_collectionDurationTrips trip(s)' : ''}"),
+                _detailBullet("Fleet now: ${(_truckStatusData['Active'] ?? 0).toInt()} collecting, ${(_truckStatusData['Full'] ?? 0).toInt()} full, ${(_truckStatusData['Idle'] ?? 0).toInt()} not collecting (paused, offline or completed)"),
               ],
             ),
           ),
@@ -4836,7 +4821,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
 
           _buildExpandableSection(
             title: "Area breakdown",
-            subtitle: "All 10 verified service areas (Filtered by $_selectedArea)",
+            subtitle: "${_purokNames.length} service areas (filtered by $_selectedArea)",
             isExpanded: _expAreaBreakdown,
             onToggle: () => setState(() => _expAreaBreakdown = !_expAreaBreakdown),
             content: maxWidth >= 1000 ? _buildAreaTableDesktop() : _buildAreaCardsMobile(),
@@ -5318,9 +5303,9 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
         border: Border.all(color: Colors.grey.shade100)
       ),
       child: Column(children: [
-        _insightRow("Avg Collection Time", "${_avgCollectionTime.toStringAsFixed(1)}h"),
+        _insightRow("Typical Collection Time", _collectionTimeText),
         const Divider(height: 16),
-        _insightRow("Stops per Route", "$_stopsPerRoute"),
+        _insightRow("Areas per Trip", _stopsPerRoute > 0 ? "$_stopsPerRoute" : "n/a"),
         const Divider(height: 16),
         _insightRow("Distance Covered", "${_distanceCovered.toStringAsFixed(1)}km"),
         const Divider(height: 16),
