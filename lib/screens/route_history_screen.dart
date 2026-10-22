@@ -17,6 +17,7 @@ import '../utils/session_manager.dart';
 import '../models/user.dart';
 import '../models/driver_trip.dart';
 import '../services/driver_route_history_service.dart';
+import '../services/map_matching_service.dart';
 import '../services/service_area_service.dart';
 import '../utils/responsive.dart';
 import '../utils/route_export_manager.dart';
@@ -66,6 +67,9 @@ class _RouteHistoryScreenState extends State<RouteHistoryScreen> with TickerProv
   List<DriverTrip> _trips = [];
   DriverTrip? _selectedTrip;
   DriverTrip? _analyzedTrip;
+  // Road-snapped line of the selected trip (Map Matching), for the exact display points it was made from.
+  MatchedRoute? _matched;
+  String? _matchedKey;
 
   // Filter state
   DateTime? _startDate;
@@ -456,8 +460,32 @@ class _RouteHistoryScreenState extends State<RouteHistoryScreen> with TickerProv
       _analyzedTrip = analyzed;
       _isReplaying = false;
       _replayProgress = 0.0;
+      _matched = null;
+      _matchedKey = null;
     });
     _updateMapForTrip(analyzed);
+    _loadMatchedRoute(analyzed);
+  }
+
+  /// Asks Map Matching for the selected trip's road line; redraws when it arrives (the smoothed GPS line
+  /// is shown meanwhile, and stays when matching is off or fails).
+  Future<void> _loadMatchedRoute(DriverTrip trip) async {
+    final List<GpsPoint> pts = DriverRouteHistoryService.smoothForDisplay(trip.points);
+    final MatchedRoute? road = await MapMatchingService.forTrip(trip.tripId, pts,
+        finished: trip.isFinalizedCollection || trip.endTime != null);
+    if (!mounted || road == null || _analyzedTrip?.tripId != trip.tripId) return;
+    setState(() {
+      _matched = road;
+      _matchedKey = '${trip.tripId}|${MapMatchingService.signature(pts)}';
+    });
+    _updateMapForTrip(_analyzedTrip!);
+  }
+
+  /// The road line for [trip], only when it was made from exactly these display points.
+  MatchedRoute? _roadLineFor(DriverTrip trip, List<GpsPoint> pts) {
+    final MatchedRoute? road = _matched;
+    if (road == null || road.vertexOfPoint.length != pts.length) return null;
+    return _matchedKey == '${trip.tripId}|${MapMatchingService.signature(pts)}' ? road : null;
   }
 
   void _setDatePreset(String preset) {
@@ -564,9 +592,12 @@ class _RouteHistoryScreenState extends State<RouteHistoryScreen> with TickerProv
 
   Future<void> _updateReplayMapPosition() async {
     if (_mapboxMap == null || _analyzedTrip == null || _analyzedTrip!.points.isEmpty) return;
-    final points = DriverRouteHistoryService.filterStationaryGpsJitter(_analyzedTrip!.points);
+    final points = DriverRouteHistoryService.smoothForDisplay(_analyzedTrip!.points);
     final int idx = ((points.length - 1) * _replayProgress).clamp(0, points.length - 1).toInt();
-    final currentP = points[idx];
+    final MatchedRoute? road = _roadLineFor(_analyzedTrip!, points);
+    final List<double> current = road != null
+        ? road.line[road.vertexOfPoint[idx]]
+        : <double>[points[idx].longitude, points[idx].latitude];
 
     try {
       final style = _mapboxMap!.style;
@@ -575,7 +606,9 @@ class _RouteHistoryScreenState extends State<RouteHistoryScreen> with TickerProv
       const String markersSourceId = "trip-markers-source";
 
       // Replay route line coordinates up to current index
-      final List<List<double>> replayCoords = points.sublist(0, idx + 1).map((p) => [p.longitude, p.latitude]).toList();
+      final List<List<double>> replayCoords = road != null
+          ? road.line.sublist(0, road.vertexOfPoint[idx] + 1)
+          : points.sublist(0, idx + 1).map((p) => [p.longitude, p.latitude]).toList();
       final replayFeature = {
         "type": "FeatureCollection",
         "features": replayCoords.length >= 2 ? [
@@ -611,7 +644,7 @@ class _RouteHistoryScreenState extends State<RouteHistoryScreen> with TickerProv
       if (points.isNotEmpty) {
         markerFeatures.add({
           "type": "Feature",
-          "geometry": {"type": "Point", "coordinates": [points.first.longitude, points.first.latitude]},
+          "geometry": {"type": "Point", "coordinates": road?.line.first ?? [points.first.longitude, points.first.latitude]},
           "properties": {"markerType": "START"}
         });
       }
@@ -620,7 +653,7 @@ class _RouteHistoryScreenState extends State<RouteHistoryScreen> with TickerProv
       if (points.length > 1) {
         markerFeatures.add({
           "type": "Feature",
-          "geometry": {"type": "Point", "coordinates": [points.last.longitude, points.last.latitude]},
+          "geometry": {"type": "Point", "coordinates": road?.line.last ?? [points.last.longitude, points.last.latitude]},
           "properties": {"markerType": "END"}
         });
       }
@@ -637,7 +670,7 @@ class _RouteHistoryScreenState extends State<RouteHistoryScreen> with TickerProv
       // Current Vehicle marker
       markerFeatures.add({
         "type": "Feature",
-        "geometry": {"type": "Point", "coordinates": [currentP.longitude, currentP.latitude]},
+        "geometry": {"type": "Point", "coordinates": current},
         "properties": {"markerType": "VEHICLE"}
       });
 
@@ -690,7 +723,7 @@ class _RouteHistoryScreenState extends State<RouteHistoryScreen> with TickerProv
 
       if (_isReplaying) {
         _mapboxMap!.setCamera(CameraOptions(
-          center: Point(coordinates: Position(currentP.longitude, currentP.latitude)),
+          center: Point(coordinates: Position(current[0], current[1])),
         ));
       }
     } catch (_) {}
@@ -759,13 +792,17 @@ class _RouteHistoryScreenState extends State<RouteHistoryScreen> with TickerProv
       }
 
       // Full Route Line Feature
-      final cleanDisplayPoints = DriverRouteHistoryService.filterStationaryGpsJitter(points);
-      final List<List<double>> fullCoords = cleanDisplayPoints.map((p) => [p.longitude, p.latitude]).toList();
+      // Smoothed GPS line, or the road-snapped line once Map Matching has answered for these points.
+      final cleanDisplayPoints = DriverRouteHistoryService.smoothForDisplay(points);
+      final MatchedRoute? road = _roadLineFor(trip, cleanDisplayPoints);
+      final List<List<double>> fullCoords = road?.line ?? cleanDisplayPoints.map((p) => [p.longitude, p.latitude]).toList();
+      int vertex(int i) => road != null ? road.vertexOfPoint[i] : i;
       // Travel while FULL (to the disposal site) is its own red stretch; it starts at the last collecting point so the
       // line stays connected.
       final int firstFull = cleanDisplayPoints.indexWhere((p) => p.status.toUpperCase() == 'FULL');
-      final List<List<double>> collectingCoords = firstFull < 0 ? fullCoords : fullCoords.sublist(0, firstFull + 1);
-      final List<List<double>> fullStretch = firstFull < 0 ? const <List<double>>[] : fullCoords.sublist(firstFull > 0 ? firstFull - 1 : 0);
+      final List<List<double>> collectingCoords = firstFull < 0 ? fullCoords : fullCoords.sublist(0, vertex(firstFull) + 1);
+      final List<List<double>> fullStretch =
+          firstFull < 0 ? const <List<double>>[] : fullCoords.sublist(firstFull > 0 ? vertex(firstFull - 1) : 0);
       // A single recorded point is not a route: draw no line rather than an invalid one.
       final fullFeature = {
         "type": "FeatureCollection",

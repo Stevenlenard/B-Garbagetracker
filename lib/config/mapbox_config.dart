@@ -30,6 +30,9 @@ import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart' show MapboxOptions
 /// * `MAPBOX_DIRECTIONS_ENABLED` - Directions API used by route optimization. Default OFF.
 ///   Route optimization only calls Directions after a Matrix result, so it is unused while
 ///   Matrix is off; kept as its own switch so it can never become an automatic substitute.
+/// * `MAPBOX_MAP_MATCHING_ENABLED` - Map Matching API (matching/v5): snaps a finished trip's line
+///   to the roads in Route History. Default OFF. Display only; when off or failing, the
+///   smoothed GPS line is drawn.
 class MapboxConfig {
   MapboxConfig._();
 
@@ -37,6 +40,7 @@ class MapboxConfig {
   static const String tokenPlatform = String.fromEnvironment('MAPBOX_TOKEN_PLATFORM');
   static const bool matrixEnabled = bool.fromEnvironment('MAPBOX_MATRIX_ENABLED');
   static const bool directionsEnabled = bool.fromEnvironment('MAPBOX_DIRECTIONS_ENABLED');
+  static const bool mapMatchingEnabled = bool.fromEnvironment('MAPBOX_MAP_MATCHING_ENABLED');
 
   /// Upper bounds applied even when a service is enabled (per running app instance; this is
   /// NOT an account-wide spending cap).
@@ -50,6 +54,11 @@ class MapboxConfig {
       int.fromEnvironment('MAPBOX_MATRIX_MAX_ELEMENTS', defaultValue: 1000);
   static const int maxDirectionsRequestsPerSession =
       int.fromEnvironment('MAPBOX_DIRECTIONS_MAX_REQUESTS', defaultValue: 10);
+  /// Map Matching: one request per 100 route points, made once per finished trip (the result is
+  /// cached with the trip), so a session that opens many old trips still stays small.
+  static const int maxMapMatchingRequestsPerSession =
+      int.fromEnvironment('MAPBOX_MAP_MATCHING_MAX_REQUESTS', defaultValue: 60);
+  static const int maxMapMatchingCoordinates = 100; // Mapbox limit per request
 
   /// Mapbox account names whose tokens are refused even when passed explicitly (the account
   /// whose token was hard-coded in earlier builds and is to be invalidated). Account names
@@ -114,10 +123,11 @@ class MapboxConfig {
   /// Short, non-reversible description for logs (never the token itself).
   static String get diagnostics =>
       'mapbox token: ${isConfigured ? 'configured ($tokenPlatform)' : (_token.isEmpty ? 'missing' : (!isUsableToken(_token) ? 'rejected (not a usable pk. token)' : 'rejected (MAPBOX_TOKEN_PLATFORM "$tokenPlatform" does not fit this build)'))}, '
-      'matrix: ${matrixEnabled ? 'ON' : 'OFF'}, directions: ${directionsEnabled ? 'ON' : 'OFF'}';
+      'matrix: ${matrixEnabled ? 'ON' : 'OFF'}, directions: ${directionsEnabled ? 'ON' : 'OFF'}, '
+      'map matching: ${mapMatchingEnabled ? 'ON' : 'OFF'}';
 }
 
-enum MapboxService { matrix, directions }
+enum MapboxService { matrix, directions, mapMatching }
 
 /// Gate every Mapbox REST call must pass before touching the network. A refused call is
 /// counted (diagnostics / tests) and never retried by the caller.
@@ -134,25 +144,35 @@ class MapboxRequestGuard {
   @visibleForTesting
   static bool? debugDirectionsEnabled;
   @visibleForTesting
+  static bool? debugMapMatchingEnabled;
+  @visibleForTesting
   static String? debugAccessToken;
 
   static bool get _matrixOn => debugMatrixEnabled ?? MapboxConfig.matrixEnabled;
   static bool get _directionsOn => debugDirectionsEnabled ?? MapboxConfig.directionsEnabled;
+  static bool get _mapMatchingOn => debugMapMatchingEnabled ?? MapboxConfig.mapMatchingEnabled;
+
+  /// Matrix switch on its own, so release compilers fold it to a constant and drop the whole Matrix
+  /// code path while MAPBOX_MATRIX_ENABLED is false (the release build script checks this).
+  static bool get matrixOn => _matrixOn;
 
   static String get accessToken => debugAccessToken ?? MapboxConfig.accessToken;
 
-  static bool isEnabled(MapboxService s) {
+  // Kept as one small expression so the compiler inlines it and drops the Matrix code path while
+  // MAPBOX_MATRIX_ENABLED is false (the release build script checks that the endpoint is absent).
+  static bool isEnabled(MapboxService s) =>
+      s == MapboxService.matrix ? _matrixOn : (s == MapboxService.directions ? _directionsOn : _mapMatchingOn);
+
+  static int _limit(MapboxService s) {
     switch (s) {
       case MapboxService.matrix:
-        return _matrixOn;
+        return MapboxConfig.maxMatrixRequestsPerSession;
       case MapboxService.directions:
-        return _directionsOn;
+        return MapboxConfig.maxDirectionsRequestsPerSession;
+      case MapboxService.mapMatching:
+        return MapboxConfig.maxMapMatchingRequestsPerSession;
     }
   }
-
-  static int _limit(MapboxService s) => s == MapboxService.matrix
-      ? MapboxConfig.maxMatrixRequestsPerSession
-      : MapboxConfig.maxDirectionsRequestsPerSession;
 
   /// Returns null when the request may be sent (and counts it), otherwise the reason.
   /// [elements] (Matrix): sources x destinations of this request.
@@ -162,6 +182,8 @@ class MapboxRequestGuard {
       reason = 'disabled';
     } else if (accessToken.isEmpty) {
       reason = 'no token';
+    } else if (s == MapboxService.mapMatching && coordinates > MapboxConfig.maxMapMatchingCoordinates) {
+      reason = 'too many coordinates ($coordinates > ${MapboxConfig.maxMapMatchingCoordinates})';
     } else if (s == MapboxService.matrix && coordinates > MapboxConfig.maxMatrixCoordinates) {
       reason = 'too many coordinates ($coordinates > ${MapboxConfig.maxMatrixCoordinates})';
     } else if (s == MapboxService.matrix && elements > MapboxConfig.maxMatrixElementsPerRequest) {
@@ -196,6 +218,7 @@ class MapboxRequestGuard {
     _matrixElements = 0;
     debugMatrixEnabled = null;
     debugDirectionsEnabled = null;
+    debugMapMatchingEnabled = null;
     debugAccessToken = null;
   }
 }

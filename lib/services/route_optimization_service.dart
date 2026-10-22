@@ -31,7 +31,7 @@ class RouteOptimizationService {
     'message': 'Route optimization is turned off in this version. Live GPS, collection areas and saved routes are not affected.',
   };
 
-  static bool get isAvailable => MapboxRequestGuard.isEnabled(MapboxService.matrix);
+  static bool get isAvailable => MapboxRequestGuard.matrixOn;
 
   // In-memory route result cache for the current session
   static String? _cachedConfigHash;

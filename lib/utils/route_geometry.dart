@@ -1,10 +1,13 @@
 import 'dart:math' as math;
 
+import 'gps_smoothing.dart';
+
 /// One rule set for turning persisted route points (`driver_routes/{trip}/route`)
 /// into map lines. The Admin live map and the Resident live map both use it, so the
 /// same collection always draws the same geometry.
 ///
-/// Nothing is invented: only recorded points are drawn, in time order. Fewer than two
+/// Nothing is invented: lines follow the recorded points in time order (smoothed for display by
+/// [GpsSmoothing]; the stored points are never changed). Fewer than two
 /// valid points means NO line (never a straight line between arbitrary endpoints).
 class RouteGeometry {
   RouteGeometry._();
@@ -106,7 +109,7 @@ class RouteGeometry {
   /// The line is NEVER cut: a pause or a GPS drop is drawn as a straight connection to the next recorded point.
   /// Empty when fewer than two valid points exist.
   static List<Map<String, dynamic>> lineFeatures(Iterable<Map> raw) {
-    final List<Map> pts = cleanPoints(raw);
+    final List<Map> pts = smoothForDisplay(cleanPoints(raw));
     final List<Map<String, dynamic>> features = <Map<String, dynamic>>[];
     if (pts.length < 2) return features;
 
@@ -144,6 +147,31 @@ class RouteGeometry {
     }
     flush(current, currentColor);
     return features;
+  }
+
+  /// [cleanPoints] smoothed for drawing ([GpsSmoothing]: Kalman filter, then standing-still jitter dropped).
+  /// Returns copies with smoothed coordinates; the first and last point, every colour change and the live
+  /// tail (the marker position) are always kept, so stretches and the line end stay where they were.
+  static List<Map> smoothForDisplay(List<Map> pts) {
+    if (pts.length < 3) return pts;
+    final List<GpsSample> samples = pts
+        .map((Map p) => GpsSample(
+              lat: _lat(p),
+              lng: _lng(p),
+              accuracyM: _num(p['accuracy']),
+              timestampMs: _ts(p['timestamp']),
+              speedMps: _num(p['speed']),
+            ))
+        .toList();
+    final List<List<double>> smooth = GpsSmoothing.kalman(samples);
+    String colorOf(int i) => (pts[i]['color'] ?? 'GREEN').toString().toUpperCase();
+    final List<int> keep = GpsSmoothing.movingIndexes(samples, smooth,
+        keep: (int i) => pts[i]['live_tail'] == true || colorOf(i) != colorOf(i - 1));
+    return keep.map((int i) {
+      final Map p = pts[i];
+      if (p['live_tail'] == true) return p; // already the filtered live position: the line must end at the marker
+      return <String, Object?>{...p.cast<String, Object?>(), 'lat': smooth[i][0], 'lng': smooth[i][1], 'latitude': smooth[i][0], 'longitude': smooth[i][1]};
+    }).toList();
   }
 
   /// Why a historical route cannot be shown as a complete collection path, or null

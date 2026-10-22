@@ -69,7 +69,7 @@ if ($label -ne 'shared' -and (Test-Path $otherPath)) {
     if ($otherToken -eq $token) { $problems += "web and android files contain the SAME token; use Capstone Web and Capstone Android separately (or label both 'shared')" }
 }
 if ($problems.Count) { Fail ("config\mapbox.$Platform.local.json:`n  - " + ($problems -join "`n  - ")) }
-Write-Host "Config OK: platform=$label, destination account=$account, Matrix=false, Directions=false"
+Write-Host "Config OK: platform=$label, destination account=$account, Matrix=false, Directions=false, MapMatching=$([string]$cfg.MAPBOX_MAP_MATCHING_ENABLED)"
 if ($CheckOnly) { exit 0 }
 
 $outDir = Join-Path $root 'deploy_prep\out'
