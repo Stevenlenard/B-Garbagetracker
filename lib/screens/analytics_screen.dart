@@ -3,6 +3,9 @@ import '../utils/trip_links.dart';
 import '../utils/eta_evaluation.dart';
 import '../utils/analytics_report_data.dart';
 import '../services/analytics_pdf_builder.dart';
+import '../services/analytics_xlsx_builder.dart';
+import '../utils/report_file_saver.dart';
+import 'package:flutter/foundation.dart' show kIsWeb, Uint8List;
 import '../services/load_history_repository.dart';
 import '../utils/load_history.dart';
 import '../utils/collection_visits.dart';
@@ -16,7 +19,6 @@ import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:intl/intl.dart';
-import 'package:url_launcher/url_launcher.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
@@ -26,9 +28,7 @@ import '../utils/fleet_status.dart';
 import '../services/truck_locations_feed.dart';
 import '../widgets/custom_snackbar.dart';
 import '../utils/app_theme.dart';
-import '../utils/session_manager.dart';
 import '../api/api_service.dart';
-import '../api/api_client.dart';
 import '../utils/prediction_engine.dart';
 import '../utils/system_logger.dart';
 import '../services/service_area_service.dart';
@@ -731,57 +731,29 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
       return;
     }
 
-    final String exportUrl = "${ApiClient.baseUrl}export_report.php";
-    final String dateStr = DateFormat('yyyy-MM-dd').format(_selectedDateRange.start);
-    final String endDateStr = DateFormat('yyyy-MM-dd').format(_selectedDateRange.end);
-
-    String wasteTomorrow = "${_tomorrowWaste.toInt()} kg";
-    String wasteWeekly = "${_weeklyWaste.toInt()} kg";
-
-    CustomNotification.showTopNotification(context, "Exporting $category to Excel...", false);
-
-    final queryParams = {
-      'type': _selectedArea == "All Areas" ? category : "$category - $_selectedArea",
-      'format': 'xls',
-      'start_date': dateStr,
-      'end_date': endDateStr,
-      'res_rate': _residentComplaintsTotal == 0 ? "N/A" : "${((_residentComplaintsTotal - _residentComplaintsUnresolved) * 100 / _residentComplaintsTotal).round()}%",
-      'avg_time': "${_avgCollectionTime.toStringAsFixed(1)} hours",
-      'coverage': "$_areasVisitedCount of ${_expectedVisitAreas.length} areas with a verified visit",
-      'routes_done': "$_loadTripsCount full loads",
-      'active_count': "${_truckStatusData['Active']?.toInt() ?? 0}",
-      'collecting_count': "${_truckStatusData['Active']?.toInt() ?? 0}",
-      'full_count': "${_truckStatusData['Full']?.toInt() ?? 0}",
-      'inactive_count': "${_truckStatusData['Idle']?.toInt() ?? 0}",
-      'pending_count': "${_complaintStatusData['Pending']?.toInt() ?? 0}",
-      'in_progress_count': "${_complaintStatusData['In Progress']?.toInt() ?? 0}",
-      'resolved_count': "${_complaintStatusData['Resolved']?.toInt() ?? 0}",
-      'dist': "${_distanceCovered.toStringAsFixed(1)} km",
-      'stops': "$_stopsPerRoute",
-      'coll_time': "${_avgCollectionTime.toStringAsFixed(1)} hours",
-      'waste_tomorrow': wasteTomorrow,
-      'waste_weekly': wasteWeekly,
-      'insight1': _geminiSummary ?? AnalyticsNarrative.operationalSummary(_narrativeInput()),
-      'insight2': _recommendations,
-      'total_drivers': "${_allDriverRoutes.values.map((e) => e['driver_id']).toSet().length}",
-    };
-
-    // A download opens as a plain browser link: the short-lived sign-in token travels with it.
-    final String? token = await SessionManager.getAuthToken();
-    if (token != null) queryParams['gt_token'] = token;
-    final uri = Uri.parse(exportUrl).replace(queryParameters: queryParams);
-
-    if (await canLaunchUrl(uri)) {
-      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    // Built on the device from the same snapshot as the PDF, so the spreadsheet matches the
+    // dashboard; a real .xlsx (opens in Excel, Google Sheets and phone viewers).
+    CustomNotification.showTopNotification(context, "Generating Excel report...", false);
+    try {
+      await _fetchLoadHistoryData();
+      final AnalyticsReportData data = _collectReportData();
+      final Uint8List bytes = AnalyticsXlsxBuilder.build(data);
+      final bool ok = await ReportFileSaver.save(
+        bytes,
+        AnalyticsXlsxBuilder.fileName(data),
+        ReportFileSaver.xlsxMime,
+        subject: 'Analytics report - $_selectedArea',
+      );
+      if (!ok) throw StateError('the file could not be handed to the device');
       await SystemLogger.logEvent("EXPORT", "Exported Excel report for $_selectedArea");
-
-      if (mounted) {
-        _showSuccessDialog(context, "Excel Report Generated",
-            "Your analytics report for $_selectedArea has been generated and is downloading.");
+      if (mounted && kIsWeb) {
+        _showSuccessDialog(context, "Excel Report Downloaded",
+            "Your analytics report for $_selectedArea was saved to your Downloads folder.");
       }
-    } else {
+    } catch (e) {
+      debugPrint("Excel export error: $e");
       if (mounted) {
-        CustomNotification.showTopNotification(context, "Could not launch export tool.", true);
+        CustomNotification.showTopNotification(context, "The Excel report could not be generated.", true);
       }
     }
   }
