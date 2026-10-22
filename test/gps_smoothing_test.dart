@@ -123,6 +123,7 @@ void main() {
     setUp(() {
       MapboxRequestGuard.debugReset();
       MapMatchingService.debugClear();
+      MapMatchingService.debugMonthlyBudget = () async => true;
     });
     tearDown(MapboxRequestGuard.debugReset);
 
@@ -173,6 +174,16 @@ void main() {
         for (int i = 0; i < 6; i++) GpsPoint(latitude: 13.95 + (i.isEven ? 0.0001 : 0), longitude: 121.16, accuracyM: 20, timestamp: DateTime.fromMillisecondsSinceEpoch(i * 10000)),
       ];
       expect(await MapMatchingService.forTrip('home', home, finished: true), isNull);
+      expect(fake.paths, isEmpty);
+    });
+
+    test('when the server says the monthly budget is used up, nothing is sent to Mapbox', () async {
+      final _FakeAdapter fake = _FakeAdapter(okResponse);
+      MapMatchingService.debugDio = Dio()..httpClientAdapter = fake;
+      MapboxRequestGuard.debugAccessToken = 'pk.test';
+      MapboxRequestGuard.debugMapMatchingEnabled = true;
+      MapMatchingService.debugMonthlyBudget = () async => false;
+      expect(await MapMatchingService.forTrip('t3', pts, finished: false), isNull);
       expect(fake.paths, isEmpty);
     });
 

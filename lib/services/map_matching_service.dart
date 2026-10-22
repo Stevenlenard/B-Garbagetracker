@@ -4,6 +4,7 @@ import 'package:dio/dio.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter/foundation.dart';
 
+import '../api/api_client.dart';
 import '../config/mapbox_config.dart';
 import '../models/driver_trip.dart';
 import '../utils/gps_smoothing.dart';
@@ -35,10 +36,17 @@ class MatchedRoute {
 /// * Stretches Mapbox cannot place on a road keep their GPS positions, so nothing is hidden.
 /// * A finished trip is matched once: the result is stored with the trip
 ///   (`driver_routes/{trip}/matched_route`) and reused by every device.
+/// * Every request first takes one unit of the server's monthly budget (`backend/mapbox_quota.php`,
+///   [monthlyLimit] for all devices together); when the budget is used up or cannot be checked,
+///   nothing is sent and the smoothed GPS line is drawn.
 class MapMatchingService {
   MapMatchingService._();
 
   static const int cacheVersion = 2;
+
+  /// Mapbox Map Matching requests allowed per calendar month (UTC) for all devices together.
+  /// Enforced by the server (`backend/mapbox_quota.php`); shown here for reference.
+  static const int monthlyLimit = 50000;
 
   /// A matching Mapbox itself rates below this is not trusted (its GPS positions are drawn).
   static const double minConfidence = 0.05;
@@ -60,10 +68,32 @@ class MapMatchingService {
   @visibleForTesting
   static set debugDio(Dio dio) => _dio = dio;
 
+  /// Test hook replacing the server budget check.
+  @visibleForTesting
+  static Future<bool> Function()? debugMonthlyBudget;
+
+  /// True when the server granted one request from this month's shared budget.
+  static Future<bool> _takeMonthlyBudget() async {
+    final Future<bool> Function()? hook = debugMonthlyBudget;
+    if (hook != null) return hook();
+    try {
+      final Response<dynamic> res = await ApiClient.instance.post<dynamic>('mapbox_quota.php',
+          data: <String, dynamic>{'service': 'map_matching', 'count': 1});
+      final Object? d = res.data;
+      final bool allowed = d is Map && d['allowed'] == true;
+      if (!allowed) debugPrint('[MAP MATCHING] monthly budget refused: ${d is Map ? (d['message'] ?? '${d['used']}/${d['limit']}') : d}');
+      return allowed;
+    } catch (e) {
+      debugPrint('[MAP MATCHING] monthly budget check failed, not sending: $e');
+      return false;
+    }
+  }
+
   @visibleForTesting
   static void debugClear() {
     _memory.clear();
     _inFlight.clear();
+    debugMonthlyBudget = null;
   }
 
   static bool get isAvailable => MapboxRequestGuard.isEnabled(MapboxService.mapMatching) && MapboxRequestGuard.accessToken.isNotEmpty;
@@ -123,6 +153,7 @@ class MapMatchingService {
   static Future<_Chunk?> _request(List<GpsPoint> part, int offset, String profile) async {
     final String? blocked = MapboxRequestGuard.acquire(MapboxService.mapMatching, coordinates: part.length);
     if (blocked != null) return null;
+    if (!await _takeMonthlyBudget()) return null;
     final String coords = part.map((p) => '${p.longitude.toStringAsFixed(6)},${p.latitude.toStringAsFixed(6)}').join(';');
     final String radiuses = part.map((p) => (p.accuracyM * 1.5).clamp(10.0, 50.0).round().toString()).join(';');
     final String timestamps = part.map((p) => (p.timestamp.millisecondsSinceEpoch ~/ 1000).toString()).join(';');
