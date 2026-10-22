@@ -77,6 +77,28 @@ AnalyticsReportData full({int loads = 120, int etaRows = 80}) => AnalyticsReport
       ),
       forecast: const ReportForecast.available(tomorrowKg: 15000, weeklyKg: 90000, samples: 12),
       aiNarrative: 'Analyzing fleet...',
+      operations: const ReportOperations(distanceKm: 78.4, stopsPerRoute: 6, avgCollectionHours: 1.6, missedPickups: 3, missedPending: 2, missedResolved: 1),
+      assignments: const ReportAssignments.available(
+          total: 6, pending: 1, inProgress: 1, completed: 3, missed: 1, cancelled: 0, due: 4, completionRate: 75, assignedAreas: 8, verifiedAreas: 6),
+      predictive: ReportPredictive.available(
+        samples: 68,
+        trips: 12,
+        intercept: 6.18,
+        slope: 1.99,
+        method: 'Fitted on the earliest 8 of 12 trips and tested on the other 4.',
+        metrics: const <ReportModelMetric>[
+          ReportModelMetric(label: 'Arrival time: linear regression (test samples)', n: 32, mae: 7.2, rmse: 10.3, r2: -0.86, unit: 'min'),
+          ReportModelMetric(label: 'Arrival time: live rule, distance / recent speed (same samples)', n: 32, mae: 6.8, rmse: 10.1, r2: -0.81, unit: 'min'),
+          ReportModelMetric(label: 'Arrival time: estimates notified to residents', n: 5, mae: 25.3, rmse: 28.7, r2: -3.87, unit: 'min'),
+          ReportModelMetric(label: 'Daily collected load: 7-day moving average', n: 24, mae: 6042, rmse: 13627, r2: 0.20, unit: 'kg'),
+        ],
+        maWindow: 7,
+        maDays: 31,
+        maNextKg: 7142.9,
+        recent: <(DateTime, double, double)>[
+          for (int i = 0; i < 10; i++) (DateTime(2026, 10, 12 + i), i.isEven ? 5000.0 : 0.0, 3571.4),
+        ],
+      ),
     );
 
 int pageCount(List<int> bytes) =>

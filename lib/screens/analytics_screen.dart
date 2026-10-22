@@ -1,6 +1,7 @@
 import '../utils/route_history_navigation.dart';
 import '../utils/trip_links.dart';
 import '../utils/eta_evaluation.dart';
+import '../utils/predictive_models.dart';
 import '../utils/analytics_report_data.dart';
 import '../services/analytics_pdf_builder.dart';
 import '../services/analytics_xlsx_builder.dart';
@@ -1020,7 +1021,90 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
       complaints: complaints,
       forecast: forecast,
       aiNarrative: _geminiSummary,
+      operations: ReportOperations(
+        distanceKm: _distanceCovered > 0 ? _distanceCovered : null,
+        stopsPerRoute: _stopsPerRoute > 0 ? _stopsPerRoute : null,
+        avgCollectionHours: _avgCollectionTime > 0 ? _avgCollectionTime : null,
+        missedPickups: _missedPickupsCount,
+        missedPending: _missedPickupsPending,
+        missedResolved: _missedPickupsResolved,
+      ),
+      assignments: _reportAssignments(),
+      predictive: _reportPredictive(),
     );
+  }
+
+  /// Scheduled routes with the same rules as the Scheduled Routes card.
+  ReportAssignments _reportAssignments() {
+    final AssignmentList? data = _assignments;
+    if (data == null || _assignmentFailure != AssignmentFailure.none) {
+      return ReportAssignments.unavailable(_assignmentMessage ?? 'route assignments are not available');
+    }
+    final List<RouteAssignment> items =
+        data.items.where((RouteAssignment a) => AssignedAreaCoverage.includesArea(a, _selectedArea)).toList();
+    final AssignmentSummary s = AssignmentSummary.fromItems(items, data.today);
+    final Map<String, Set<String>> visitedByTrip = <String, Set<String>>{};
+    for (final CollectionVisit x in _visitSummary?.visits ?? const <CollectionVisit>[]) {
+      (visitedByTrip[x.tripId] ??= <String>{}).add(x.area);
+    }
+    final AssignedAreaCoverage cov = AssignedAreaCoverage.compute(items, visitedByTrip, areaFilter: _selectedArea);
+    return ReportAssignments.available(
+      total: s.total,
+      pending: s.pending,
+      inProgress: s.inProgress,
+      completed: s.completed,
+      missed: s.missed,
+      cancelled: s.cancelled,
+      due: s.due,
+      completionRate: s.completionRate,
+      assignedAreas: cov.assignedAreas,
+      verifiedAreas: cov.verifiedAreas,
+    );
+  }
+
+  /// Objective 3 figures, computed exactly as the Predictive Models card computes them.
+  ReportPredictive _reportPredictive() {
+    try {
+      final ArrivalRegressionReport reg = ArrivalRegression.evaluate(ArrivalRegression.extract(_allDriverRoutes, _geofences));
+      final ({List<DateTime> days, List<double> kg}) daily =
+          MovingAverageForecast.dailyLoads(_allDriverRoutes, from: _selectedDateRange.start, to: _selectedDateRange.end);
+      final MovingAverageReport ma = MovingAverageForecast.evaluate(daily.days, daily.kg);
+      final List<double> act = <double>[], pred = <double>[];
+      for (final EtaVisit v in _etaFilteredVisits) {
+        if (v.status != EtaVisitStatus.evaluated || v.predictions.isEmpty) continue;
+        final EtaPrediction p = v.predictions.first;
+        if (p.predictedMinutes == null || p.signedErrorMin == null) continue;
+        pred.add(p.predictedMinutes!.toDouble());
+        act.add(p.predictedMinutes! + p.signedErrorMin!);
+      }
+      final ErrorMetrics live = ErrorMetrics.of(act, pred);
+      ReportModelMetric m(String label, ErrorMetrics e, String unit) =>
+          ReportModelMetric(label: label, n: e.n, mae: e.mae, rmse: e.rmse, r2: e.r2, unit: unit);
+      final int k = ma.backtestActual.length;
+      final int from = k > 14 ? k - 14 : 0;
+      final int offset = ma.days.length - k; // backtest covers the last k days
+      return ReportPredictive.available(
+        samples: reg.samples,
+        trips: reg.trips,
+        intercept: reg.fit?.intercept,
+        slope: reg.fit?.slope,
+        method: reg.method,
+        metrics: <ReportModelMetric>[
+          m('Arrival time: linear regression (test samples)', reg.regression, 'min'),
+          m('Arrival time: live rule, distance / recent speed (same samples)', reg.baseline, 'min'),
+          m('Arrival time: estimates notified to residents', live, 'min'),
+          m('Daily collected load: ${ma.window}-day moving average', ma.metrics, 'kg'),
+        ],
+        maWindow: ma.window,
+        maDays: ma.days.length,
+        maNextKg: ma.nextForecast,
+        recent: <(DateTime, double, double)>[
+          for (int i = from; i < k; i++) (ma.days[offset + i], ma.backtestActual[i], ma.backtestForecast[i]),
+        ],
+      );
+    } catch (e) {
+      return ReportPredictive.unavailable('the models could not be computed ($e)');
+    }
   }
 
   Future<void> _exportToNativePdf(String category) async {
@@ -3120,7 +3204,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
           ),
           const SizedBox(height: 10),
           Text(
-            "A verified visit = one trip with at least 3 accurate GPS fixes inside the area over at least 60 seconds while "
+            "A verified visit = one trip with at least 2 accurate GPS fixes inside the area, at least 1 minute apart, while "
             "ACTIVE, counted once per trip and area. Paused, full and completed travel is excluded. It does not prove every "
             "household was serviced. Complaints = resident complaints filed in the period.",
             style: TextStyle(fontSize: 10.5, color: Colors.grey.shade600, height: 1.4),
@@ -5506,7 +5590,10 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
     final bool excel = format.contains('Excel');
     final ReportCategory kind = ReportCategoryLabel.parse(category);
     final String period = '${DateFormat('MMM d, yyyy').format(_selectedDateRange.start)} – ${DateFormat('MMM d, yyyy').format(_selectedDateRange.end)}';
-    final String contents = excel ? kind.contents : 'the complete analytics report (every section, whichever category is chosen)';
+    final String contents = excel
+        ? kind.contents
+        : 'the complete analytics report, organized by the study objectives: GPS tracking and notifications, analytics, '
+            'and predictive models (every section, whichever category is chosen)';
     Widget line(IconData icon, String text, {bool strong = false}) => Padding(
           padding: const EdgeInsets.only(top: 6),
           child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[

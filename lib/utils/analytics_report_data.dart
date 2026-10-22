@@ -98,10 +98,14 @@ class ReportWaste {
   int get estimatedCount => trips - measuredCount;
   bool get isEstimate => estimatedCount > 0;
 
-  /// FULL trips per Manila calendar day (yyyy-MM-dd), oldest first.
+  /// Trips whose record carries no time (left out of [byDate]).
+  int get untimedCount => rows.where((ReportLoadRow r) => !r.timeRecorded).length;
+
+  /// FULL trips per Manila calendar day (yyyy-MM-dd), oldest first. Trips without a recorded
+  /// time are left out (see [untimedCount]) instead of being placed on the day of the report.
   Map<String, int> get byDate {
     final Map<String, int> out = <String, int>{};
-    for (final ReportLoadRow r in rows) {
+    for (final ReportLoadRow r in rows.where((ReportLoadRow r) => r.timeRecorded)) {
       final String k = '${r.fullAtManila.year.toString().padLeft(4, '0')}-'
           '${r.fullAtManila.month.toString().padLeft(2, '0')}-'
           '${r.fullAtManila.day.toString().padLeft(2, '0')}';
@@ -259,6 +263,120 @@ class ReportForecast {
   final int samples;
 }
 
+/// Operational figures shown on the Analytics page (null = not computed for this selection).
+class ReportOperations {
+  const ReportOperations({this.distanceKm, this.stopsPerRoute, this.avgCollectionHours, this.missedPickups, this.missedPending, this.missedResolved});
+  static const ReportOperations none = ReportOperations();
+
+  final double? distanceKm;
+  final int? stopsPerRoute;
+  final double? avgCollectionHours;
+
+  /// Resident reports of uncollected garbage in the period.
+  final int? missedPickups;
+  final int? missedPending;
+  final int? missedResolved;
+}
+
+/// Scheduled routes (Route Assignments) in the period, with the same rules as the dashboard card.
+class ReportAssignments {
+  const ReportAssignments.available({
+    required this.total,
+    required this.pending,
+    required this.inProgress,
+    required this.completed,
+    required this.missed,
+    required this.cancelled,
+    required this.due,
+    required this.completionRate,
+    required this.assignedAreas,
+    required this.verifiedAreas,
+  })  : available = true,
+        reason = null;
+  const ReportAssignments.unavailable(this.reason)
+      : available = false,
+        total = 0,
+        pending = 0,
+        inProgress = 0,
+        completed = 0,
+        missed = 0,
+        cancelled = 0,
+        due = 0,
+        completionRate = null,
+        assignedAreas = 0,
+        verifiedAreas = 0;
+
+  final bool available;
+  final String? reason;
+  final int total;
+  final int pending;
+  final int inProgress;
+  final int completed;
+  final int missed;
+  final int cancelled;
+  final int due;
+  final double? completionRate; // percent
+  final int assignedAreas;
+  final int verifiedAreas;
+
+  double? get coveragePercent => assignedAreas == 0 ? null : verifiedAreas * 100.0 / assignedAreas;
+}
+
+/// One evaluated predictive model (or baseline): sample size and error metrics.
+class ReportModelMetric {
+  const ReportModelMetric({required this.label, required this.n, required this.mae, required this.rmse, required this.r2, required this.unit});
+  final String label;
+  final int n;
+  final double? mae;
+  final double? rmse;
+  final double? r2;
+  final String unit; // 'min' or 'kg'
+}
+
+/// Objective 3: the arrival-time linear regression and the moving-average forecast of the daily load.
+class ReportPredictive {
+  const ReportPredictive.available({
+    required this.samples,
+    required this.trips,
+    required this.intercept,
+    required this.slope,
+    required this.method,
+    required this.metrics,
+    required this.maWindow,
+    required this.maDays,
+    required this.maNextKg,
+    required this.recent,
+  })  : available = true,
+        reason = null;
+  const ReportPredictive.unavailable(this.reason)
+      : available = false,
+        samples = 0,
+        trips = 0,
+        intercept = null,
+        slope = null,
+        method = '',
+        metrics = const <ReportModelMetric>[],
+        maWindow = 7,
+        maDays = 0,
+        maNextKg = null,
+        recent = const <(DateTime, double, double)>[];
+
+  final bool available;
+  final String? reason;
+  final int samples; // arrival samples extracted from recorded trips
+  final int trips;
+  final double? intercept; // minutes
+  final double? slope; // minutes per km
+  final String method; // how the samples were split for testing
+  final List<ReportModelMetric> metrics; // regression, live rule, notified estimates, moving average
+  final int maWindow;
+  final int maDays;
+  final double? maNextKg;
+
+  /// Last days of the moving-average backtest: (day, actual kg, forecast kg).
+  final List<(DateTime, double, double)> recent;
+}
+
 class AnalyticsReportData {
   const AnalyticsReportData({
     required this.meta,
@@ -269,7 +387,14 @@ class AnalyticsReportData {
     required this.complaints,
     required this.forecast,
     this.aiNarrative,
+    this.operations = ReportOperations.none,
+    this.assignments = const ReportAssignments.unavailable('scheduled routes were not loaded'),
+    this.predictive = const ReportPredictive.unavailable('the predictive models were not computed'),
   });
+
+  final ReportOperations operations;
+  final ReportAssignments assignments;
+  final ReportPredictive predictive;
 
   final ReportMeta meta;
   final ReportFleet fleet;
