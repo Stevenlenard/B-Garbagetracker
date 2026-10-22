@@ -25,8 +25,10 @@ try {
     $conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
     $conn->exec("SET time_zone = '+08:00'");
 } catch(PDOException $exception) {
+    // The details (host, user, MySQL error) go to the server log only, never to the client.
+    error_log('[db_config] connection failed: ' . $exception->getMessage());
     header('Content-Type: application/json');
-    echo json_encode(["success" => false, "message" => "DB Error: " . $exception->getMessage()]);
+    echo json_encode(["success" => false, "message" => "The server is busy. Please try again in a moment."]);
     exit;
 }
 

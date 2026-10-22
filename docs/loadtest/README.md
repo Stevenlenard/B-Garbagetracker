@@ -20,7 +20,8 @@ Not covered: the live GPS updates and maps, which go directly from the app to Fi
 | 10 | 251 | 4.3 | 140 | 138 | 323 | 906 | 0 % |
 | 25 | 611 | 10.4 | 133 | 150 | 220 | 762 | 0 % |
 | 50 | 1,145 | 19.5 | 137 | 164 | 266 | 1,210 | 0 % |
-| 100 (run at 11:12) | 2,038 | 35.2 | 164 | 209 | 429 | 4,329 | 5.4 % |
+| 100 (11:12, before the fix) | 2,038 | 35.2 | 164 | 209 | 429 | 4,329 | 5.4 % |
+| 100 (11:23, after the fix) | 2,070 | 35.7 | 161 | 204 | 433 | 4,103 | 0 % |
 
 Per request at 50 concurrent users:
 
@@ -36,7 +37,16 @@ Per request at 50 concurrent users:
 
 All website files were still served without errors (index.html, flutter_bootstrap.js, main.dart.js: 0 %). The errors (110 of 2,038 requests, 5.4 %) were all on the database endpoint `get_public_stats.php` (12 % of its 897 calls). They started once all 100 users were active (from about 20 s into the step): the replies were the backend's database connection error, consistent with the shared-hosting limit on simultaneous MySQL connections per account, since every PHP request opens its own connection. The average response time stayed low (0.16 s); the first app download slowed to 0.74 s on average (1.7 s at the 95th percentile). The site answered normally right after the step.
 
-So, on the current shared hosting plan, the backend works without errors up to at least 50 concurrent users; at 100 concurrent users, about 1 in 8 database requests is refused because of the connection limit.
+So, before the fix, the backend worked without errors up to 50 concurrent users, and at 100 concurrent users about 1 in 8 database requests was refused because of the connection limit.
+
+### Fix and repeated test
+
+Two server changes were made on 2026-10-22 (commit in `backend/`):
+
+1. `get_public_stats.php` keeps its answer for 60 s in a server-side cache file, so many visitors at once no longer each open a database connection.
+2. `db_config.php` no longer sends the MySQL error message (which can reveal server details) to the client; it writes it to the server log and answers "The server is busy. Please try again in a moment."
+
+The 100-user step was then repeated (11:23): 2,070 requests, 0 % errors, average 0.16 s; the database endpoint answered in 0.13 s on average (0.15 s at the 95th percentile).
 
 ## Reading the results
 
@@ -52,5 +62,5 @@ Limits: one client machine and one internet connection; the results include that
 
 - `gt_load_test.jmx` – the JMeter test plan (open with JMeter, or run without the GUI:
   `jmeter -n -t gt_load_test.jmx -Jusers=50 -Jramp=20 -Jduration=60 -l results_50.jtl -e -o report_50`)
-- `reports/users_10`, `reports/users_25`, `reports/users_50`, `reports/users_100` – JMeter HTML dashboards (open `index.html`)
+- `reports/users_10`, `reports/users_25`, `reports/users_50`, `reports/users_100`, `reports/users_100_after_fix` – JMeter HTML dashboards (open `index.html`)
 - `reports/results_*.jtl` – raw results (CSV)
