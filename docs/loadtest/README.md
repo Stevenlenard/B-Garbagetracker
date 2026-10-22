@@ -20,7 +20,7 @@ Not covered: the live GPS updates and maps, which go directly from the app to Fi
 | 10 | 251 | 4.3 | 140 | 138 | 323 | 906 | 0 % |
 | 25 | 611 | 10.4 | 133 | 150 | 220 | 762 | 0 % |
 | 50 | 1,145 | 19.5 | 137 | 164 | 266 | 1,210 | 0 % |
-| 100 (run at 11:21) | 2,038 | 35.2 | 164 | 209 | 429 | 4,329 | 5.4 % |
+| 100 (run at 11:12) | 2,038 | 35.2 | 164 | 209 | 429 | 4,329 | 5.4 % |
 
 Per request at 50 concurrent users:
 
