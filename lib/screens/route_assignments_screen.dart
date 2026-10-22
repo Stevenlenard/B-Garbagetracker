@@ -30,8 +30,37 @@ class _DriverOption {
   final String truck;
 }
 
+const Color _teal = Color(0xFF00796B);
+const Color _ink = Color(0xFF1A1A1A);
+const Color _muted = Color(0xFF6B7280);
+const Color _line = Color(0xFFE5E7EB);
+const Color _mint = Color(0xFFE0F2F1);
+const Color _pageBg = Color(0xFFF8F9FA);
+
+String _initials(String name) {
+  final List<String> parts = name.trim().split(RegExp(r'\s+')).where((String p) => p.isNotEmpty).toList();
+  if (parts.isEmpty) return '?';
+  if (parts.length == 1) return parts.first.substring(0, 1).toUpperCase();
+  return (parts.first.substring(0, 1) + parts.last.substring(0, 1)).toUpperCase();
+}
+
+IconData _statusIcon(AssignmentStatus s) {
+  switch (s) {
+    case AssignmentStatus.pending:
+      return Icons.schedule_rounded;
+    case AssignmentStatus.inProgress:
+      return Icons.local_shipping_rounded;
+    case AssignmentStatus.completed:
+      return Icons.check_circle_rounded;
+    case AssignmentStatus.missed:
+      return Icons.error_outline_rounded;
+    case AssignmentStatus.cancelled:
+    case AssignmentStatus.unknown:
+      return Icons.cancel_outlined;
+  }
+}
+
 class _RouteAssignmentsScreenState extends State<RouteAssignmentsScreen> {
-  static const Color teal = Color(0xFF00796B);
   late final RouteAssignmentService _service = widget.service ?? RouteAssignmentService();
   final ApiService _api = ApiService();
   final DateFormat _day = DateFormat('yyyy-MM-dd');
@@ -120,6 +149,16 @@ class _RouteAssignmentsScreenState extends State<RouteAssignmentsScreen> {
     _load();
   }
 
+  /// Moves the shown period by its own length (a week stays a week).
+  void _shiftRange(int direction) {
+    final int days = _range.end.difference(_range.start).inDays + 1;
+    setState(() => _range = DateTimeRange(
+          start: _range.start.add(Duration(days: days * direction)),
+          end: _range.end.add(Duration(days: days * direction)),
+        ));
+    _load();
+  }
+
   Future<void> _openForm([RouteAssignment? existing]) async {
     if (_drivers.isEmpty || _areas.isEmpty) {
       CustomNotification.showTopNotification(context, 'Drivers or service areas are still loading. Try again in a moment.', true);
@@ -142,11 +181,20 @@ class _RouteAssignmentsScreenState extends State<RouteAssignmentsScreen> {
     final bool? ok = await showDialog<bool>(
       context: context,
       builder: (BuildContext ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        icon: const Icon(Icons.event_busy_rounded, color: Color(0xFFC62828), size: 32),
         title: const Text('Cancel assignment?'),
-        content: Text('The ${a.date} assignment for ${_driverNames[a.driverId] ?? 'driver ${a.driverId}'} will be marked Cancelled. The record is kept.'),
+        content: Text(
+          'The ${_prettyDate(a.date)} assignment for ${_driverNames[a.driverId] ?? 'driver ${a.driverId}'} will be marked Cancelled. The record is kept.',
+          textAlign: TextAlign.center,
+        ),
         actions: <Widget>[
           TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Keep')),
-          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Cancel assignment', style: TextStyle(color: Colors.red))),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: FilledButton.styleFrom(backgroundColor: const Color(0xFFC62828)),
+            child: const Text('Cancel assignment'),
+          ),
         ],
       ),
     );
@@ -173,129 +221,415 @@ class _RouteAssignmentsScreenState extends State<RouteAssignmentsScreen> {
     }
   }
 
+  String _prettyDate(String ymd) {
+    final DateTime? d = DateTime.tryParse(ymd);
+    return d == null ? ymd : DateFormat('EEE, MMM d').format(d);
+  }
+
+  String _dayHeader(String ymd) {
+    final DateTime? d = DateTime.tryParse(ymd);
+    if (d == null) return ymd;
+    final DateTime now = DateTime.now();
+    final DateTime today = DateTime(now.year, now.month, now.day);
+    final int diff = DateTime(d.year, d.month, d.day).difference(today).inDays;
+    final String pretty = DateFormat('EEEE, MMMM d').format(d);
+    if (diff == 0) return 'Today · $pretty';
+    if (diff == 1) return 'Tomorrow · $pretty';
+    if (diff == -1) return 'Yesterday · $pretty';
+    return pretty;
+  }
+
   @override
   Widget build(BuildContext context) {
     final List<RouteAssignment> shown =
         _statusFilter == null ? _items : _items.where((RouteAssignment a) => a.status == _statusFilter).toList();
+    // Group by date, in date order.
+    final Map<String, List<RouteAssignment>> byDay = <String, List<RouteAssignment>>{};
+    for (final RouteAssignment a in List<RouteAssignment>.of(shown)..sort((RouteAssignment x, RouteAssignment y) => x.date.compareTo(y.date))) {
+      byDay.putIfAbsent(a.date, () => <RouteAssignment>[]).add(a);
+    }
     return Scaffold(
-      backgroundColor: const Color(0xFFF8F9FA),
+      backgroundColor: _pageBg,
       body: SafeArea(
-        child: RefreshIndicator(
-          onRefresh: _load,
-          child: ListView(
-            padding: const EdgeInsets.fromLTRB(16, 16, 16, 120),
-            children: <Widget>[
-              Row(children: <Widget>[
-                if (widget.onBack != null)
-                  IconButton(onPressed: widget.onBack, icon: const Icon(Icons.arrow_back_ios_new_rounded, size: 20)),
-                const Expanded(
-                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
-                    Text('Route Assignments', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900, color: Color(0xFF1A1A1A))),
-                    SizedBox(height: 2),
-                    Text('Driver, truck and service areas per collection day', style: TextStyle(fontSize: 12, color: Colors.grey)),
-                  ]),
-                ),
-                ElevatedButton.icon(
-                  onPressed: _failure == AssignmentFailure.none && !_loading ? () => _openForm() : null,
-                  icon: const Icon(Icons.add_rounded, size: 18),
-                  label: const Text('New'),
-                  style: ElevatedButton.styleFrom(backgroundColor: teal, foregroundColor: Colors.white),
+        child: LayoutBuilder(builder: (BuildContext context, BoxConstraints box) {
+          final bool wide = box.maxWidth >= 720;
+          final double pad = wide ? 24 : 16;
+          return RefreshIndicator(
+            color: _teal,
+            onRefresh: _load,
+            child: ListView(
+              padding: EdgeInsets.fromLTRB(pad, pad, pad, 120),
+              children: <Widget>[
+                _header(wide),
+                const SizedBox(height: 16),
+                _toolbar(),
+                const SizedBox(height: 14),
+                _summaryTiles(box.maxWidth - pad * 2),
+                const SizedBox(height: 18),
+                if (_loading)
+                  const Padding(padding: EdgeInsets.all(48), child: Center(child: CircularProgressIndicator(color: _teal)))
+                else if (_error != null)
+                  _stateBox(Icons.cloud_off_rounded, _error!, retry: _failure != AssignmentFailure.notConfigured)
+                else if (shown.isEmpty)
+                  _emptyState()
+                else
+                  for (final MapEntry<String, List<RouteAssignment>> day in byDay.entries) ...<Widget>[
+                    _dayLabel(day.key, day.value.length, box.maxWidth - pad * 2),
+                    _cardGrid(day.value, box.maxWidth - pad * 2),
+                    const SizedBox(height: 10),
+                  ],
+              ],
+            ),
+          );
+        }),
+      ),
+    );
+  }
+
+  Widget _header(bool wide) {
+    final Widget newButton = FilledButton.icon(
+      onPressed: _failure == AssignmentFailure.none && !_loading ? () => _openForm() : null,
+      icon: const Icon(Icons.add_rounded, size: 20),
+      label: const Text('New assignment'),
+      style: FilledButton.styleFrom(
+        backgroundColor: _teal,
+        foregroundColor: Colors.white,
+        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        textStyle: const TextStyle(fontWeight: FontWeight.w800),
+      ),
+    );
+    final Widget title = Row(children: <Widget>[
+      if (widget.onBack != null)
+        Padding(
+          padding: const EdgeInsets.only(right: 4),
+          child: IconButton(onPressed: widget.onBack, icon: const Icon(Icons.arrow_back_ios_new_rounded, size: 20)),
+        ),
+      Container(
+        width: 44,
+        height: 44,
+        decoration: BoxDecoration(color: _mint, borderRadius: BorderRadius.circular(14)),
+        child: const Icon(Icons.assignment_ind_rounded, color: _teal),
+      ),
+      const SizedBox(width: 12),
+      const Expanded(
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
+          Text('Route Assignments', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: _ink)),
+          SizedBox(height: 2),
+          Text('Who collects where, with which truck, on each collection day',
+              style: TextStyle(fontSize: 12.5, color: _muted)),
+        ]),
+      ),
+    ]);
+    if (wide) return Row(children: <Widget>[Expanded(child: title), const SizedBox(width: 12), newButton]);
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: <Widget>[title, const SizedBox(height: 12), newButton]);
+  }
+
+  Widget _toolbar() {
+    final String label = DateUtils.isSameDay(_range.start, _range.end)
+        ? DateFormat('MMM d, yyyy').format(_range.start)
+        : '${DateFormat('MMM d').format(_range.start)} – ${DateFormat('MMM d, yyyy').format(_range.end)}';
+    return Container(
+      padding: const EdgeInsets.all(6),
+      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16), border: Border.all(color: _line)),
+      child: Row(children: <Widget>[
+        IconButton(onPressed: _loading ? null : () => _shiftRange(-1), icon: const Icon(Icons.chevron_left_rounded), tooltip: 'Previous period'),
+        Expanded(
+          child: InkWell(
+            borderRadius: BorderRadius.circular(12),
+            onTap: _pickRange,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
+              child: Row(mainAxisAlignment: MainAxisAlignment.center, children: <Widget>[
+                const Icon(Icons.calendar_month_rounded, size: 18, color: _teal),
+                const SizedBox(width: 8),
+                Flexible(
+                  child: Text(label,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontWeight: FontWeight.w800, color: _ink, fontSize: 14)),
                 ),
               ]),
-              const SizedBox(height: 12),
-              Wrap(spacing: 8, runSpacing: 8, crossAxisAlignment: WrapCrossAlignment.center, children: <Widget>[
-                OutlinedButton.icon(
-                  onPressed: _pickRange,
-                  icon: const Icon(Icons.date_range_rounded, size: 18),
-                  label: Text(DateUtils.isSameDay(_range.start, _range.end) ? DateFormat('MMM d, yyyy').format(_range.start) : '${DateFormat('MMM d').format(_range.start)} – ${DateFormat('MMM d, yyyy').format(_range.end)}'),
-                ),
-                IconButton(onPressed: _loading ? null : _load, icon: const Icon(Icons.refresh_rounded), tooltip: 'Refresh'),
-              ]),
-              const SizedBox(height: 8),
-              Wrap(spacing: 6, runSpacing: 6, children: <Widget>[
-                _countChip(null, 'All', _summary.total),
-                _countChip(AssignmentStatus.pending, 'Pending', _summary.pending),
-                _countChip(AssignmentStatus.inProgress, 'In Progress', _summary.inProgress),
-                _countChip(AssignmentStatus.completed, 'Completed', _summary.completed),
-                _countChip(AssignmentStatus.missed, 'Missed', _summary.missed),
-                _countChip(AssignmentStatus.cancelled, 'Cancelled', _summary.cancelled),
-              ]),
-              const SizedBox(height: 12),
-              if (_loading)
-                const Padding(padding: EdgeInsets.all(40), child: Center(child: CircularProgressIndicator(color: teal)))
-              else if (_error != null)
-                _stateBox(Icons.error_outline_rounded, _error!, retry: _failure != AssignmentFailure.notConfigured)
-              else if (shown.isEmpty)
-                _stateBox(Icons.event_busy_rounded,
-                    _items.isEmpty ? 'No assignments in this period.' : 'No assignments with this status in this period.')
-              else
-                ...shown.map(_card),
-            ],
+            ),
           ),
+        ),
+        IconButton(onPressed: _loading ? null : () => _shiftRange(1), icon: const Icon(Icons.chevron_right_rounded), tooltip: 'Next period'),
+        Container(width: 1, height: 24, color: _line),
+        IconButton(onPressed: _loading ? null : _load, icon: const Icon(Icons.refresh_rounded, color: _teal), tooltip: 'Refresh'),
+      ]),
+    );
+  }
+
+  Widget _summaryTiles(double width) {
+    final List<(AssignmentStatus?, String, int, Color, IconData)> tiles = <(AssignmentStatus?, String, int, Color, IconData)>[
+      (null, 'All', _summary.total, _teal, Icons.dashboard_rounded),
+      (AssignmentStatus.pending, 'Pending', _summary.pending, statusColor(AssignmentStatus.pending), _statusIcon(AssignmentStatus.pending)),
+      (AssignmentStatus.inProgress, 'In Progress', _summary.inProgress, statusColor(AssignmentStatus.inProgress), _statusIcon(AssignmentStatus.inProgress)),
+      (AssignmentStatus.completed, 'Completed', _summary.completed, statusColor(AssignmentStatus.completed), _statusIcon(AssignmentStatus.completed)),
+      (AssignmentStatus.missed, 'Missed', _summary.missed, statusColor(AssignmentStatus.missed), _statusIcon(AssignmentStatus.missed)),
+      (AssignmentStatus.cancelled, 'Cancelled', _summary.cancelled, statusColor(AssignmentStatus.cancelled), _statusIcon(AssignmentStatus.cancelled)),
+    ];
+    // 6 across on wide screens, 3 on tablets, 2 on phones.
+    final int cols = width >= 900 ? 6 : (width >= 480 ? 3 : 2);
+    const double gap = 10;
+    final double w = (width - gap * (cols - 1)) / cols;
+    return Wrap(
+      spacing: gap,
+      runSpacing: gap,
+      children: <Widget>[
+        for (final (AssignmentStatus?, String, int, Color, IconData) t in tiles) SizedBox(width: w, child: _tile(t.$1, t.$2, t.$3, t.$4, t.$5)),
+      ],
+    );
+  }
+
+  Widget _tile(AssignmentStatus? s, String label, int n, Color c, IconData icon) {
+    final bool sel = _statusFilter == s;
+    return Material(
+      color: sel ? c.withValues(alpha: 0.10) : Colors.white,
+      borderRadius: BorderRadius.circular(16),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(16),
+        onTap: () => setState(() => _statusFilter = s),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: sel ? c : _line, width: sel ? 1.6 : 1),
+          ),
+          child: Row(children: <Widget>[
+            Container(
+              width: 34,
+              height: 34,
+              decoration: BoxDecoration(color: c.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(10)),
+              child: Icon(icon, size: 18, color: c),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
+                Text('$n', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900, color: sel ? c : _ink, height: 1.1)),
+                Text(label, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 11.5, color: _muted, fontWeight: FontWeight.w600)),
+              ]),
+            ),
+          ]),
         ),
       ),
     );
   }
 
-  Widget _countChip(AssignmentStatus? s, String label, int n) {
-    final bool sel = _statusFilter == s;
-    return ChoiceChip(
-      label: Text('$label ($n)'),
-      selected: sel,
-      onSelected: (_) => setState(() => _statusFilter = s),
-      selectedColor: (s == null ? teal : statusColor(s)).withValues(alpha: 0.15),
+  Widget _dayLabel(String ymd, int count, double width) {
+    final double maxText = (width - 80).clamp(80, double.infinity);
+    final DateTime now = DateTime.now();
+    final bool isToday = ymd == _day.format(now);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10, top: 4),
+      child: Row(children: <Widget>[
+        Container(width: 8, height: 8, decoration: BoxDecoration(color: isToday ? _teal : _muted.withValues(alpha: 0.5), shape: BoxShape.circle)),
+        const SizedBox(width: 8),
+        // Capped so the line after it always shows, also on narrow phones.
+        ConstrainedBox(
+          constraints: BoxConstraints(maxWidth: maxText),
+          child: Text(_dayHeader(ymd),
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontWeight: FontWeight.w900, fontSize: 14, color: isToday ? _teal : _ink)),
+        ),
+        const SizedBox(width: 8),
+        Text('$count', style: const TextStyle(color: _muted, fontWeight: FontWeight.w700, fontSize: 12)),
+        const SizedBox(width: 10),
+        const Expanded(child: Divider(color: _line, height: 1)),
+      ]),
+    );
+  }
+
+  Widget _cardGrid(List<RouteAssignment> items, double width) {
+    final int cols = width >= 1150 ? 3 : (width >= 720 ? 2 : 1);
+    const double gap = 12;
+    final double w = (width - gap * (cols - 1)) / cols;
+    return Wrap(spacing: gap, runSpacing: gap, children: <Widget>[for (final RouteAssignment a in items) SizedBox(width: w, child: _card(a))]);
+  }
+
+  Widget _emptyState() {
+    final bool filtered = _items.isNotEmpty;
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 36, horizontal: 24),
+      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20), border: Border.all(color: _line)),
+      child: Column(children: <Widget>[
+        Container(
+          width: 72,
+          height: 72,
+          decoration: const BoxDecoration(color: _mint, shape: BoxShape.circle),
+          child: const Icon(Icons.event_note_rounded, size: 34, color: _teal),
+        ),
+        const SizedBox(height: 14),
+        Text(filtered ? 'No assignments with this status' : 'No assignments in this period',
+            textAlign: TextAlign.center, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 16, color: _ink)),
+        const SizedBox(height: 6),
+        Text(
+          filtered
+              ? 'Choose another status above to see the other assignments.'
+              : 'Assign a driver, a truck and the service areas for a collection day. The driver sees it as "Today\'s Assignment".',
+          textAlign: TextAlign.center,
+          style: const TextStyle(color: _muted, fontSize: 13, height: 1.4),
+        ),
+        if (!filtered && _failure == AssignmentFailure.none) ...<Widget>[
+          const SizedBox(height: 16),
+          OutlinedButton.icon(
+            onPressed: () => _openForm(),
+            icon: const Icon(Icons.add_rounded, size: 18),
+            label: const Text('Create the first assignment'),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: _teal,
+              side: const BorderSide(color: _teal),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            ),
+          ),
+        ],
+      ]),
     );
   }
 
   Widget _stateBox(IconData icon, String text, {bool retry = false}) {
     return Container(
-      margin: const EdgeInsets.only(top: 12),
-      padding: const EdgeInsets.all(24),
-      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16), border: Border.all(color: Colors.grey.shade200)),
+      padding: const EdgeInsets.symmetric(vertical: 32, horizontal: 24),
+      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20), border: Border.all(color: _line)),
       child: Column(children: <Widget>[
-        Icon(icon, color: Colors.grey, size: 32),
-        const SizedBox(height: 8),
-        Text(text, textAlign: TextAlign.center, style: TextStyle(color: Colors.grey.shade700)),
-        if (retry) TextButton(onPressed: _load, child: const Text('Retry')),
+        Container(
+          width: 64,
+          height: 64,
+          decoration: BoxDecoration(color: Colors.orange.withValues(alpha: 0.10), shape: BoxShape.circle),
+          child: Icon(icon, color: Colors.orange.shade700, size: 30),
+        ),
+        const SizedBox(height: 12),
+        Text(text, textAlign: TextAlign.center, style: const TextStyle(color: _ink, fontWeight: FontWeight.w600)),
+        if (retry) ...<Widget>[
+          const SizedBox(height: 10),
+          TextButton.icon(onPressed: _load, icon: const Icon(Icons.refresh_rounded, size: 18), label: const Text('Retry')),
+        ],
+      ]),
+    );
+  }
+
+  Widget _infoPill(IconData icon, String text, {Color color = _muted}) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+      decoration: BoxDecoration(color: const Color(0xFFF3F4F6), borderRadius: BorderRadius.circular(9)),
+      child: Row(mainAxisSize: MainAxisSize.min, children: <Widget>[
+        Icon(icon, size: 14, color: color),
+        const SizedBox(width: 5),
+        Text(text, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: color)),
       ]),
     );
   }
 
   Widget _card(RouteAssignment a) {
     final Color c = statusColor(a.status);
+    final String name = _driverNames[a.driverId] ?? 'Driver ${a.driverId}';
+    final bool cancelled = a.status == AssignmentStatus.cancelled;
     return Container(
-      margin: const EdgeInsets.only(bottom: 10),
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16), boxShadow: AppTheme.pulidongShadow),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
-        Row(children: <Widget>[
+      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(18), boxShadow: AppTheme.pulidongShadow),
+      clipBehavior: Clip.antiAlias,
+      child: IntrinsicHeight(
+        child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: <Widget>[
+          Container(width: 5, color: c),
           Expanded(
-            child: Text('${a.date} · ${_driverNames[a.driverId] ?? 'Driver ${a.driverId}'}',
-                style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 14)),
-          ),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-            decoration: BoxDecoration(color: c.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(8)),
-            child: Text(assignmentStatusLabel(a.status), style: TextStyle(color: c, fontWeight: FontWeight.w800, fontSize: 11)),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(14, 14, 14, 10),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
+                Row(children: <Widget>[
+                  CircleAvatar(
+                    radius: 20,
+                    backgroundColor: c.withValues(alpha: 0.12),
+                    child: Text(_initials(name), style: TextStyle(color: c, fontWeight: FontWeight.w900, fontSize: 14)),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
+                      Text(name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontWeight: FontWeight.w900,
+                            fontSize: 15,
+                            color: cancelled ? _muted : _ink,
+                            decoration: cancelled ? TextDecoration.lineThrough : null,
+                          )),
+                      Text(_prettyDate(a.date), style: const TextStyle(fontSize: 12, color: _muted)),
+                    ]),
+                  ),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+                    decoration: BoxDecoration(color: c.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(20)),
+                    child: Row(mainAxisSize: MainAxisSize.min, children: <Widget>[
+                      Icon(_statusIcon(a.status), size: 13, color: c),
+                      const SizedBox(width: 4),
+                      Text(assignmentStatusLabel(a.status), style: TextStyle(color: c, fontWeight: FontWeight.w800, fontSize: 11.5)),
+                    ]),
+                  ),
+                ]),
+                const SizedBox(height: 12),
+                Wrap(spacing: 6, runSpacing: 6, children: <Widget>[
+                  _infoPill(Icons.local_shipping_rounded, a.truckId, color: _teal),
+                  _infoPill(Icons.place_rounded, '${a.areas.length} area${a.areas.length == 1 ? '' : 's'}'),
+                  _infoPill(Icons.route_rounded, '${a.trips.length} trip${a.trips.length == 1 ? '' : 's'} linked'),
+                  if (a.tripsInterrupted > 0)
+                    _infoPill(Icons.warning_amber_rounded, '${a.tripsInterrupted} interrupted', color: Colors.orange.shade800),
+                ]),
+                const SizedBox(height: 12),
+                const Text('SERVICE AREAS', style: TextStyle(fontSize: 10.5, letterSpacing: 0.8, fontWeight: FontWeight.w800, color: _muted)),
+                const SizedBox(height: 6),
+                Wrap(spacing: 6, runSpacing: 6, children: <Widget>[
+                  for (int i = 0; i < a.areas.length; i++)
+                    Container(
+                      padding: const EdgeInsets.fromLTRB(4, 4, 10, 4),
+                      decoration: BoxDecoration(
+                        color: _mint.withValues(alpha: cancelled ? 0.4 : 1),
+                        borderRadius: BorderRadius.circular(20),
+                      ),
+                      child: Row(mainAxisSize: MainAxisSize.min, children: <Widget>[
+                        Container(
+                          width: 18,
+                          height: 18,
+                          alignment: Alignment.center,
+                          decoration: const BoxDecoration(color: _teal, shape: BoxShape.circle),
+                          child: Text('${i + 1}', style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.w900)),
+                        ),
+                        const SizedBox(width: 6),
+                        Text(a.areas[i].name, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: Color(0xFF004D40))),
+                      ]),
+                    ),
+                ]),
+                if (a.notes != null && a.notes!.isNotEmpty) ...<Widget>[
+                  const SizedBox(height: 10),
+                  Row(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
+                    const Icon(Icons.sticky_note_2_outlined, size: 15, color: _muted),
+                    const SizedBox(width: 6),
+                    Expanded(child: Text(a.notes!, style: const TextStyle(fontSize: 12.5, color: _muted, fontStyle: FontStyle.italic))),
+                  ]),
+                ],
+                if (a.isEditable) ...<Widget>[
+                  const SizedBox(height: 8),
+                  const Divider(height: 1, color: _line),
+                  Row(mainAxisAlignment: MainAxisAlignment.end, children: <Widget>[
+                    TextButton.icon(
+                      onPressed: () => _openForm(a),
+                      icon: const Icon(Icons.edit_rounded, size: 16),
+                      label: const Text('Edit'),
+                      style: TextButton.styleFrom(foregroundColor: _teal),
+                    ),
+                    TextButton.icon(
+                      onPressed: () => _cancel(a),
+                      icon: const Icon(Icons.cancel_outlined, size: 16),
+                      label: const Text('Cancel'),
+                      style: TextButton.styleFrom(foregroundColor: const Color(0xFFC62828)),
+                    ),
+                  ]),
+                ] else
+                  const SizedBox(height: 4),
+              ]),
+            ),
           ),
         ]),
-        const SizedBox(height: 4),
-        Text('Truck ${a.truckId} · ${a.trips.length} linked trip(s)${a.tripsInterrupted > 0 ? ' · ${a.tripsInterrupted} interrupted' : ''}',
-            style: TextStyle(color: Colors.grey.shade700, fontSize: 12)),
-        const SizedBox(height: 8),
-        Wrap(spacing: 6, runSpacing: 6, children: a.areas.map((AssignmentArea x) => Chip(label: Text(x.name, style: const TextStyle(fontSize: 11)), visualDensity: VisualDensity.compact)).toList()),
-        if (a.notes != null && a.notes!.isNotEmpty)
-          Padding(padding: const EdgeInsets.only(top: 6), child: Text(a.notes!, style: TextStyle(fontSize: 12, color: Colors.grey.shade600))),
-        if (a.isEditable)
-          Row(mainAxisAlignment: MainAxisAlignment.end, children: <Widget>[
-            TextButton.icon(onPressed: () => _openForm(a), icon: const Icon(Icons.edit_rounded, size: 16), label: const Text('Edit')),
-            TextButton.icon(
-              onPressed: () => _cancel(a),
-              icon: const Icon(Icons.cancel_outlined, size: 16, color: Colors.red),
-              label: const Text('Cancel', style: TextStyle(color: Colors.red)),
-            ),
-          ]),
-      ]),
+      ),
     );
   }
 }
@@ -332,6 +666,7 @@ class _AssignmentFormState extends State<_AssignmentForm> {
       _notes.text = e.notes ?? '';
       _areaKeys.addAll(e.areas.map((AssignmentArea a) => a.key));
     }
+    _truck.addListener(() => setState(() {}));
   }
 
   @override
@@ -343,7 +678,7 @@ class _AssignmentFormState extends State<_AssignmentForm> {
 
   Future<void> _save() async {
     if (_driverId == null) return setState(() => _error = 'Select a driver.');
-    if (_truck.text.trim().isEmpty) return setState(() => _error = 'Enter the truck.');
+    if (_truck.text.trim().isEmpty) return setState(() => _error = 'Choose or enter the truck.');
     if (_areaKeys.isEmpty) return setState(() => _error = 'Select at least one service area.');
     setState(() {
       _saving = true;
@@ -377,76 +712,230 @@ class _AssignmentFormState extends State<_AssignmentForm> {
     }
   }
 
+  Future<void> _pickDate() async {
+    final DateTime now = DateTime.now();
+    final DateTime today = DateTime(now.year, now.month, now.day);
+    final DateTime? d = await showAppSingleDatePicker(
+      context,
+      firstDate: today,
+      lastDate: today.add(const Duration(days: 365)),
+      initialDate: _date.isBefore(today) ? today : _date,
+      title: 'Collection date',
+    );
+    if (d != null) setState(() => _date = d);
+  }
+
+  Widget _section(IconData icon, String title, {Widget? trailing}) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 18, bottom: 8),
+      child: Row(children: <Widget>[
+        Icon(icon, size: 17, color: _teal),
+        const SizedBox(width: 6),
+        Expanded(child: Text(title, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 13.5, color: _ink))),
+        if (trailing != null) trailing,
+      ]),
+    );
+  }
+
+  InputDecoration _input(String hint) => InputDecoration(
+        hintText: hint,
+        isDense: true,
+        filled: true,
+        fillColor: const Color(0xFFF9FAFB),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: _line)),
+        enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: _line)),
+        focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: _teal, width: 1.6)),
+      );
+
+  Widget _choice(String label, bool selected, VoidCallback onTap, {IconData? icon}) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(12),
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+        decoration: BoxDecoration(
+          color: selected ? _teal : Colors.white,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: selected ? _teal : _line),
+        ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: <Widget>[
+          Icon(selected ? Icons.check_rounded : (icon ?? Icons.add_rounded), size: 16, color: selected ? Colors.white : _muted),
+          const SizedBox(width: 6),
+          Text(label, style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13, color: selected ? Colors.white : _ink)),
+        ]),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final List<String> knownTrucks =
         widget.drivers.map((_DriverOption d) => d.truck).where((String t) => t.isNotEmpty && t != 'None' && t != 'Unknown').toSet().toList()..sort();
-    return AlertDialog(
-      title: Text(widget.existing == null ? 'New assignment' : 'Edit assignment'),
-      content: SizedBox(
-        width: 460,
-        child: SingleChildScrollView(
-          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
-            DropdownButtonFormField<int>(
-              initialValue: widget.drivers.any((_DriverOption d) => d.id == _driverId) ? _driverId : null,
-              decoration: const InputDecoration(labelText: 'Driver'),
-              items: widget.drivers.map((_DriverOption d) => DropdownMenuItem<int>(value: d.id, child: Text(d.name))).toList(),
-              onChanged: (int? v) => setState(() {
-                _driverId = v;
-                final _DriverOption d = widget.drivers.firstWhere((_DriverOption x) => x.id == v);
-                if (_truck.text.trim().isEmpty && d.truck.isNotEmpty && d.truck != 'None') _truck.text = d.truck;
-              }),
+    final bool narrow = MediaQuery.of(context).size.width < 600;
+    final bool allAreas = _areaKeys.length == widget.areas.length && widget.areas.isNotEmpty;
+
+    final Widget body = Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: <Widget>[
+      _section(Icons.person_rounded, 'Driver'),
+      DropdownButtonFormField<int>(
+        initialValue: widget.drivers.any((_DriverOption d) => d.id == _driverId) ? _driverId : null,
+        isExpanded: true,
+        decoration: _input('Select a driver'),
+        borderRadius: BorderRadius.circular(14),
+        items: widget.drivers
+            .map((_DriverOption d) => DropdownMenuItem<int>(
+                  value: d.id,
+                  child: Row(children: <Widget>[
+                    CircleAvatar(
+                      radius: 13,
+                      backgroundColor: _mint,
+                      child: Text(_initials(d.name), style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w900, color: _teal)),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(child: Text(d.name, overflow: TextOverflow.ellipsis)),
+                    if (d.truck.isNotEmpty && d.truck != 'None' && d.truck != 'Unknown')
+                      Text(d.truck, style: const TextStyle(fontSize: 12, color: _muted, fontWeight: FontWeight.w600)),
+                  ]),
+                ))
+            .toList(),
+        onChanged: (int? v) => setState(() {
+          _driverId = v;
+          _error = null;
+          final _DriverOption d = widget.drivers.firstWhere((_DriverOption x) => x.id == v);
+          if (_truck.text.trim().isEmpty && d.truck.isNotEmpty && d.truck != 'None') _truck.text = d.truck;
+        }),
+      ),
+      _section(Icons.local_shipping_rounded, 'Truck'),
+      if (knownTrucks.isNotEmpty) ...<Widget>[
+        Wrap(spacing: 8, runSpacing: 8, children: <Widget>[
+          for (final String t in knownTrucks)
+            _choice(t, _truck.text.trim().toUpperCase() == t.toUpperCase(), () => setState(() {
+                  _truck.text = t;
+                  _error = null;
+                }), icon: Icons.local_shipping_outlined),
+        ]),
+        const SizedBox(height: 10),
+      ],
+      TextField(controller: _truck, decoration: _input('Or type another truck, e.g. GT-004')),
+      const Padding(
+        padding: EdgeInsets.only(top: 6, left: 2),
+        child: Text('Must match the truck the driver signs in with.', style: TextStyle(fontSize: 11.5, color: _muted)),
+      ),
+      _section(Icons.event_rounded, 'Collection date'),
+      InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: _pickDate,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
+          decoration: BoxDecoration(color: const Color(0xFFF9FAFB), borderRadius: BorderRadius.circular(12), border: Border.all(color: _line)),
+          child: Row(children: <Widget>[
+            Expanded(
+              child: Text(DateFormat('EEEE, MMMM d, yyyy').format(_date),
+                  style: const TextStyle(fontWeight: FontWeight.w700, color: _ink)),
             ),
-            const SizedBox(height: 8),
-            TextField(controller: _truck, decoration: const InputDecoration(labelText: 'Truck', helperText: 'Must match the truck the driver signs in with')),
-            if (knownTrucks.isNotEmpty)
-              Wrap(spacing: 6, children: knownTrucks.map((String t) => ActionChip(label: Text(t), onPressed: () => setState(() => _truck.text = t))).toList()),
-            const SizedBox(height: 8),
-            ListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('Collection date'),
-              subtitle: Text(DateFormat('EEE, MMM d, yyyy').format(_date)),
-              trailing: const Icon(Icons.calendar_month_rounded),
-              onTap: () async {
-                final DateTime now = DateTime.now();
-                final DateTime today = DateTime(now.year, now.month, now.day);
-                final DateTime? d = await showAppSingleDatePicker(
-                  context,
-                  firstDate: today,
-                  lastDate: today.add(const Duration(days: 365)),
-                  initialDate: _date.isBefore(today) ? today : _date,
-                  title: 'Collection date',
-                );
-                if (d != null) setState(() => _date = d);
-              },
-            ),
-            const Text('Service areas', style: TextStyle(fontWeight: FontWeight.w700)),
-            const SizedBox(height: 6),
-            Wrap(
-              spacing: 6,
-              runSpacing: 6,
-              children: widget.areas
-                  .map((ServiceArea a) => FilterChip(
-                        label: Text(a.name),
-                        selected: _areaKeys.contains(a.id),
-                        onSelected: (bool on) => setState(() => on ? _areaKeys.add(a.id) : _areaKeys.remove(a.id)),
-                      ))
-                  .toList(),
-            ),
-            const SizedBox(height: 8),
-            TextField(controller: _notes, maxLength: 255, decoration: const InputDecoration(labelText: 'Notes (optional)')),
-            if (_error != null) Text(_error!, style: const TextStyle(color: Colors.red, fontWeight: FontWeight.w600)),
+            const Icon(Icons.calendar_month_rounded, color: _teal, size: 20),
           ]),
         ),
       ),
-      actions: <Widget>[
-        TextButton(onPressed: _saving ? null : () => Navigator.pop(context, false), child: const Text('Close')),
-        ElevatedButton(
-          onPressed: _saving ? null : _save,
-          style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF00796B), foregroundColor: Colors.white),
-          child: Text(_saving ? 'Saving...' : 'Save'),
+      _section(
+        Icons.place_rounded,
+        'Service areas  ·  ${_areaKeys.length} selected',
+        trailing: TextButton(
+          onPressed: () => setState(() {
+            allAreas ? _areaKeys.clear() : _areaKeys.addAll(widget.areas.map((ServiceArea a) => a.id));
+            _error = null;
+          }),
+          style: TextButton.styleFrom(foregroundColor: _teal, visualDensity: VisualDensity.compact),
+          child: Text(allAreas ? 'Clear' : 'Select all'),
         ),
-      ],
+      ),
+      Wrap(spacing: 8, runSpacing: 8, children: <Widget>[
+        for (final ServiceArea a in widget.areas)
+          _choice(a.name, _areaKeys.contains(a.id), () => setState(() {
+                _areaKeys.contains(a.id) ? _areaKeys.remove(a.id) : _areaKeys.add(a.id);
+                _error = null;
+              })),
+      ]),
+      _section(Icons.sticky_note_2_outlined, 'Notes (optional)'),
+      TextField(controller: _notes, maxLength: 255, maxLines: 2, minLines: 1, decoration: _input('Anything the driver should know')),
+      if (_error != null)
+        Container(
+          margin: const EdgeInsets.only(top: 4),
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(color: const Color(0xFFFDECEA), borderRadius: BorderRadius.circular(12)),
+          child: Row(children: <Widget>[
+            const Icon(Icons.error_outline_rounded, color: Color(0xFFC62828), size: 18),
+            const SizedBox(width: 8),
+            Expanded(child: Text(_error!, style: const TextStyle(color: Color(0xFFC62828), fontWeight: FontWeight.w700))),
+          ]),
+        ),
+    ]);
+
+    final Widget actions = Row(children: <Widget>[
+      Expanded(
+        child: OutlinedButton(
+          onPressed: _saving ? null : () => Navigator.pop(context, false),
+          style: OutlinedButton.styleFrom(
+            foregroundColor: _ink,
+            side: const BorderSide(color: _line),
+            padding: const EdgeInsets.symmetric(vertical: 14),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          ),
+          child: const Text('Close'),
+        ),
+      ),
+      const SizedBox(width: 10),
+      Expanded(
+        flex: 2,
+        child: FilledButton.icon(
+          onPressed: _saving ? null : _save,
+          icon: _saving
+              ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+              : const Icon(Icons.check_rounded, size: 18),
+          label: Text(_saving ? 'Saving...' : (widget.existing == null ? 'Save assignment' : 'Save changes')),
+          style: FilledButton.styleFrom(
+            backgroundColor: _teal,
+            padding: const EdgeInsets.symmetric(vertical: 14),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            textStyle: const TextStyle(fontWeight: FontWeight.w800),
+          ),
+        ),
+      ),
+    ]);
+
+    return Dialog(
+      insetPadding: EdgeInsets.symmetric(horizontal: narrow ? 12 : 40, vertical: narrow ? 16 : 32),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+      backgroundColor: Colors.white,
+      surfaceTintColor: Colors.white,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 560),
+        child: Column(mainAxisSize: MainAxisSize.min, children: <Widget>[
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 18, 8, 0),
+            child: Row(children: <Widget>[
+              Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(color: _mint, borderRadius: BorderRadius.circular(12)),
+                child: Icon(widget.existing == null ? Icons.add_task_rounded : Icons.edit_calendar_rounded, color: _teal, size: 22),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(widget.existing == null ? 'New assignment' : 'Edit assignment',
+                    style: const TextStyle(fontSize: 19, fontWeight: FontWeight.w900, color: _ink)),
+              ),
+              IconButton(onPressed: _saving ? null : () => Navigator.pop(context, false), icon: const Icon(Icons.close_rounded)),
+            ]),
+          ),
+          Flexible(
+            child: SingleChildScrollView(padding: const EdgeInsets.fromLTRB(20, 0, 20, 8), child: body),
+          ),
+          const Divider(height: 1, color: _line),
+          Padding(padding: const EdgeInsets.fromLTRB(20, 12, 20, 16), child: actions),
+        ]),
+      ),
     );
   }
 }

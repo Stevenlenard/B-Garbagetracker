@@ -26,3 +26,12 @@
     Header unset Expires
   </IfModule>
 </FilesMatch>
+
+# Fonts and asset manifests change with every build that adds an icon or asset, but their
+# names never change, so they are revalidated too (otherwise new icons show up blank).
+<FilesMatch "\.(otf|ttf|woff2?)$|^(FontManifest|AssetManifest)\..*$">
+  <IfModule mod_headers.c>
+    Header set Cache-Control "no-cache, must-revalidate"
+    Header unset Expires
+  </IfModule>
+</FilesMatch>

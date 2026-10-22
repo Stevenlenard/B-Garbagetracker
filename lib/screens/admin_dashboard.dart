@@ -1173,7 +1173,7 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
                   padding: const EdgeInsets.fromLTRB(24, 16, 24, 24),
                   child: _HoverZoomCard(
                     onTap: () {
-                      Navigator.pop(context);
+                      _scaffoldKey.currentState?.closeDrawer();
                       _showLogoutDialog(context);
                     },
                     child: Container(
@@ -1213,7 +1213,9 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
     bool isSelected = _selectedIndex == index;
     return ListTile(
       onTap: () {
-        Navigator.pop(context);
+        // Closes only the drawer: a second tap must never pop the dashboard itself
+        // (that would leave the admin on the public page).
+        _scaffoldKey.currentState?.closeDrawer();
         if (index == 0) _refreshAllStats();
         setState(() {
           if (index == AdminDestinations.routeHistory) _prepareRouteHistoryEntry();

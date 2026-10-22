@@ -5,13 +5,16 @@ flutter_bootstrap.js) after a deploy. This makes every build impossible to confu
 older one:
   1. main.dart.js and flutter_bootstrap.js are loaded with ?v=<hash of this build>;
   2. index.html removes any old service worker + its caches (then reloads once);
-  3. no new service worker is registered (the app does not need offline caching).
+  3. no new service worker is registered (the app does not need offline caching);
+  4. fonts are loaded under a name that changes with their content (new icons never show blank).
 
 usage: python scripts/web_cache_bust.py <build/web dir>
 """
 import hashlib
+import json
 import os
 import re
+import shutil
 import sys
 
 web = sys.argv[1] if len(sys.argv) > 1 else os.path.join('build', 'web')
@@ -76,4 +79,26 @@ UPDATE = """<script>
   """ % v
 html = html.replace(tag, CLEANUP + UPDATE + '<script src="flutter_bootstrap.js?v=%s" async></script>' % v)
 open(index, 'w', encoding='utf-8', newline='').write(html)
-print('web_cache_bust: build %s (main.dart.js + flutter_bootstrap.js versioned, service worker off)' % v)
+
+# 4. Fonts keep the same name in every build, but the icon font is tree-shaken to the icons the
+#    build uses, so a browser holding last week's copy shows new icons blank. Each font gets a
+#    copy named after its content and FontManifest.json points to it; the original stays for
+#    pages that still hold an old manifest.
+manifest = os.path.join(web, 'assets', 'FontManifest.json')
+n_fonts = 0
+if os.path.exists(manifest):
+    fm = json.load(open(manifest, encoding='utf-8'))
+    for family in fm:
+        for f in family.get('fonts', []):
+            rel = f.get('asset', '')
+            src = os.path.join(web, 'assets', *rel.split('/'))
+            if not os.path.exists(src):
+                continue
+            h = hashlib.sha256(open(src, 'rb').read()).hexdigest()[:10]
+            stem, ext = os.path.splitext(rel)
+            versioned = '%s.%s%s' % (stem, h, ext)
+            shutil.copyfile(src, os.path.join(web, 'assets', *versioned.split('/')))
+            f['asset'] = versioned
+            n_fonts += 1
+    open(manifest, 'w', encoding='utf-8', newline='').write(json.dumps(fm, separators=(',', ':')))
+print('web_cache_bust: build %s (main.dart.js + flutter_bootstrap.js versioned, %d font(s) versioned, service worker off)' % (v, n_fonts))
