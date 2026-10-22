@@ -175,6 +175,10 @@ function gt_complaint_list_parts(array $cols, array $f, $onlyId = null)
     $where = [];
     $params = [];
 
+    // Archived complaints (test or invalid records) are kept in the table but never listed.
+    // (A complaint fetched by its id is still found, so an archived record can be opened or restored.)
+    if (isset($cols['is_archived']) && $onlyId === null) $where[] = '(c.is_archived IS NULL OR c.is_archived = 0)';
+
     if ($onlyId !== null) {
         $where[] = "$id = ?";
         $params[] = (int)$onlyId;
@@ -282,7 +286,9 @@ function gt_complaint_present(array $row)
 function gt_complaint_counts($conn)
 {
     $counts = ['pending' => 0, 'in_progress' => 0, 'resolved' => 0];
-    $rows = $conn->query("SELECT c.status AS status, COUNT(*) AS n FROM complaints c /*gt:complaint_counts*/ GROUP BY c.status")->fetchAll(PDO::FETCH_ASSOC);
+    $archived = $conn->query("SHOW COLUMNS FROM complaints LIKE 'is_archived'")->fetch(PDO::FETCH_ASSOC);
+    $notArchived = $archived ? ' WHERE (c.is_archived IS NULL OR c.is_archived = 0)' : '';
+    $rows = $conn->query("SELECT c.status AS status, COUNT(*) AS n FROM complaints c /*gt:complaint_counts*/" . $notArchived . " GROUP BY c.status")->fetchAll(PDO::FETCH_ASSOC);
     foreach ($rows as $r) $counts[gt_complaint_canonical($r['status'] ?? '')] += (int)($r['n'] ?? 0);
     return $counts;
 }

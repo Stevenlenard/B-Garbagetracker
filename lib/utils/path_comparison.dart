@@ -27,6 +27,7 @@ library;
 import 'dart:math' as math;
 
 import 'collection_visits.dart';
+import 'trip_archive.dart';
 
 class PathQuality {
   const PathQuality({
@@ -143,7 +144,7 @@ class PathComparisonEngine {
     int examined = 0;
 
     trips.forEach((Object? key, Object? trip) {
-      if (trip is! Map || trip['is_simulation'] == true) return;
+      if (trip is! Map || trip['is_simulation'] == true || TripArchive.isArchived(trip)) return;
       final VisitSummary visits = CollectionVisits.detect(
         trips: <Object?, Object?>{key: trip},
         areas: areas,

@@ -21,6 +21,7 @@
 library;
 
 import 'dart:math' as math;
+import 'trip_archive.dart';
 
 class AreaGeofence {
   const AreaGeofence({
@@ -307,7 +308,7 @@ class CollectionVisits {
     int noEvidence = 0;
 
     trips.forEach((Object? key, Object? value) {
-      if (value is! Map) return;
+      if (value is! Map || TripArchive.isArchived(value)) return;
       final bool simTrip = value['is_simulation'] == true || _hasSimulatedPoints(value);
       if (simTrip && !includeSimulated) return;
       // a simulated drive-by counts once it has two fixes inside the area (no dwell), so the status change can be tested

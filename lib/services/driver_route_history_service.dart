@@ -6,6 +6,7 @@ import '../models/driver_trip.dart';
 import '../utils/gps_quality.dart';
 import '../models/user.dart';
 import '../utils/history_playback.dart';
+import '../utils/trip_archive.dart';
 
 /// Result of loading route history: the trips AND whether the sources answered, so a
 /// failed request is never presented as an empty (successful) history.
@@ -146,7 +147,7 @@ class DriverRouteHistoryService {
           if (value is Map) {
             final String tripId = key.toString();
             // 1. ISOLATE SIMULATION SESSIONS
-            if (value['is_simulation'] == true || value['isSimulation'] == true) {
+            if (value['is_simulation'] == true || value['isSimulation'] == true || TripArchive.isArchived(value)) {
               return;
             }
 

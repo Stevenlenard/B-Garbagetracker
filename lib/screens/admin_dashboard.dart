@@ -19,6 +19,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/cupertino.dart' show CupertinoSliverRefreshControl;
 import 'package:firebase_database/firebase_database.dart';
 import '../utils/collection_visits.dart';
+import '../utils/trip_archive.dart';
 import '../services/service_area_service.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:intl/intl.dart';
@@ -647,7 +648,7 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
     try {
       final response = await _apiService.getComplaints();
       if (response.data['success'] == true) {
-        final List complaints = response.data['data'] ?? [];
+        final List complaints = (response.data['data'] as List? ?? []).where((c) => !ComplaintArchive.isArchived(c)).toList();
         String normalize(dynamic s) {
           if (s == null) return 'PENDING';
           String str = s.toString().toLowerCase().trim();
@@ -1151,12 +1152,22 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
                   child: ListView(
                     padding: const EdgeInsets.symmetric(horizontal: 16),
                     physics: const BouncingScrollPhysics(),
+                    // Every destination of the desktop sidebar, in the same order, so nothing is
+                    // reachable only from the bottom bar.
                     children: [
-                      _buildDrawerItem(Icons.route_rounded, "Route History", 7),
+                      _buildDrawerSection("Overview"),
+                      _buildDrawerItem(Icons.dashboard_rounded, "Dashboard Overview", 0),
+                      _buildDrawerItem(Icons.map_rounded, "Fleet GIS Tracking", 1),
+                      _buildDrawerSection("Routes"),
+                      _buildDrawerItem(Icons.route_rounded, "Driver Route History", 7),
                       _buildDrawerItem(Icons.assignment_ind_rounded, "Route Assignments", AdminDestinations.routeAssignments),
                       _buildDrawerItem(Icons.alt_route_rounded, "Collection Route Optimization", AdminDestinations.collectionRouteOptimization),
+                      _buildDrawerSection("Management"),
                       _buildDrawerItem(Icons.chat_bubble_rounded, "Complaint Management", 3),
-                      _buildDrawerItem(Icons.people_outline_rounded, "User Accounts", 4),
+                      _buildDrawerItem(Icons.analytics_rounded, "System Analytics", 2),
+                      _buildDrawerItem(Icons.people_outline_rounded, "User Management", 4),
+                      _buildDrawerItem(Icons.settings_suggest_rounded, "System Settings", 6),
+                      const SizedBox(height: 12),
                     ],
                   ),
                 ),
@@ -1199,6 +1210,14 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
       ),
     );
   }
+
+  Widget _buildDrawerSection(String title) => Padding(
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 6),
+        child: Text(
+          title.toUpperCase(),
+          style: TextStyle(fontSize: 10.5, letterSpacing: 1.1, fontWeight: FontWeight.w800, color: Colors.grey.shade500),
+        ),
+      );
 
   Widget _buildDrawerItem(IconData icon, String label, int index) {
     bool isSelected = _selectedIndex == index;

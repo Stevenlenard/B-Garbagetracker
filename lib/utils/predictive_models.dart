@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
 import 'collection_visits.dart';
+import 'trip_archive.dart';
 
 /// Objective 3 of the study: data modeling and the evaluation of its predictive performance.
 ///
@@ -164,7 +165,7 @@ class ArrivalRegression {
   static List<ArrivalSample> extract(Map trips, List<AreaGeofence> areas) {
     final List<ArrivalSample> out = <ArrivalSample>[];
     trips.forEach((Object? key, Object? value) {
-      if (value is! Map || value['is_simulation'] == true) return;
+      if (value is! Map || value['is_simulation'] == true || TripArchive.isArchived(value)) return;
       final Object? route = value['route'];
       final Iterable<Object?> raw = route is Map ? route.values : (route is List ? route : const <Object?>[]);
       final List<({int ms, double lat, double lng, double spd})> fixes = <({int ms, double lat, double lng, double spd})>[];
@@ -300,7 +301,7 @@ class MovingAverageForecast {
     final DateTime start = DateTime.utc(from.year, from.month, from.day), end = DateTime.utc(to.year, to.month, to.day);
     final Map<DateTime, double> kg = <DateTime, double>{};
     trips.forEach((Object? _, Object? v) {
-      if (v is! Map || v['is_simulation'] == true) return;
+      if (v is! Map || v['is_simulation'] == true || TripArchive.isArchived(v)) return;
       final Object? c = v['collection'];
       if (c is! Map) return;
       final Object? at = c['finalized_at_ms'];

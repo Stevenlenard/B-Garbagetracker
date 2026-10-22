@@ -39,6 +39,7 @@ import '../services/driver_route_history_service.dart';
 import 'route_history_screen.dart';
 import '../widgets/app_date_range_picker.dart';
 import '../widgets/predictive_models_card.dart';
+import '../utils/trip_archive.dart';
 
 class AnalyticsScreen extends StatefulWidget {
   final bool isEmbedded;
@@ -380,6 +381,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
 
     // Add Resident Complaints (from API/MySQL)
     for (var c in _allResidentComplaints) {
+      if (ComplaintArchive.isArchived(c)) continue; // test or invalid records, kept but not counted
       DateTime? dt = parseAnyDate(c['created_at'] ?? c['timestamp'] ?? c['date']);
       if (dt != null) {
         String category = (c['category'] ?? c['type'] ?? c['issue_type'] ?? '').toString();
@@ -500,6 +502,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
         final startStr = DateFormat('yyyy-MM-dd').format(prevRange.start);
         final endStr = DateFormat('yyyy-MM-dd').format(prevRange.end);
         for (var c in _allResidentComplaints) {
+          if (ComplaintArchive.isArchived(c)) continue;
           DateTime? dt = parseAnyDate(c['created_at'] ?? c['timestamp'] ?? c['date']);
           if (dt != null) {
             String itemDayStr = DateFormat('yyyy-MM-dd').format(dt);
@@ -1158,7 +1161,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
     final List<double> durationsMin = <double>[];
     _allDriverRoutes.forEach((key, data) {
       if (data is! Map) return;
-      if (data['is_simulation'] == true || data['is_simulation'] == 'true') return;
+      if (data['is_simulation'] == true || data['is_simulation'] == 'true' || TripArchive.isArchived(data)) return;
       final String dateStr = data['date']?.toString() ?? "";
       if (dateStr.compareTo(startStr) < 0 || dateStr.compareTo(endStr) > 0) return;
       if (!allAreas) {

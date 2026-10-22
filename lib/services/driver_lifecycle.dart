@@ -3,6 +3,7 @@ import 'dart:async';
 import 'driver_session_guard.dart';
 import 'rtdb_port.dart';
 import 'server_clock.dart';
+import '../utils/trip_archive.dart';
 
 /// Builds the transaction that merges live driver state into a node (the truck
 /// node or the driver presence node) on behalf of ONE runtime.
@@ -368,7 +369,7 @@ class TripResumePolicy {
     if (trip['isFinished'] == true || trip['finishTime'] != null || trip['end_time'] != null) {
       return RecoveredTrip.none;
     }
-    if (trip['is_simulation'] == true || trip['isSimulation'] == true) return RecoveredTrip.none;
+    if (trip['is_simulation'] == true || trip['isSimulation'] == true || TripArchive.isArchived(trip)) return RecoveredTrip.none;
     if (trip['driver_id']?.toString() != driverId) return RecoveredTrip.none;
     final Object? rec = trip['collection'];
     final bool finalized = rec is Map && rec['finalized_at_ms'] != null;

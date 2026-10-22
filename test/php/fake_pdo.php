@@ -311,9 +311,18 @@ class FakeConn
         if (preg_match("/^SHOW COLUMNS FROM complaints LIKE 'status'$/i", $sql)) {
             return new FakeStmt([['Field' => 'status', 'Type' => getenv('GT_FAKE_STATUS_TYPE') ?: 'varchar(20)']]);
         }
+        if (preg_match("/^SHOW COLUMNS FROM complaints LIKE 'is_archived'$/i", $sql)) {
+            $has = false;
+            foreach ($this->tables['complaints'] as $c) if (array_key_exists('is_archived', $c)) $has = true;
+            return new FakeStmt($has ? [['Field' => 'is_archived', 'Type' => 'tinyint(1)']] : []);
+        }
         if (strpos($sql, '/*gt:complaint_counts*/') !== false) {
+            $skipArchived = stripos($sql, 'is_archived') !== false;
             $by = [];
-            foreach ($this->tables['complaints'] as $c) { $k = (string)($c['status'] ?? ''); $by[$k] = ($by[$k] ?? 0) + 1; }
+            foreach ($this->tables['complaints'] as $c) {
+                if ($skipArchived && !empty($c['is_archived'])) continue;
+                $k = (string)($c['status'] ?? ''); $by[$k] = ($by[$k] ?? 0) + 1;
+            }
             $out = [];
             foreach ($by as $k => $n) $out[] = ['status' => $k, 'n' => $n];
             return new FakeStmt($out);
@@ -411,7 +420,10 @@ class FakeConn
         }
 
         // get_complaints.php: complaints c LEFT JOIN residents r (optionally WHERE <resident col> = ?)
-        if (preg_match('/FROM complaints c LEFT JOIN residents r ON (\S+) = r\.resident_id(?: WHERE (\S+) = \?)?/i', $sql, $jm)) {
+        if (preg_match('/FROM complaints c LEFT JOIN residents r ON (\S+) = r\.resident_id/i', $sql, $jm)) {
+            // WHERE may hold the archived filter (admin list) and/or the resident filter, joined by AND.
+            $jm[2] = preg_match('/ WHERE .*?(\w+\.\w+) = \?/i', $sql, $wm) ? $wm[1] : '';
+            $skipArchived = stripos($sql, 'c.is_archived IS NULL') !== false;
             $missing = array_filter(explode(',', getenv('GT_FAKE_COMPLAINT_MISSING') ?: ''));
             $residents = [];
             foreach ($this->tables['residents'] as $r) $residents[(string)$r['resident_id']] = $r;
@@ -419,6 +431,7 @@ class FakeConn
             foreach ($this->tables['complaints'] as $c) {
                 $rid = (string)($c['resident_id'] ?? '');
                 if (!empty($jm[2]) && $rid !== (string)($params[0] ?? '')) continue;
+                if ($skipArchived && !empty($c['is_archived'])) continue;
                 $r = $residents[$rid] ?? null;
                 $cPurok = in_array('purok', $missing, true) ? '' : ($c['purok'] ?? '');
                 $out[] = [
