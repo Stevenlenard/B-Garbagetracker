@@ -737,18 +737,19 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
     try {
       await _fetchLoadHistoryData();
       final AnalyticsReportData data = _collectReportData();
-      final Uint8List bytes = AnalyticsXlsxBuilder.build(data);
+      final ReportCategory kind = ReportCategoryLabel.parse(category);
+      final Uint8List bytes = AnalyticsXlsxBuilder.build(data, kind);
       final bool ok = await ReportFileSaver.save(
         bytes,
-        AnalyticsXlsxBuilder.fileName(data),
+        AnalyticsXlsxBuilder.fileName(data, kind),
         ReportFileSaver.xlsxMime,
-        subject: 'Analytics report - $_selectedArea',
+        subject: '${kind.label} - $_selectedArea',
       );
       if (!ok) throw StateError('the file could not be handed to the device');
       await SystemLogger.logEvent("EXPORT", "Exported Excel report for $_selectedArea");
       if (mounted && kIsWeb) {
         _showSuccessDialog(context, "Excel Report Downloaded",
-            "Your analytics report for $_selectedArea was saved to your Downloads folder.");
+            "${ReportCategoryLabel.parse(category).label} for $_selectedArea was saved to your Downloads folder.");
       }
     } catch (e) {
       debugPrint("Excel export error: $e");
@@ -918,6 +919,11 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
                   kg: t.weightKg,
                   measured: t.isMeasured,
                   status: t.routeStatus,
+                  // No FULL/end time, no GPS point and a start time of "now": nothing was recorded.
+                  timeRecorded: !(t.fullTime == null &&
+                      t.endTime == null &&
+                      t.points.isEmpty &&
+                      DateTime.now().difference(t.startTime).inMinutes.abs() < 10),
                 ))
             .toList(),
         partial: _loadPartial,
@@ -5456,7 +5462,9 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
           _exportDropdown("File Format", ["PDF Document (.pdf)", "Excel Spreadsheet (.xlsx)"], selectedFormat, (val) {
             if (val != null) setDialogState(() => selectedFormat = val);
           }),
-          const SizedBox(height: 32),
+          const SizedBox(height: 16),
+          _exportSummary(selectedCategory, selectedFormat),
+          const SizedBox(height: 20),
           ElevatedButton(
             onPressed: () {
               Navigator.of(context).pop();
@@ -5490,6 +5498,42 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
           ),
         ),
       ),
+    );
+  }
+
+  /// States exactly what will be downloaded, so the category, area and period are never a guess.
+  Widget _exportSummary(String category, String format) {
+    final bool excel = format.contains('Excel');
+    final ReportCategory kind = ReportCategoryLabel.parse(category);
+    final String period = '${DateFormat('MMM d, yyyy').format(_selectedDateRange.start)} – ${DateFormat('MMM d, yyyy').format(_selectedDateRange.end)}';
+    final String contents = excel ? kind.contents : 'the complete analytics report (every section, whichever category is chosen)';
+    Widget line(IconData icon, String text, {bool strong = false}) => Padding(
+          padding: const EdgeInsets.only(top: 6),
+          child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
+            Icon(icon, size: 16, color: const Color(0xFF00796B)),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(text,
+                  style: TextStyle(fontSize: 12.5, height: 1.35, color: const Color(0xFF1F2937), fontWeight: strong ? FontWeight.w800 : FontWeight.w500)),
+            ),
+          ]),
+        );
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFE0F2F1),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFFB2DFDB)),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
+        const Text('YOU WILL DOWNLOAD', style: TextStyle(fontSize: 10.5, letterSpacing: 0.8, fontWeight: FontWeight.w900, color: Color(0xFF00695C))),
+        line(excel ? Icons.grid_on_rounded : Icons.picture_as_pdf_rounded,
+            excel ? '${kind.label} (Excel)' : 'Analytics report (PDF)', strong: true),
+        line(Icons.place_rounded, _selectedArea),
+        line(Icons.calendar_month_rounded, period),
+        line(Icons.list_alt_rounded, 'Contains $contents'),
+      ]),
     );
   }
 

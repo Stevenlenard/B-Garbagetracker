@@ -49,6 +49,7 @@ class ReportLoadRow {
     required this.kg,
     required this.measured,
     required this.status,
+    this.timeRecorded = true,
   });
 
   final String tripId;
@@ -58,6 +59,10 @@ class ReportLoadRow {
   final double kg;
   final bool measured;
   final String status;
+
+  /// False for legacy records that carry no time at all (their [fullAtManila] is only the
+  /// moment they were loaded); reports show "Not recorded" instead of that time.
+  final bool timeRecorded;
 }
 
 class ReportWaste {
