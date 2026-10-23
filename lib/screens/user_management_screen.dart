@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import '../widgets/add_driver_dialog.dart';
 import 'package:firebase_database/firebase_database.dart';
 import '../api/api_service.dart';
 import '../utils/app_theme.dart';
@@ -464,9 +465,49 @@ class _UserManagementScreenState extends State<UserManagementScreen> with Ticker
               ),
               const SizedBox(width: 12),
               _buildFilterChip(),
+              const SizedBox(width: 12),
+              _buildAddDriverButton(isDesktop),
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  /// Drivers no longer sign up themselves: the administrator creates their accounts here.
+  Widget _buildAddDriverButton(bool wide) {
+    Future<void> open() async {
+      final bool created = await showAddDriverDialog(context, api: _apiService);
+      if (created && mounted) _fetchUsers(silent: true);
+    }
+
+    if (!wide) {
+      return Tooltip(
+        message: 'Add Driver',
+        child: Material(
+          color: const Color(0xFF00796B),
+          borderRadius: BorderRadius.circular(12),
+          child: InkWell(
+            key: const ValueKey<String>('add-driver-button'),
+            borderRadius: BorderRadius.circular(12),
+            onTap: open,
+            child: const SizedBox(width: 48, height: 48, child: Icon(Icons.person_add_alt_1_rounded, color: Colors.white, size: 22)),
+          ),
+        ),
+      );
+    }
+    return SizedBox(
+      height: 48,
+      child: FilledButton.icon(
+        key: const ValueKey<String>('add-driver-button'),
+        onPressed: open,
+        style: FilledButton.styleFrom(
+          backgroundColor: const Color(0xFF00796B),
+          padding: const EdgeInsets.symmetric(horizontal: 18),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        ),
+        icon: const Icon(Icons.person_add_alt_1_rounded, size: 19),
+        label: const Text('Add Driver', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 13.5)),
       ),
     );
   }

@@ -579,7 +579,7 @@ const List<FaqEntry> faqKnowledgeBase = <FaqEntry>[
   FaqEntry(
     id: 'guest_sign_up',
     question: 'How do I create an account?',
-    answer: 'Tap Create an account below, then choose Resident or Driver. Residents choose their purok and can sign in right away. Drivers must be approved by the barangay administrator first.',
+    answer: 'Tap Create an account below and fill in the Resident form. Residents choose their purok and can sign in right away. Driver accounts are not made here: the barangay administrator creates them.',
     roles: _guest,
     keywords: <String, int>{'create account': 5, 'create an account': 5, 'sign up': 4, 'signup': 4, 'register': 4, 'account': 2, 'magparehistro': 4, 'gumawa ng account': 5},
     action: BotAction.createAccount,
@@ -1077,7 +1077,7 @@ const List<FaqEntry> faqKnowledgeBase = <FaqEntry>[
   FaqEntry(
     id: 'driver_register',
     question: 'How do I register as a driver?',
-    answer: 'Choose Driver on the sign-up page and fill in your details. Driver accounts must be approved by the barangay administrator before you can log in.',
+    answer: 'Drivers do not sign up in the app. The barangay administrator creates your account in User Management and gives you your username and password; you can log in right away.',
     roles: _everyone,
     keywords: <String, int>{'register': 2, 'sign up': 2, 'signup': 2, 'driver account': 3, 'approval': 2, 'approved': 2, 'magparehistro': 3, 'not approved': 3},
   ),
@@ -1085,10 +1085,10 @@ const List<FaqEntry> faqKnowledgeBase = <FaqEntry>[
   // ---- Admin only -------------------------------------------------------------------------------
   FaqEntry(
     id: 'admin_approve',
-    question: 'How do I approve new driver accounts?',
-    answer: 'Open User Management. Pending driver registrations appear there; review the details, then approve or reject. New registrations also appear in your notifications.',
+    question: 'How do I add or approve driver accounts?',
+    answer: 'Open User Management and tap Add Driver to create a driver account; the driver can log in at once. Driver applications sent before sign-up was closed still appear there to approve or reject.',
     roles: _admin,
-    keywords: <String, int>{'approve': 4, 'approve driver': 5, 'approve account': 5, 'approve user': 5, 'reject': 4, 'pending driver': 4, 'pending account': 4, 'user management': 4, 'manage users': 4, 'archive user': 4, 'delete user': 4, 'users list': 3},
+    keywords: <String, int>{'add driver': 5, 'create driver': 5, 'new driver': 4, 'approve': 4, 'approve driver': 5, 'approve account': 5, 'approve user': 5, 'reject': 4, 'pending driver': 4, 'pending account': 4, 'user management': 4, 'manage users': 4, 'archive user': 4, 'delete user': 4, 'users list': 3},
     action: BotAction.users,
     actionLabel: 'Open User Management',
   ),

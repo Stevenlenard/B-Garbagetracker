@@ -3,6 +3,7 @@ header("Content-Type: application/json");
 date_default_timezone_set('Asia/Manila');
 require_once 'db_config.php';
 require_once 'email_config.php';
+require_once 'auth_token.php';
 
 use PHPMailer\PHPMailer\PHPMailer;
 use PHPMailer\PHPMailer\Exception;
@@ -161,6 +162,19 @@ if (!empty($data->username) && !empty($data->password) && !empty($data->role)) {
     $data->role = $role;
     $data->username = trim((string)$data->username);
 
+    // Driver accounts are created by an administrator (User Management > Add Driver), never by
+    // public sign-up: a verified admin token is required and the account is active at once.
+    $createdByAdmin = false;
+    if ($role === 'driver') {
+        $payload = gt_auth_secret() !== null ? gt_verify_token(gt_request_token()) : null;
+        if ($payload === null || ($payload['role'] ?? '') !== 'admin') {
+            http_response_code(403);
+            echo json_encode(["success" => false, "message" => "Driver accounts are created by the barangay administrator. Please contact the barangay office."]);
+            exit;
+        }
+        $createdByAdmin = true;
+    }
+
     if (strlen($data->username) < 3 || strlen($data->username) > 50 || preg_match('/\s/', $data->username)) {
         echo json_encode(["success" => false, "message" => "Username must be 3-50 characters without spaces."]);
         exit;
@@ -231,7 +245,8 @@ if (!empty($data->username) && !empty($data->password) && !empty($data->role)) {
         else if ($data->role === 'admin' || $data->role === 'driver') {
             $is_driver = ($data->role === 'driver');
             $is_archived = 0; // Do not use is_archived = 1 to represent pending
-            $approval_status = $is_driver ? 'pending' : 'approved';
+            // Created by an administrator: approved and able to log in immediately.
+            $approval_status = ($is_driver && !$createdByAdmin) ? 'pending' : 'approved';
             $account_status = 'active';
 
             $query = "INSERT INTO users (username, name, email, password_hash, phone, license_number, preferred_truck, role, is_archived, approval_status, account_status)
@@ -245,6 +260,11 @@ if (!empty($data->username) && !empty($data->password) && !empty($data->role)) {
 
             $stmt->execute([$data->username, $name, $email, $hashed_password, $phone, $license, $truck, $data->role, $is_archived, $approval_status, $account_status]);
             $new_user_id = (int)$conn->lastInsertId();
+
+            if ($is_driver && $createdByAdmin) {
+                echo json_encode(["success" => true, "message" => "Driver account created. The driver can log in now.", "user_id" => $new_user_id]);
+                exit;
+            }
 
             if ($is_driver) {
                 // Pending approval: exactly one Admin in-app notification ...

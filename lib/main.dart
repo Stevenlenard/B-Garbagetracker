@@ -16,7 +16,6 @@ import 'screens/driver_dashboard.dart';
 import 'widgets/role_gate.dart';
 import 'screens/register_choice_screen.dart';
 import 'screens/resident_register.dart';
-import 'screens/driver_register.dart';
 import 'screens/complaints_screen.dart';
 import 'screens/analytics_screen.dart';
 import 'screens/user_management_screen.dart';
@@ -213,7 +212,6 @@ class MyApp extends StatelessWidget {
         '/driver_dashboard': (context) => const RoleGate(roles: {'driver'}, child: DriverDashboard()),
         '/register': (context) => const RegisterChoiceScreen(),
         '/register_resident': (context) => const ResidentRegisterScreen(),
-        '/register_driver': (context) => const DriverRegisterScreen(),
         '/complaints': (context) => const RoleGate(roles: {'admin'}, child: ComplaintsScreen()),
         '/analytics': (context) => const RoleGate(roles: {'admin'}, child: AnalyticsScreen()),
         '/user_management': (context) => const RoleGate(roles: {'admin'}, child: UserManagementScreen()),

@@ -34,6 +34,18 @@ function call(string $script, ?array $json = null, ?array $post = null, array $e
     return ['raw' => $out, 'json' => $decoded];
 }
 
+/** A driver application still PENDING (created before public driver sign-up was closed). */
+function seed_pending_driver(string $username = 'driver01', string $email = 'juan@example.com'): void
+{
+    $db = db();
+    $db['users'][] = [
+        'user_id' => count($db['users'] ?? []) + 1, 'username' => $username, 'name' => 'Juan Driver', 'email' => $email,
+        'password_hash' => password_hash('Secret#1', PASSWORD_BCRYPT), 'phone' => '09181234567', 'license_number' => 'N01-23-456789',
+        'preferred_truck' => 'GT-007', 'role' => 'driver', 'is_archived' => 0, 'approval_status' => 'pending', 'account_status' => 'active',
+    ];
+    seed(['users' => $db['users']]);
+}
+
 function db(): array
 {
     global $state;
@@ -96,13 +108,11 @@ check('resident is auto-approved and active', ($res['approval_status'] ?? '') ==
 check('password is stored hashed (bcrypt), never plain', isset($res['password_hash']) && $res['password_hash'] !== 'Secret#1' && password_verify('Secret#1', $res['password_hash']));
 check('admin was notified through Firebase (server side)', is_file($state . '.curl'));
 
-begin('Driver registration');
+begin('Driver registration (public sign-up closed)');
 $r = call('register.php', $goodDriver);
-check('driver registers successfully', ($r['json']['success'] ?? false) === true, $r['raw'] ?? '');
-$u = db()['users'][0] ?? [];
-check('driver starts PENDING and not archived', ($u['approval_status'] ?? '') === 'pending' && (int)($u['is_archived'] ?? 1) === 0);
-check('driver role stored as driver', ($u['role'] ?? '') === 'driver');
-check('message tells the driver approval is pending', stripos($r['json']['message'] ?? '', 'pending') !== false);
+check('public driver sign-up is refused', ($r['json']['success'] ?? true) === false, $r['raw'] ?? '');
+check('the message points to the barangay administrator', stripos($r['json']['message'] ?? '', 'administrator') !== false);
+check('no driver row was created', count(db()['users'] ?? []) === 0);
 
 begin('Registration safety');
 $r = call('register.php', array_merge($goodResident, ['role' => 'admin', 'username' => 'evil']));
@@ -117,7 +127,7 @@ $r = call('register.php', array_merge($goodResident, ['email' => 'other@example.
 check('duplicate username is refused with a clear message', ($r['json']['success'] ?? true) === false && stripos($r['json']['message'] ?? '', 'username') !== false, $r['raw'] ?? '');
 $r = call('register.php', array_merge($goodResident, ['username' => 'maria02']));
 check('duplicate email is refused with a clear message', ($r['json']['success'] ?? true) === false && stripos($r['json']['message'] ?? '', 'email') !== false);
-call('register.php', $goodDriver);
+seed_pending_driver();
 $r = call('register.php', array_merge($goodResident, ['username' => 'driver01', 'email' => 'x@example.com']));
 check('username already used by a USER account is refused for residents too', ($r['json']['success'] ?? true) === false);
 check('exactly one resident and one driver exist', count(db()['residents']) === 1 && count(db()['users']) === 1);
@@ -135,17 +145,11 @@ check('incomplete data is refused without a crash', ($r['json']['success'] ?? tr
 $r = call('register.php', array_merge($goodResident, ['username' => "o'brien"]));
 check('apostrophes in the username do not break SQL (prepared statements)', ($r['json'] !== null));
 
-begin('Registration: HTML in names is escaped in the admin e-mail');
-seed(['users' => [['user_id' => 1, 'username' => 'admin', 'role' => 'admin', 'email' => 'admin@example.com', 'email_notifications' => 1]]]);
-$r = call('register.php', array_merge($goodDriver, ['name' => '<script>alert(1)</script>']));
-$mail = is_file($state . '.mail') ? file_get_contents($state . '.mail') : '';
-check('driver application e-mail was prepared for the admin', $mail !== '');
-check('script tag is escaped in the e-mail body', strpos($mail, '<script>') === false && strpos($mail, '&lt;script&gt;') !== false);
 
 // ---------------------------------------------------------------- login
 begin('Login');
 call('register.php', $goodResident);
-call('register.php', $goodDriver);
+seed_pending_driver(); // an application from before driver sign-up was closed
 $r = call('login.php', ['username_or_email' => 'maria01', 'password' => 'Secret#1']);
 check('resident can log in with username', ($r['json']['success'] ?? false) === true && ($r['json']['user']['role'] ?? '') === 'resident', $r['raw'] ?? '');
 check('login response never includes the password hash', strpos($r['raw'] ?? '', 'password_hash') === false);
@@ -161,7 +165,7 @@ check('PENDING driver cannot log in', ($r['json']['success'] ?? true) === false 
 
 // ---------------------------------------------------------------- approval
 begin('Driver approval');
-call('register.php', $goodDriver);
+seed_pending_driver();
 $driverId = db()['users'][0]['user_id'];
 $r = call('approve_user.php', ['user_id' => $driverId, 'role' => 'driver']);
 check('admin approval succeeds', ($r['json']['success'] ?? false) === true, $r['raw'] ?? '');
@@ -176,7 +180,7 @@ $r = call('approve_user.php', ['user_id' => 9999, 'role' => 'driver']);
 check('approving an unknown user reports not found', ($r['json']['success'] ?? true) === false);
 
 begin('Driver rejection');
-call('register.php', $goodDriver);
+seed_pending_driver();
 $driverId = db()['users'][0]['user_id'];
 call('reject_user.php', ['user_id' => $driverId, 'role' => 'driver']);
 $r = call('login.php', ['username_or_email' => 'driver01', 'password' => 'Secret#1']);
@@ -514,7 +518,7 @@ function login_token(string $user, string $pass, array $env): ?string
 
 begin('Authorization: legacy mode (no secret configured) keeps current clients working');
 call('register.php', $goodResident);
-call('register.php', $goodDriver);
+seed_pending_driver();
 $driverId = db()['users'][0]['user_id'];
 $residentId = db()['residents'][0]['resident_id'];
 $r = call('login.php', ['username_or_email' => 'maria01', 'password' => 'Secret#1']);
@@ -527,7 +531,7 @@ check('token-less complaint still works', ($r['json']['success'] ?? false) === t
 begin('Authorization: token-optional mode (secret set, not enforced)');
 $env = ['GT_TEST_AUTH_SECRET' => SECRET];
 call('register.php', $goodResident);
-call('register.php', array_merge($goodDriver, ['username' => 'driver02', 'email' => 'd2@example.com']));
+seed_pending_driver('driver02', 'd2@example.com');
 $driverId = db()['users'][0]['user_id'];
 $residentId = db()['residents'][0]['resident_id'];
 seed(['users' => array_merge(db()['users'], [[
@@ -562,7 +566,7 @@ check('an admin token can resolve complaints', ($r['json']['success'] ?? false) 
 begin('Authorization: enforced mode');
 $env = ['GT_TEST_AUTH_SECRET' => SECRET];
 call('register.php', $goodResident);
-call('register.php', $goodDriver);
+seed_pending_driver();
 $driverId = db()['users'][0]['user_id'];
 $residentId = db()['residents'][0]['resident_id'];
 seed(['users' => array_merge(db()['users'], [[
@@ -631,6 +635,26 @@ function issue_token($id, string $role): string
     @unlink($f);
     return $t;
 }
+
+// ---------------------------------------------------------------- admin creates drivers
+begin('Admin creates driver accounts');
+$adm = issue_token(1, 'admin');
+seed(['users' => [['user_id' => 1, 'username' => 'admin', 'role' => 'admin', 'email' => 'admin@example.com', 'is_archived' => 0, 'approval_status' => 'approved', 'account_status' => 'active']]]);
+$r = call('register.php', $goodDriver, null, ['GT_TEST_AUTH_SECRET' => SECRET, 'GT_TEST_TOKEN' => $adm]);
+check('an administrator can create a driver account', ($r['json']['success'] ?? false) === true, $r['raw'] ?? '');
+$drv = null;
+foreach (db()['users'] as $u) if (($u['username'] ?? '') === 'driver01') $drv = $u;
+check('the new driver is approved and active at once', ($drv['approval_status'] ?? '') === 'approved' && ($drv['account_status'] ?? '') === 'active' && ($drv['role'] ?? '') === 'driver');
+$r = call('login.php', ['username_or_email' => 'driver01', 'password' => 'Secret#1']);
+check('the driver can log in right away', ($r['json']['success'] ?? false) === true && ($r['json']['user']['role'] ?? '') === 'driver', $r['raw'] ?? '');
+$r = call('register.php', array_merge($goodDriver, ['username' => 'driver02', 'email' => 'd2@example.com']), null, ['GT_TEST_AUTH_SECRET' => SECRET, 'GT_TEST_TOKEN' => issue_token(5, 'driver')]);
+check('a driver token cannot create drivers', ($r['json']['success'] ?? true) === false);
+$r = call('register.php', array_merge($goodDriver, ['username' => 'driver03', 'email' => 'd3@example.com']), null, ['GT_TEST_AUTH_SECRET' => SECRET, 'GT_TEST_TOKEN' => issue_token(7, 'resident')]);
+check('a resident token cannot create drivers', ($r['json']['success'] ?? true) === false);
+$r = call('register.php', array_merge($goodDriver, ['username' => 'driver 04', 'email' => 'd4@example.com']), null, ['GT_TEST_AUTH_SECRET' => SECRET, 'GT_TEST_TOKEN' => $adm]);
+check('admin-created usernames follow the no-spaces rule', ($r['json']['success'] ?? true) === false);
+$r = call('register.php', array_merge($goodDriver, ['email' => 'other@example.com']), null, ['GT_TEST_AUTH_SECRET' => SECRET, 'GT_TEST_TOKEN' => $adm]);
+check('a duplicate driver username is refused', ($r['json']['success'] ?? true) === false && stripos($r['json']['message'] ?? '', 'username') !== false);
 
 function seed_admin_world(): void
 {
@@ -808,47 +832,16 @@ check('no e-mail is sent to the Admin for a Resident', count(mails()) === 0);
 $r = call('login.php', ['username_or_email' => $goodResident['username'], 'password' => $goodResident['password']]);
 check('the resident can log in immediately', ($r['json']['success'] ?? false) === true, $r['raw'] ?? '');
 
-begin('Registration: Driver is pending, one in-app notification, one e-mail to the right admins');
+begin('Registration: a driver created by the admin gets no application e-mail or pending notice');
 reset_state();
 two_admins();
-$r = call('register.php', $goodDriver);
-check('driver registration succeeds', ($r['json']['success'] ?? false) === true, $r['raw'] ?? '');
+$r = call('register.php', $goodDriver, null, ['GT_TEST_AUTH_SECRET' => SECRET, 'GT_TEST_TOKEN' => issue_token(1, 'admin')]);
+check('admin-created driver succeeds', ($r['json']['success'] ?? false) === true, $r['raw'] ?? '');
 $drv = null;
 foreach (db()['users'] as $u) if (($u['role'] ?? '') === 'driver') $drv = $u;
-check('driver stays pending approval', ($drv['approval_status'] ?? '') === 'pending');
-check('exactly one Admin in-app notification per driver', curl_count() === 1, (string)curl_count());
-$m = mails();
-check('exactly one e-mail message is attempted', count($m) === 1, (string)count($m));
-$to = $m[0]->to ?? [];
-sort($to);
-check('recipients are the admins with e-mail notifications ON (not just the first admin)',
-    $to === ['a1@example.com', 'a3@example.com'], json_encode($to));
-check('the response never claims e-mail delivery', !isset($r['json']['email']) && stripos($r['raw'], 'deliver') === false && stripos($r['raw'], 'smtp') === false);
-check('the log says SMTP accepted and inbox delivery is not confirmed',
-    strpos(errlog(), 'ACCEPTED') !== false && strpos(errlog(), 'not confirmed') !== false, errlog());
-
-begin('Registration: failed e-mail does not fail the registration and leaks nothing');
-reset_state();
-two_admins();
-$r = call('register.php', $goodDriver, null, ['GT_FAKE_MAIL_FAIL' => '1']);
-check('registration still succeeds when the e-mail attempt fails', ($r['json']['success'] ?? false) === true, $r['raw'] ?? '');
-$drv = null;
-foreach (db()['users'] as $u) if (($u['role'] ?? '') === 'driver') $drv = $u;
-check('driver row exists and is pending', ($drv['approval_status'] ?? '') === 'pending');
-check('in-app notification was still written once', curl_count() === 1);
-check('the failure is logged on the server', strpos(errlog(), 'e-mail failed') !== false, errlog());
-check('the SMTP password never reaches the log', $stubPass === '' || strpos(errlog(), $stubPass) === false, 'password found in log');
-check('the SMTP password never reaches the API response', $stubPass === '' || strpos($r['raw'], $stubPass) === false);
-check('the API response has no mail error text', stripos($r['raw'], 'authenticate') === false);
-
-begin('Registration: no admin recipient');
-reset_state();
-seed(['users' => [['user_id' => 1, 'username' => 'admin1', 'role' => 'admin', 'email' => 'a1@example.com', 'email_notifications' => 0, 'is_archived' => 0]]]);
-$r = call('register.php', $goodDriver);
-check('registration succeeds with no e-mail recipient', ($r['json']['success'] ?? false) === true);
-check('no e-mail was attempted', count(mails()) === 0);
-check('the log records that there was no recipient', strpos(errlog(), 'no_recipient') !== false, errlog());
-check('the in-app notification is still written', curl_count() === 1);
+check('admin-created driver is approved (nothing to review)', ($drv['approval_status'] ?? '') === 'approved');
+check('no driver-application e-mail is sent', count(mails()) === 0, (string)count(mails()));
+check('no "new driver application" notification is written', curl_count() === 0, (string)curl_count());
 
 // ---------------------------------------------------------------- resident complaint -> admin
 function complaint_world(): void

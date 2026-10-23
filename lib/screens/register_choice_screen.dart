@@ -7,7 +7,6 @@ import '../utils/app_localizations.dart';
 import '../utils/responsive_text.dart';
 import '../utils/responsive.dart';
 import 'resident_register.dart';
-import 'driver_register.dart';
 
 class RegisterChoiceScreen extends StatefulWidget {
   const RegisterChoiceScreen({super.key});
@@ -87,18 +86,11 @@ class _RegisterChoiceScreenState extends State<RegisterChoiceScreen> {
                               ),
                             ),
                             const SizedBox(height: 20),
+                            // Drivers do not sign up here: the barangay administrator creates their accounts.
                             FadeSlideEntrance(
-                              key: const ValueKey('reg_choice_driver_col'),
+                              key: const ValueKey('reg_choice_driver_note'),
                               delay: const Duration(milliseconds: 300),
-                              child: _buildChoiceCard(
-                                context: context,
-                                title: AppLocalizations.get('driver'),
-                                subtitle: AppLocalizations.get('manage_routes'),
-                                icon: Icons.local_shipping_rounded,
-                                iconColor: const Color(0xFF4CAF50),
-                                bgColor: const Color(0xFFE8F5E9),
-                                route: '/register_driver',
-                              ),
+                              child: _buildDriverNote(),
                             ),
                           ],
                         ),
@@ -224,6 +216,43 @@ class _RegisterChoiceScreenState extends State<RegisterChoiceScreen> {
     );
   }
 
+  Widget _buildDriverNote() {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.symmetric(horizontal: 16), // same edges as the Resident card
+      padding: const EdgeInsets.fromLTRB(18, 16, 18, 16),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.75),
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: const Color(0xFFD7E6E2)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 44,
+            height: 44,
+            decoration: BoxDecoration(color: const Color(0xFFE8F5E9), borderRadius: BorderRadius.circular(14)),
+            child: const Icon(Icons.local_shipping_rounded, color: Color(0xFF4CAF50), size: 22),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(AppLocalizations.get('driver_note_title'),
+                    style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: Color(0xFF00695C))),
+                const SizedBox(height: 4),
+                Text(AppLocalizations.get('driver_note_body'),
+                    style: TextStyle(fontSize: 13, height: 1.4, color: Colors.grey.shade700, fontWeight: FontWeight.w500)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildChoiceCard({
     required BuildContext context,
     required String title,
@@ -241,7 +270,7 @@ class _RegisterChoiceScreenState extends State<RegisterChoiceScreen> {
           Navigator.push(
             context,
             PageRouteBuilder(
-              pageBuilder: (context, animation, secondaryAnimation) => route == '/register_resident' ? const ResidentRegisterScreen() : const DriverRegisterScreen(),
+              pageBuilder: (context, animation, secondaryAnimation) => const ResidentRegisterScreen(),
               transitionsBuilder: (context, animation, secondaryAnimation, child) {
                 return FadeTransition(
                   opacity: CurvedAnimation(parent: animation, curve: Curves.easeIn),
