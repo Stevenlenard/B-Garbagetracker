@@ -3,6 +3,8 @@ import 'package:intl/intl.dart';
 
 import '../api/api_service.dart';
 import '../models/route_assignment.dart';
+import '../services/collection_schedule_service.dart';
+import '../utils/repeat_dates.dart';
 import '../services/route_assignment_service.dart';
 import '../services/service_area_service.dart';
 import '../utils/app_theme.dart';
@@ -654,12 +656,61 @@ class _AssignmentFormState extends State<_AssignmentForm> {
   bool _saving = false;
   String? _error;
 
+  // Repeat weekly (new assignments only): the same driver, truck and areas on the chosen weekdays
+  // from the collection date until [_until]. Each day is saved as its own assignment.
+  bool _repeat = false;
+  final Set<int> _weekdays = <int>{};
+  late DateTime _until;
+  String? _progress;
+
+  static const int _maxRepeatDays = 60;
+  static const List<String> _dayShort = <String>['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+  /// Dates the repeat creates, in order (at most [_maxRepeatDays]).
+  List<DateTime> get _repeatDates => weeklyRepeatDates(start: _date, until: _until, weekdays: _weekdays, max: _maxRepeatDays);
+
+  Future<void> _useCollectionSchedule() async {
+    try {
+      final Map<String, CollectionSchedule> all = await CollectionScheduleService.watch().first.timeout(const Duration(seconds: 8));
+      final Set<int> days = <int>{};
+      for (final ServiceArea a in widget.areas.where((ServiceArea a) => _areaKeys.contains(a.id))) {
+        days.addAll(CollectionScheduleService.forPurok(all, a.name)?.days ?? const <int>[]);
+      }
+      if (!mounted) return;
+      if (days.isEmpty) {
+        setState(() => _error = 'The selected areas have no collection days set (System Settings > Collection Schedule).');
+        return;
+      }
+      setState(() {
+        _weekdays
+          ..clear()
+          ..addAll(days);
+        _error = null;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _error = 'The collection schedule could not be loaded.');
+    }
+  }
+
+  Future<void> _pickUntil() async {
+    final DateTime? d = await showAppSingleDatePicker(
+      context,
+      firstDate: _date,
+      lastDate: _date.add(const Duration(days: 120)),
+      initialDate: _until.isBefore(_date) ? _date : _until,
+      title: 'Repeat until',
+    );
+    if (d != null) setState(() => _until = d);
+  }
+
   @override
   void initState() {
     super.initState();
     final RouteAssignment? e = widget.existing;
     final DateTime now = DateTime.now();
     _date = e != null ? (DateTime.tryParse(e.date) ?? now) : DateTime(now.year, now.month, now.day);
+    _until = _date.add(const Duration(days: 27));
+    _weekdays.add(_date.weekday);
     if (e != null) {
       _driverId = e.driverId;
       _truck.text = e.truckId;
@@ -692,6 +743,10 @@ class _AssignmentFormState extends State<_AssignmentForm> {
     for (final AssignmentArea old in widget.existing?.areas ?? const <AssignmentArea>[]) {
       if (_areaKeys.contains(old.key) && !areas.any((AssignmentArea x) => x.key == old.key)) areas.add(old);
     }
+    if (widget.existing == null && _repeat) {
+      await _saveRepeated(areas);
+      return;
+    }
     final AssignmentResult<RouteAssignment> r = await widget.service.save(
       assignmentId: widget.existing?.id,
       date: DateFormat('yyyy-MM-dd').format(_date),
@@ -712,6 +767,54 @@ class _AssignmentFormState extends State<_AssignmentForm> {
     }
   }
 
+  /// Saves one assignment per repeat date; days that cannot be saved (e.g. the driver or truck is
+  /// already assigned that day) are skipped and listed, the others are kept.
+  Future<void> _saveRepeated(List<AssignmentArea> areas) async {
+    final List<DateTime> dates = _repeatDates;
+    if (dates.isEmpty) {
+      setState(() {
+        _saving = false;
+        _error = 'Choose at least one weekday between the collection date and the end date.';
+      });
+      return;
+    }
+    int created = 0;
+    final List<String> skipped = <String>[];
+    for (int i = 0; i < dates.length; i++) {
+      if (!mounted) return;
+      setState(() => _progress = 'Saving ${i + 1} of ${dates.length}…');
+      final AssignmentResult<RouteAssignment> r = await widget.service.save(
+        date: DateFormat('yyyy-MM-dd').format(dates[i]),
+        driverId: _driverId!,
+        truckId: _truck.text.trim(),
+        areas: areas,
+        notes: _notes.text,
+      );
+      if (r.isOk) {
+        created++;
+      } else {
+        skipped.add('${DateFormat('MMM d').format(dates[i])}: ${r.message}');
+      }
+    }
+    if (!mounted) return;
+    if (created == 0) {
+      setState(() {
+        _saving = false;
+        _progress = null;
+        _error = 'No assignment was saved.\n${skipped.take(4).join('\n')}';
+      });
+      return;
+    }
+    CustomNotification.showTopNotification(
+      context,
+      skipped.isEmpty
+          ? '$created assignments created.'
+          : '$created of ${dates.length} assignments created. Skipped ${skipped.length}: ${skipped.take(2).join('; ')}${skipped.length > 2 ? '…' : ''}',
+      skipped.isNotEmpty,
+    );
+    Navigator.pop(context, true);
+  }
+
   Future<void> _pickDate() async {
     final DateTime now = DateTime.now();
     final DateTime today = DateTime(now.year, now.month, now.day);
@@ -722,7 +825,109 @@ class _AssignmentFormState extends State<_AssignmentForm> {
       initialDate: _date.isBefore(today) ? today : _date,
       title: 'Collection date',
     );
-    if (d != null) setState(() => _date = d);
+    if (d != null) {
+      setState(() {
+        _date = d;
+        if (_until.isBefore(d)) _until = d.add(const Duration(days: 27));
+        if (_weekdays.isEmpty) _weekdays.add(d.weekday);
+      });
+    }
+  }
+
+  Widget _repeatSection() {
+    final List<DateTime> dates = _repeatDates;
+    final List<int> days = _weekdays.toList()..sort();
+    return Container(
+      margin: const EdgeInsets.only(top: 12),
+      decoration: BoxDecoration(
+        color: _repeat ? _mint.withValues(alpha: 0.55) : const Color(0xFFF9FAFB),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: _repeat ? _teal.withValues(alpha: 0.35) : _line),
+      ),
+      padding: const EdgeInsets.fromLTRB(14, 6, 10, 12),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: <Widget>[
+        Row(children: <Widget>[
+          const Icon(Icons.event_repeat_rounded, size: 18, color: _teal),
+          const SizedBox(width: 8),
+          const Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
+              Text('Repeat weekly', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 13.5, color: _ink)),
+              Text('Same driver, truck and areas on the chosen days', style: TextStyle(fontSize: 11.5, color: _muted)),
+            ]),
+          ),
+          Switch(
+            key: const ValueKey<String>('repeat-weekly'),
+            value: _repeat,
+            activeThumbColor: Colors.white,
+            activeTrackColor: _teal,
+            onChanged: (bool v) => setState(() {
+              _repeat = v;
+              _error = null;
+            }),
+          ),
+        ]),
+        if (_repeat) ...<Widget>[
+          const SizedBox(height: 8),
+          Wrap(spacing: 6, runSpacing: 6, children: <Widget>[
+            for (int d = 1; d <= 7; d++)
+              InkWell(
+                borderRadius: BorderRadius.circular(10),
+                onTap: () => setState(() {
+                  _weekdays.contains(d) ? _weekdays.remove(d) : _weekdays.add(d);
+                  _error = null;
+                }),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 150),
+                  width: 50,
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  decoration: BoxDecoration(
+                    color: _weekdays.contains(d) ? _teal : Colors.white,
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: _weekdays.contains(d) ? _teal : _line),
+                  ),
+                  child: Text(_dayShort[d - 1],
+                      textAlign: TextAlign.center,
+                      style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w800, color: _weekdays.contains(d) ? Colors.white : _ink)),
+                ),
+              ),
+          ]),
+          const SizedBox(height: 10),
+          Row(children: <Widget>[
+            Expanded(
+              child: InkWell(
+                borderRadius: BorderRadius.circular(10),
+                onTap: _pickUntil,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(10), border: Border.all(color: _line)),
+                  child: Row(children: <Widget>[
+                    const Text('Until ', style: TextStyle(fontSize: 12.5, color: _muted, fontWeight: FontWeight.w600)),
+                    Expanded(child: Text(DateFormat('EEE, MMM d, yyyy').format(_until), style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: _ink))),
+                    const Icon(Icons.calendar_month_rounded, size: 18, color: _teal),
+                  ]),
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            TextButton.icon(
+              onPressed: _areaKeys.isEmpty ? null : _useCollectionSchedule,
+              style: TextButton.styleFrom(foregroundColor: _teal, visualDensity: VisualDensity.compact),
+              icon: const Icon(Icons.auto_awesome_rounded, size: 16),
+              label: const Text('Use collection schedule'),
+            ),
+          ]),
+          const SizedBox(height: 8),
+          Text(
+            dates.isEmpty
+                ? 'No dates yet: choose at least one weekday.'
+                : 'Creates ${dates.length} assignment${dates.length == 1 ? '' : 's'}: ${days.map((int d) => _dayShort[d - 1]).join(', ')}, '
+                    '${DateFormat('MMM d').format(dates.first)} – ${DateFormat('MMM d').format(dates.last)}'
+                    '${dates.length >= _maxRepeatDays ? ' (limit $_maxRepeatDays)' : ''}.',
+            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: _teal),
+          ),
+        ],
+      ]),
+    );
   }
 
   Widget _section(IconData icon, String title, {Widget? trailing}) {
@@ -838,6 +1043,7 @@ class _AssignmentFormState extends State<_AssignmentForm> {
           ]),
         ),
       ),
+      if (widget.existing == null) _repeatSection(),
       _section(
         Icons.place_rounded,
         'Service areas  ·  ${_areaKeys.length} selected',
@@ -893,7 +1099,11 @@ class _AssignmentFormState extends State<_AssignmentForm> {
           icon: _saving
               ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
               : const Icon(Icons.check_rounded, size: 18),
-          label: Text(_saving ? 'Saving...' : (widget.existing == null ? 'Save assignment' : 'Save changes')),
+          label: Text(_saving
+              ? (_progress ?? 'Saving...')
+              : (widget.existing != null
+                  ? 'Save changes'
+                  : (_repeat ? 'Save ${_repeatDates.length} assignment${_repeatDates.length == 1 ? '' : 's'}' : 'Save assignment'))),
           style: FilledButton.styleFrom(
             backgroundColor: _teal,
             padding: const EdgeInsets.symmetric(vertical: 14),

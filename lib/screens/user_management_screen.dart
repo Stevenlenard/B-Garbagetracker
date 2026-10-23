@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import '../widgets/add_driver_dialog.dart';
+import '../widgets/app_data_table.dart';
 import 'package:firebase_database/firebase_database.dart';
 import '../api/api_service.dart';
 import '../utils/app_theme.dart';
@@ -38,6 +39,10 @@ class _UserManagementScreenState extends State<UserManagementScreen> with Ticker
   String _sortOrder = "Pending First";
 
   final List<String> _statusOptions = ["All Status", "Active", "Pending Approval"];
+
+  // Table (default on desktop) or Cards (default on phones); the admin can switch.
+  bool? _tableView;
+  bool get _useTable => _tableView ?? Responsive.isDesktop(context);
 
   bool _isUserPending(dynamic user) {
     final String role = (user['role'] ?? '').toString().toLowerCase().trim();
@@ -466,11 +471,114 @@ class _UserManagementScreenState extends State<UserManagementScreen> with Ticker
               const SizedBox(width: 12),
               _buildFilterChip(),
               const SizedBox(width: 12),
+              _buildViewToggle(),
+              const SizedBox(width: 12),
               _buildAddDriverButton(isDesktop),
             ],
           ),
         ),
       ),
+    );
+  }
+
+  Widget _buildViewToggle() {
+    Widget seg(IconData icon, String tip, bool table) {
+      final bool on = _useTable == table;
+      return Tooltip(
+        message: tip,
+        child: Material(
+          color: on ? const Color(0xFF00796B) : Colors.transparent,
+          borderRadius: BorderRadius.circular(9),
+          child: InkWell(
+            key: ValueKey<String>(table ? 'users-view-table' : 'users-view-cards'),
+            borderRadius: BorderRadius.circular(9),
+            onTap: () => setState(() => _tableView = table),
+            child: SizedBox(width: 38, height: 38, child: Icon(icon, size: 19, color: on ? Colors.white : const Color(0xFF5B6B66))),
+          ),
+        ),
+      );
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF1F5F4),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFFE2E8E6)),
+      ),
+      child: Row(mainAxisSize: MainAxisSize.min, children: <Widget>[
+        seg(Icons.table_rows_rounded, 'Table view', true),
+        seg(Icons.grid_view_rounded, 'Card view', false),
+      ]),
+    );
+  }
+
+  /// Users as a sortable, paged table (name, contact, area or truck, status).
+  Widget _buildUserTable(List<dynamic> users, {required bool showArchived}) {
+    String txt(dynamic v) => (v ?? '').toString().trim();
+    Widget muted(String t) => Text(t.isEmpty ? '—' : t,
+        overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Color(0xFF475551)));
+    String place(dynamic u) {
+      final String role = txt(u['role']).toLowerCase();
+      if (role == 'resident') return txt(u['purok']);
+      if (role == 'driver') return txt(u['preferred_truck']).isEmpty ? 'No truck' : txt(u['preferred_truck']);
+      return 'Administrator';
+    }
+
+    Widget status(dynamic u) {
+      if (_isUserArchived(u)) return const TablePill('Archived', Color(0xFFC62828));
+      if (_isUserPending(u)) return const TablePill('Pending approval', Color(0xFFEF6C00));
+      return const TablePill('Active', Color(0xFF2E7D32));
+    }
+
+    return AppDataTable<dynamic>(
+      rows: users,
+      onRowTap: _showUserDetails,
+      highlight: (dynamic u) => _isUserPending(u) ? const Color(0xFFFFB74D) : (_isUserArchived(u) ? const Color(0xFFFFCDD2) : null),
+      columns: <AppTableColumn<dynamic>>[
+        AppTableColumn<dynamic>(
+          label: '#',
+          flex: 1,
+          cell: (dynamic u, int i) => Text((i + 1).toString().padLeft(2, '0'),
+              style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w900, color: Color(0xFF00796B))),
+        ),
+        AppTableColumn<dynamic>(
+          label: 'Name',
+          flex: 5,
+          sortKey: (dynamic u) => txt(u['name']).toLowerCase(),
+          cell: (dynamic u, int i) => Row(children: <Widget>[
+            CircleAvatar(
+              radius: 17,
+              backgroundColor: const Color(0xFFE0F2F1),
+              child: Text(txt(u['name']).isEmpty ? '?' : txt(u['name'])[0].toUpperCase(),
+                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w900, color: Color(0xFF00796B))),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(mainAxisAlignment: MainAxisAlignment.center, crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
+                Text(txt(u['name']).isEmpty ? txt(u['username']) : txt(u['name']),
+                    overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w800, color: Color(0xFF1F2A27))),
+                Text('@${txt(u['username'])}', overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 11.5, color: Colors.grey.shade600)),
+              ]),
+            ),
+          ]),
+        ),
+        AppTableColumn<dynamic>(label: 'Email', flex: 5, sortKey: (dynamic u) => txt(u['email']).toLowerCase(), cell: (dynamic u, int i) => muted(txt(u['email']))),
+        AppTableColumn<dynamic>(label: 'Contact', flex: 3, cell: (dynamic u, int i) => muted(txt(u['phone']))),
+        AppTableColumn<dynamic>(label: 'Area / Truck', flex: 3, sortKey: (dynamic u) => place(u).toLowerCase(), cell: (dynamic u, int i) => muted(place(u))),
+        AppTableColumn<dynamic>(
+          label: 'Status',
+          flex: 3,
+          sortKey: (dynamic u) => _isUserArchived(u) ? 2 : (_isUserPending(u) ? 0 : 1),
+          cell: (dynamic u, int i) => status(u),
+        ),
+        AppTableColumn<dynamic>(
+          label: '',
+          flex: 1,
+          numeric: true,
+          cell: (dynamic u, int i) => const Icon(Icons.chevron_right_rounded, color: Color(0xFF9AA8A4)),
+        ),
+      ],
     );
   }
 
@@ -690,6 +798,20 @@ class _UserManagementScreenState extends State<UserManagementScreen> with Ticker
                   behavior: ScrollConfiguration.of(context).copyWith(overscroll: false),
                   child: filteredUsers.isEmpty
                       ? _buildEmptyState()
+                      : _useTable
+                          ? ListView(
+                              controller: _scrollController,
+                              physics: (_manualPullDepth > 0 || _isRefreshing) ? const NeverScrollableScrollPhysics() : const ClampingScrollPhysics(),
+                              padding: const EdgeInsets.fromLTRB(24, 12, 24, 100),
+                              children: <Widget>[
+                                Center(
+                                  child: ConstrainedBox(
+                                    constraints: const BoxConstraints(maxWidth: 1200),
+                                    child: _buildUserTable(filteredUsers, showArchived: showArchived),
+                                  ),
+                                ),
+                              ],
+                            )
                       : LayoutBuilder(
                           builder: (context, boxConstraints) {
                             final bool isWeb = boxConstraints.maxWidth > 900;

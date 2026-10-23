@@ -4,6 +4,7 @@ import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
+import '../widgets/app_data_table.dart';
 import '../services/complaint_center_service.dart';
 import '../services/service_area_service.dart';
 import '../utils/complaint_flow.dart';
@@ -446,6 +447,8 @@ class _ComplaintsScreenState extends State<ComplaintsScreen> {
         ),
       ),
       const SizedBox(width: 10),
+      _viewToggle(),
+      const SizedBox(width: 10),
       Material(
         color: filters > 0 ? const Color(0xFFE6F4F1) : Colors.white,
         borderRadius: BorderRadius.circular(14),
@@ -659,7 +662,10 @@ class _ComplaintsScreenState extends State<ComplaintsScreen> {
     final List<Widget> children = <Widget>[];
     if (error != null) children.add(_errorBanner(error));
     if (p != null && p.items.isEmpty && error == null) children.add(_emptyState());
-    if (p != null && p.items.isNotEmpty) {
+    if (p != null && p.items.isNotEmpty && _useTable(width)) {
+      children.add(Padding(padding: const EdgeInsets.only(bottom: 12), child: _complaintTable(p.items)));
+      children.add(_pager(p));
+    } else if (p != null && p.items.isNotEmpty) {
       final bool twoColumns = width >= 1000;
       if (twoColumns) {
         for (int i = 0; i < p.items.length; i += 2) {
@@ -689,6 +695,106 @@ class _ComplaintsScreenState extends State<ComplaintsScreen> {
       children.add(_pager(p));
     }
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: children);
+  }
+
+  // Table (default on wide screens) or Cards; the admin can switch.
+  bool? _tableView;
+  bool _useTable(double width) => _tableView ?? width >= 1000;
+
+  Widget _viewToggle() {
+    final bool table = _useTable(MediaQuery.sizeOf(context).width);
+    Widget seg(IconData icon, String tip, bool asTable) {
+      final bool on = table == asTable;
+      return Tooltip(
+        message: tip,
+        child: Material(
+          color: on ? _teal : Colors.transparent,
+          borderRadius: BorderRadius.circular(10),
+          child: InkWell(
+            key: ValueKey<String>(asTable ? 'complaints-view-table' : 'complaints-view-cards'),
+            borderRadius: BorderRadius.circular(10),
+            onTap: () => setState(() => _tableView = asTable),
+            child: SizedBox(width: 38, height: 38, child: Icon(icon, size: 19, color: on ? Colors.white : const Color(0xFF5B6B66))),
+          ),
+        ),
+      );
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(14), border: Border.all(color: const Color(0xFFE2E8F0))),
+      child: Row(mainAxisSize: MainAxisSize.min, children: <Widget>[
+        seg(Icons.table_rows_rounded, 'Table view', true),
+        seg(Icons.view_agenda_rounded, 'Card view', false),
+      ]),
+    );
+  }
+
+  Widget _complaintTable(List<ComplaintRecord> items) {
+    final bool resident = _c.query.source == ComplaintSource.resident;
+    String label(ComplaintStatus s) => switch (s) {
+          ComplaintStatus.pending => 'Pending',
+          ComplaintStatus.inProgress => 'In progress',
+          ComplaintStatus.resolved => 'Resolved',
+        };
+    Widget muted(String? t) => Text((t ?? '').trim().isEmpty ? '—' : t!.trim(),
+        overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Color(0xFF475569)));
+    DateTime? when(ComplaintRecord r) => r.isResolved && r.resolvedAt != null ? r.resolvedAt : r.submittedAt;
+    return AppDataTable<ComplaintRecord>(
+      key: ValueKey<String>('complaint-table-${_c.query.source.name}-${_c.query.scope.name}'),
+      rows: items,
+      showPager: false,
+      onRowTap: _openDetails,
+      highlight: (ComplaintRecord r) => _ComplaintCard.statusColor(r.status),
+      columns: <AppTableColumn<ComplaintRecord>>[
+        AppTableColumn<ComplaintRecord>(
+          label: '#',
+          flex: 1,
+          sortKey: (ComplaintRecord r) => int.tryParse(r.id) ?? 0,
+          cell: (ComplaintRecord r, int i) => Text('#${r.id}', style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w900, color: _teal)),
+        ),
+        AppTableColumn<ComplaintRecord>(
+          label: resident ? 'Complaint' : 'Issue',
+          flex: 6,
+          sortKey: (ComplaintRecord r) => r.category.toLowerCase(),
+          cell: (ComplaintRecord r, int i) => Column(mainAxisAlignment: MainAxisAlignment.center, crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
+            Text(r.category, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w800, color: _ink)),
+            if (r.description.trim().isNotEmpty)
+              Text(r.description.trim(), maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 11.5, color: Color(0xFF94A3B8))),
+          ]),
+        ),
+        AppTableColumn<ComplaintRecord>(
+          label: resident ? 'Resident' : 'Driver',
+          flex: 4,
+          sortKey: (ComplaintRecord r) => r.reporterName.toLowerCase(),
+          cell: (ComplaintRecord r, int i) => muted(r.reporterName),
+        ),
+        AppTableColumn<ComplaintRecord>(
+          label: resident ? 'Area' : 'Truck',
+          flex: 3,
+          sortKey: (ComplaintRecord r) => ((resident ? r.locationLabel : r.truckId) ?? '').toLowerCase(),
+          cell: (ComplaintRecord r, int i) => muted(resident ? r.locationLabel : r.truckId),
+        ),
+        AppTableColumn<ComplaintRecord>(
+          label: _c.query.scope == ComplaintScope.resolved ? 'Resolved' : 'Submitted',
+          flex: 3,
+          sortKey: (ComplaintRecord r) => when(r)?.millisecondsSinceEpoch ?? 0,
+          cell: (ComplaintRecord r, int i) => muted(when(r) == null ? null : DateFormat('MMM d, h:mm a').format(when(r)!)),
+        ),
+        AppTableColumn<ComplaintRecord>(
+          label: 'Status',
+          flex: 3,
+          sortKey: (ComplaintRecord r) => r.status.index,
+          cell: (ComplaintRecord r, int i) => TablePill(label(r.status), _ComplaintCard.statusColor(r.status)),
+        ),
+        AppTableColumn<ComplaintRecord>(
+          label: '',
+          flex: 1,
+          numeric: true,
+          cell: (ComplaintRecord r, int i) => const Icon(Icons.chevron_right_rounded, color: Color(0xFF9AA8A4)),
+        ),
+      ],
+    );
   }
 
   Widget _pager(ComplaintPage p) {

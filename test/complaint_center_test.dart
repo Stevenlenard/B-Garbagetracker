@@ -569,7 +569,7 @@ void main() {
 
   // ---------------------------------------------------------------- screen
   group('Complaint Center screen (Android narrow and Web wide)', () {
-    Future<(ComplaintCenterController, FakeResidentApi, FakeDriverStore)> pumpCenter(WidgetTester tester, Size size, {int count = 23}) async {
+    Future<(ComplaintCenterController, FakeResidentApi, FakeDriverStore)> pumpCenter(WidgetTester tester, Size size, {int count = 23, bool cards = true}) async {
       tester.view.physicalSize = size;
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.resetPhysicalSize);
@@ -580,8 +580,25 @@ void main() {
       addTearDown(c.dispose);
       await tester.pumpWidget(MaterialApp(home: ComplaintsScreen(controller: c, listenForNewComplaints: false)));
       await tester.pumpAndSettle();
+      // Wide screens open on the table; these tests exercise the cards, so switch to them.
+      if (cards && size.width >= 1000) {
+        await tester.tap(find.byKey(const ValueKey<String>('complaints-view-cards')));
+        await tester.pumpAndSettle();
+      }
       return (c, api, store);
     }
+
+    testWidgets('wide Web opens on the table: sortable columns, rows open the details', (WidgetTester tester) async {
+      await pumpCenter(tester, const Size(1366, 900), cards: false);
+      expect(find.text('COMPLAINT'), findsOneWidget);
+      expect(find.text('RESIDENT'), findsOneWidget);
+      expect(find.text('STATUS'), findsOneWidget);
+      expect(find.text('View Details'), findsNothing, reason: 'rows, not cards');
+      expect(find.text('Showing 1–15 of 19 active resident complaints'), findsOneWidget);
+      await tester.tap(find.text('#23'));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+    });
 
     for (final (String name, Size size) in <(String, Size)>[('narrow Android', const Size(360, 780)), ('wide Web', const Size(1366, 900))]) {
       testWidgets('$name: new names, counters, tabs and paginated cards without overflow', (WidgetTester tester) async {
