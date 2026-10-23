@@ -4,6 +4,7 @@ import 'dart:math' as math;
 
 import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
 import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart' hide Size;
 import 'package:pointer_interceptor/pointer_interceptor.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -226,6 +227,8 @@ class _CollectionRouteOptimizationScreenState extends State<CollectionRouteOptim
   String? _highlightTripId;
   String? _referenceTripId;
   String? _hoverArea;
+  /// Day the page shows (Manila calendar day); null = today, live.
+  DateTime? _asOfDay;
 
   MapboxMap? _map;
 
@@ -234,6 +237,12 @@ class _CollectionRouteOptimizationScreenState extends State<CollectionRouteOptim
   bool get _canComparePaths => _role == 'driver' || _role == 'admin';
   bool get _canSelectReference => _role == 'driver';
   DateTime _now() => (widget.clock ?? DateTime.now)();
+  DateTime get _today => HistoryDates.manilaToday(_now());
+  bool get _isToday => _asOfDay == null || !_asOfDay!.isBefore(_today);
+  /// The day being shown (today unless an earlier day was picked).
+  DateTime get _day => _isToday ? _today : _asOfDay!;
+  /// "Now" for the statuses: the real time today, the end of the chosen day otherwise.
+  int get _statusNowMs => _isToday ? _now().millisecondsSinceEpoch : HistoryDates.endOf(_day).millisecondsSinceEpoch - 1;
 
   @override
   void initState() {
@@ -333,9 +342,8 @@ class _CollectionRouteOptimizationScreenState extends State<CollectionRouteOptim
 
   void _subscribe() {
     _sub?.cancel();
-    final DateTime now = _now();
-    final DateTime today = HistoryDates.manilaToday(now);
-    _subscribedDay = today;
+    final DateTime today = _day;
+    _subscribedDay = _today;
     final CollectionDataSource src = widget.source ?? FirebaseCollectionDataSource();
     _sub = src.watch(start: today.subtract(Duration(days: widget.config.windowDays)), end: today).listen((CollectionData d) {
       _data = d;
@@ -366,7 +374,7 @@ class _CollectionRouteOptimizationScreenState extends State<CollectionRouteOptim
   /// the analysed window (one re-subscription per day, not per resume).
   void _onClockBoundary() {
     if (!mounted) return;
-    if (HistoryDates.manilaToday(_now()) != _subscribedDay) {
+    if (_isToday && _today != _subscribedDay) {
       _analysedOnce = false;
       _subscribe();
     } else {
@@ -379,7 +387,7 @@ class _CollectionRouteOptimizationScreenState extends State<CollectionRouteOptim
   void _analyse() {
     final CollectionData? d = _data;
     if (d == null || !mounted) return;
-    final DateTime today = HistoryDates.manilaToday(_now());
+    final DateTime today = _day;
     final DateTime start = today.subtract(Duration(days: widget.config.windowDays));
     // Admin and drivers also see SIMULATION trips here (labelled), so the status change can be tested; residents
     // and the public page see real visits only. Analytics never counts simulations.
@@ -413,7 +421,7 @@ class _CollectionRouteOptimizationScreenState extends State<CollectionRouteOptim
   void _computeStatuses() {
     final CollectionData? d = _data;
     if (d == null) return;
-    final int nowMs = _now().millisecondsSinceEpoch;
+    final int nowMs = _statusNowMs;
     _statuses = d.areas.where((AreaGeofence a) => a.isTruckStop).map((AreaGeofence a) {
       return CollectionStatus.evaluate(
         area: a.name,
@@ -793,6 +801,8 @@ class _CollectionRouteOptimizationScreenState extends State<CollectionRouteOptim
 
   Widget _toolbar({required bool compact}) {
     final List<Widget> items = <Widget>[
+      _dayPicker(),
+      const SizedBox(width: 8),
       _areaPicker(),
       const SizedBox(width: 10),
       _statusChip('All', StatusFilter.all, Icons.layers_rounded, _teal),
@@ -814,6 +824,94 @@ class _CollectionRouteOptimizationScreenState extends State<CollectionRouteOptim
           : Row(mainAxisSize: MainAxisSize.min, children: items),
     );
   }
+
+  void _showDay(DateTime? day) {
+    setState(() {
+      _asOfDay = day;
+      _analysedOnce = false;
+      _data = null;
+    });
+    _subscribe();
+  }
+
+  /// Which day the page shows: today (live) by default, or an earlier day within the analysed window.
+  Widget _dayPicker() {
+    final bool today = _isToday;
+    return Tooltip(
+      message: 'Show the collection status on another day',
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: () async {
+          final DateTime now = _today;
+          final DateTime? picked = await showDatePicker(
+            context: context,
+            initialDate: _day,
+            firstDate: now.subtract(Duration(days: widget.config.windowDays - 1)),
+            lastDate: now,
+            helpText: 'Show status on',
+            builder: (BuildContext ctx, Widget? child) => Theme(
+              data: Theme.of(ctx).copyWith(
+                colorScheme: Theme.of(ctx).colorScheme.copyWith(primary: _teal, onPrimary: Colors.white, surface: Colors.white, onSurface: _ink),
+                datePickerTheme: DatePickerThemeData(
+                  backgroundColor: Colors.white,
+                  surfaceTintColor: Colors.transparent,
+                  headerBackgroundColor: _teal,
+                  headerForegroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
+                  todayBorder: const BorderSide(color: _teal),
+                ),
+                textButtonTheme: TextButtonThemeData(style: TextButton.styleFrom(foregroundColor: _teal)),
+              ),
+              child: child!,
+            ),
+          );
+          if (picked == null || !mounted) return;
+          final DateTime day = DateTime(picked.year, picked.month, picked.day);
+          if (day == _day) return;
+          _showDay(day.isBefore(now) ? day : null);
+        },
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          decoration: BoxDecoration(
+            color: today ? const Color(0xFFF1F5F9) : _teal.withValues(alpha: 0.10),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: today ? Colors.transparent : _teal.withValues(alpha: 0.45)),
+          ),
+          child: Row(mainAxisSize: MainAxisSize.min, children: <Widget>[
+            const Icon(Icons.event_rounded, size: 16, color: _teal),
+            const SizedBox(width: 6),
+            Text(today ? 'Today' : DateFormat('EEE, MMM d').format(_day),
+                style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 13, color: _ink)),
+            if (!today) ...<Widget>[
+              const SizedBox(width: 6),
+              InkWell(
+                customBorder: const CircleBorder(),
+                onTap: () => _showDay(null),
+                child: const Tooltip(message: 'Back to today', child: Icon(Icons.close_rounded, size: 16, color: _muted)),
+              ),
+            ] else ...<Widget>[
+              const SizedBox(width: 2),
+              const Icon(Icons.expand_more_rounded, size: 18, color: _muted),
+            ],
+          ]),
+        ),
+      ),
+    );
+  }
+
+  /// Areas with a verified visit on the shown day.
+  int get _visitedOnDay {
+    final int from = HistoryDates.startOf(_day).millisecondsSinceEpoch;
+    final int to = HistoryDates.endOf(_day).millisecondsSinceEpoch;
+    return _visits
+        .where((CollectionVisit v) => v.lastFixMs >= from && v.firstFixMs < to)
+        .where((CollectionVisit v) => _areaFilter == 'All areas' || v.area == _areaFilter)
+        .map((CollectionVisit v) => v.area)
+        .toSet()
+        .length;
+  }
+
+  int get _areasShown => _statuses.where((AreaCollectionStatus s) => _areaFilter == 'All areas' || s.area == _areaFilter).length;
 
   Widget _areaPicker() {
     final List<String> names = <String>['All areas', ..._statuses.map((AreaCollectionStatus s) => s.area)];
@@ -867,6 +965,17 @@ class _CollectionRouteOptimizationScreenState extends State<CollectionRouteOptim
   }
 
   Widget _livePill() {
+    if (!_isToday) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(color: CollectionColors.unknown.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(20)),
+        child: const Row(mainAxisSize: MainAxisSize.min, children: <Widget>[
+          Icon(Icons.history_rounded, size: 13, color: _muted),
+          SizedBox(width: 6),
+          Text('Past day', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: _muted)),
+        ]),
+      );
+    }
     final bool live = _error == null;
     final Color c = live ? CollectionColors.recent : CollectionColors.unknown;
     return Tooltip(
@@ -898,8 +1007,14 @@ class _CollectionRouteOptimizationScreenState extends State<CollectionRouteOptim
             child: const Icon(Icons.insights_rounded, size: 18, color: _teal),
           ),
           const SizedBox(width: 10),
-          const Expanded(
-            child: Text('Collection status', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 16, color: _ink)),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: <Widget>[
+              Text(_isToday ? 'Collection status · Today' : 'Collection status · ${DateFormat('MMM d, yyyy').format(_day)}',
+                  maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 16, color: _ink)),
+              if (_data != null)
+                Text('$_visitedOnDay of $_areasShown ${_areasShown == 1 ? "area" : "areas"} collected ${_isToday ? "today" : "that day"}',
+                    maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: _muted)),
+            ]),
           ),
           IconButton(
             tooltip: 'How status works',

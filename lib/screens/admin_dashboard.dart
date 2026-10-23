@@ -2108,15 +2108,17 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
       mainAxisSpacing: 10,
       childAspectRatio: aspectRatio,
       children: [
+        // Every card names the time it covers, so no number is read against the wrong period.
         _buildModernStatCard("Online Drivers", "$_onlineDriversCount",
-            Icons.person_pin_circle_rounded, const Color(0xFF43A047)),
+            Icons.person_pin_circle_rounded, const Color(0xFF43A047), period: "Live", live: true),
         _buildModernStatCard("Pending Issues", "$_pendingComplaints",
-            Icons.warning_amber_rounded, const Color(0xFFE53935)),
-        _buildModernStatCard("Route Coverage", "${_coveragePercent.round()}%",
-            Icons.map_rounded, const Color(0xFFFB8C00),
-            badge: _coverageAreas == 0 ? null : "$_coverageVisited/$_coverageAreas areas, 7 days"),
+            Icons.warning_amber_rounded, const Color(0xFFE53935), period: "Open now"),
+        _buildModernStatCard(
+            _coverageAreas == 0 ? "Route Coverage" : "Route Coverage · $_coverageVisited/$_coverageAreas areas",
+            "${_coveragePercent.round()}%",
+            Icons.map_rounded, const Color(0xFFFB8C00), period: "Last 7 days"),
         _buildModernStatCard("Total Residents", "$_residentsCount",
-            Icons.people_alt_rounded, const Color(0xFF8E24AA)),
+            Icons.people_alt_rounded, const Color(0xFF8E24AA), period: "All registered"),
       ],
     );
   }
@@ -2170,7 +2172,7 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
   }
 
   Widget _buildModernStatCard(String title, String value, IconData icon,
-      Color color, {String? badge}) {
+      Color color, {String? badge, String? period, bool live = false}) {
     final bool isDesktop = Responsive.isDesktop(context);
     final Color bgColor = color.withOpacity(0.02);
 
@@ -2216,7 +2218,48 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
                   color: color.withOpacity(0.05),
                 ),
               ),
-              if (badge != null)
+              if (period != null)
+                Positioned(
+                  top: cardPadding,
+                  right: cardPadding,
+                  child: Container(
+                    padding: EdgeInsets.symmetric(
+                      horizontal: (cardWidth * 0.035).clamp(6.0, 9.0),
+                      vertical: (cardHeight * 0.025).clamp(2.5, 4.0),
+                    ),
+                    decoration: BoxDecoration(
+                      color: color.withValues(alpha: 0.08),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (live)
+                          Container(
+                            width: 6,
+                            height: 6,
+                            margin: const EdgeInsets.only(right: 5),
+                            decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+                          )
+                        else
+                          Padding(
+                            padding: const EdgeInsets.only(right: 4),
+                            child: Icon(Icons.schedule_rounded, size: (cardHeight * 0.085).clamp(10.0, 12.5), color: Color.lerp(color, Colors.black, 0.25)),
+                          ),
+                        Text(
+                          period,
+                          style: TextStyle(
+                            color: Color.lerp(color, Colors.black, 0.25),
+                            fontWeight: FontWeight.w800,
+                            fontSize: (cardHeight * 0.08).clamp(9.0, 11.5),
+                            letterSpacing: 0.2,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              if (badge != null && period == null)
                 Positioned(
                   top: cardPadding,
                   right: cardPadding,

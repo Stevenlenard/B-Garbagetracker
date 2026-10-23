@@ -394,13 +394,22 @@ void main() {
       await t.pump();
     }
 
+    testWidgets('the page opens on Today and says how many areas were collected that day', (WidgetTester t) async {
+      await pumpWithMap(t, 'admin', const Size(1400, 900));
+      expect(t.takeException(), isNull);
+      expect(find.text('Today'), findsOneWidget);
+      expect(find.textContaining('Collection status · Today'), findsOneWidget);
+      expect(find.textContaining('collected today'), findsOneWidget);
+      expect(find.text('Live'), findsOneWidget);
+    });
+
     testWidgets('phone with map: draggable bottom summary, no overflow', (WidgetTester t) async {
       await pumpWithMap(t, 'driver', const Size(390, 844));
       expect(t.takeException(), isNull);
       expect(find.byType(DraggableScrollableSheet), findsOneWidget);
-      expect(find.text('Collection status'), findsOneWidget);
+      expect(find.textContaining('Collection status'), findsOneWidget);
       expect(find.text('Recent'), findsOneWidget, reason: 'status counts double as the legend');
-      await t.drag(find.text('Collection status'), const Offset(0, -400));
+      await t.drag(find.textContaining('Collection status'), const Offset(0, -400));
       await t.pumpAndSettle();
       expect(t.takeException(), isNull);
       expect(find.text('Recently visited'), findsOneWidget, reason: 'grouped list after dragging the sheet up');
@@ -413,10 +422,10 @@ void main() {
       await t.tap(find.byKey(const ValueKey<String>('collection-panel-toggle')));
       await t.pumpAndSettle();
       expect(find.text('Recently visited'), findsOneWidget);
-      final Offset before = t.getTopLeft(find.text('Collection status'));
-      await t.drag(find.text('Collection status'), const Offset(300, -40));
+      final Offset before = t.getTopLeft(find.textContaining('Collection status'));
+      await t.drag(find.textContaining('Collection status'), const Offset(300, -40));
       await t.pumpAndSettle();
-      expect(t.getTopLeft(find.text('Collection status')), isNot(before));
+      expect(t.getTopLeft(find.textContaining('Collection status')), isNot(before));
       expect(t.takeException(), isNull);
     });
 
