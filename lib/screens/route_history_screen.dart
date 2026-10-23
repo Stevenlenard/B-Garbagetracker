@@ -5,6 +5,8 @@ import '../utils/load_history.dart';
 import '../utils/trip_links.dart';
 import '../utils/route_geometry.dart';
 import '../utils/replay_timeline.dart';
+import '../utils/road_network.dart';
+import 'package:flutter/services.dart' show rootBundle;
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
@@ -70,6 +72,9 @@ class _RouteHistoryScreenState extends State<RouteHistoryScreen> with TickerProv
   DriverTrip? _analyzedTrip;
   // Road-snapped line of the selected trip (Map Matching), for the exact display points it was made from.
   MatchedRoute? _matched;
+  // Balintawak street network overlay (assets/maps/balintawak_roads.json), off by default.
+  bool _showStreets = false;
+  static String? _streetsGeoJson;
   String? _matchedKey;
 
   // Filter state
@@ -762,6 +767,74 @@ class _RouteHistoryScreenState extends State<RouteHistoryScreen> with TickerProv
   void _onStyleLoaded(StyleLoadedEventData _) {
     MapHome.ensure(_mapboxMap, zoom: 13.8);
     if (_analyzedTrip != null) _updateMapForTrip(_analyzedTrip!);
+    if (_showStreets) _updateStreetsLayer();
+  }
+
+  /// Shows or hides the mapped Balintawak streets under the trip line: main roads, residential streets and
+  /// (dashed) service lanes, the same network the driver simulation drives on.
+  Future<void> _updateStreetsLayer() async {
+    final MapboxMap? map = _mapboxMap;
+    if (map == null) return;
+    const String sourceId = 'balintawak-streets-source';
+    const String layerId = 'balintawak-streets-layer';
+    const String lanesId = 'balintawak-lanes-layer';
+    try {
+      final style = map.style;
+      if (!_showStreets) {
+        for (final String id in <String>[layerId, lanesId]) {
+          if (await style.styleLayerExists(id)) await style.setStyleLayerProperty(id, 'visibility', 'none');
+        }
+        return;
+      }
+      _streetsGeoJson ??= await _buildStreetsGeoJson();
+      if (!await style.styleSourceExists(sourceId)) {
+        await style.addSource(GeoJsonSource(id: sourceId, data: _streetsGeoJson!));
+      }
+      final String? below = await style.styleLayerExists('full-route-layer') ? 'full-route-layer' : null;
+      if (!await style.styleLayerExists(layerId)) {
+        await style.addLayer(
+            LineLayer(id: layerId, sourceId: sourceId, lineWidth: 3.0, lineOpacity: 0.55, lineCap: LineCap.ROUND, lineJoin: LineJoin.ROUND),
+            below == null ? null : LayerPosition(below: below));
+        await style.setStyleLayerProperty(layerId, 'filter', ['!=', ['get', 'c'], 2]);
+        await style.setStyleLayerProperty(layerId, 'line-color', ['match', ['get', 'c'], 0, '#00695C', '#4DB6AC']);
+      }
+      if (!await style.styleLayerExists(lanesId)) {
+        await style.addLayer(
+            LineLayer(id: lanesId, sourceId: sourceId, lineWidth: 2.0, lineOpacity: 0.6, lineColor: const Color(0xFFC08A2E).toARGB32(), lineDasharray: <double>[2, 2]),
+            below == null ? null : LayerPosition(below: below));
+        await style.setStyleLayerProperty(lanesId, 'filter', ['==', ['get', 'c'], 2]);
+      }
+      for (final String id in <String>[layerId, lanesId]) {
+        await style.setStyleLayerProperty(id, 'visibility', 'visible');
+      }
+    } catch (e) {
+      debugPrint('[ROUTE HISTORY] streets layer error: $e');
+    }
+  }
+
+  static Future<String> _buildStreetsGeoJson() async {
+    final Map<String, dynamic> net = jsonDecode(await rootBundle.loadString(RoadNetwork.assetPath)) as Map<String, dynamic>;
+    final List nodes = net['nodes'] as List;
+    final List<List<List<List<double>>>> byClass = <List<List<List<double>>>>[<List<List<double>>>[], <List<List<double>>>[], <List<List<double>>>[]];
+    for (final e in net['edges'] as List) {
+      final List l = e as List;
+      final List a = nodes[(l[0] as num).toInt()] as List, b = nodes[(l[1] as num).toInt()] as List;
+      byClass[((l[2] as num).toInt()).clamp(0, 2)].add(<List<double>>[
+        <double>[(a[0] as num).toDouble(), (a[1] as num).toDouble()],
+        <double>[(b[0] as num).toDouble(), (b[1] as num).toDouble()],
+      ]);
+    }
+    return jsonEncode(<String, dynamic>{
+      'type': 'FeatureCollection',
+      'features': <Map<String, dynamic>>[
+        for (int c = 0; c < 3; c++)
+          <String, dynamic>{
+            'type': 'Feature',
+            'properties': <String, dynamic>{'c': c},
+            'geometry': <String, dynamic>{'type': 'MultiLineString', 'coordinates': byClass[c]},
+          },
+      ],
+    });
   }
 
   Future<void> _updateMapForTrip(DriverTrip trip) async {
@@ -2042,6 +2115,10 @@ class _RouteHistoryScreenState extends State<RouteHistoryScreen> with TickerProv
             () => _switchMapStyle(_selectedMapStyle == 'map' ? 'satellite' : 'map'),
             active: _selectedMapStyle == 'satellite'),
         btn(Icons.info_outline_rounded, 'Legend', _showLegendModal),
+        btn(Icons.alt_route_rounded, _showStreets ? 'Hide Balintawak streets' : 'Show Balintawak streets', () {
+          setState(() => _showStreets = !_showStreets);
+          _updateStreetsLayer();
+        }, active: _showStreets),
         if (desktop) ...[
           btn(_isMapExpanded ? Icons.fullscreen_exit_rounded : Icons.fullscreen_rounded, _isMapExpanded ? 'Exit full map' : 'Full map', () {
             setState(() => _isMapExpanded = !_isMapExpanded);

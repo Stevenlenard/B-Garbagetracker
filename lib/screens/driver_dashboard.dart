@@ -1,3 +1,4 @@
+import '../utils/road_network.dart';
 import '../utils/route_optimization_gate.dart';
 import '../models/route_assignment.dart';
 import '../services/route_assignment_service.dart';
@@ -2724,25 +2725,27 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
   void _startSimulationAt(String areaName) {
     _positionSubscription?.cancel();
     _simulationTimer?.cancel();
-    
+
     // 1. Find the area in our config
     final config = _purokConfigs.firstWhere(
       (p) => p['name'] == areaName,
       orElse: () => _purokConfigs.first,
     );
+    final double toLat = (config['lat'] as num).toDouble();
+    final double toLng = (config['lng'] as num).toDouble();
 
-    debugPrint("[SIMULATION] Starting at ${config['name']} (${config['lat']}, ${config['lng']})");
+    debugPrint("[SIMULATION] Driving to ${config['name']} ($toLat, $toLng) along the streets");
 
-    void sendSimulatedUpdate(Map<String, dynamic> targetPurok) {
+    void sendSimulatedUpdate(double lat, double lng, {double speed = 2.0, double heading = 0}) {
       final pos = Position(
-        latitude: targetPurok['lat'], 
-        longitude: targetPurok['lng'], 
-        timestamp: DateTime.now(), 
+        latitude: lat,
+        longitude: lng,
+        timestamp: DateTime.now(),
         accuracy: 5.0, // High accuracy for simulation
-        altitude: 0, heading: 0, speed: 2.0, // collection pace
+        altitude: 0, heading: heading, speed: speed,
         speedAccuracy: 0, altitudeAccuracy: 0, headingAccuracy: 0
       );
-      
+
       // Update local state for Map to pick up
       if (mounted) {
         setState(() {
@@ -2754,19 +2757,57 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       _processNewPosition(pos);
     }
 
-    // Move to the selected Purok instantly, then stay there with a fix every 5 s (like a truck collecting), so the
-    // simulation leaves real simulated route points: the area turns green as a "simulation test" visit.
-    sendSimulatedUpdate(config);
-    int tick = 0;
-    _simulationTimer = Timer.periodic(const Duration(seconds: 5), (Timer t) {
-      if (!mounted || !_isSimulationMode) {
-        t.cancel();
+    // At the area: stay there with a fix every 5 s (like a truck collecting), so the simulation leaves real
+    // simulated route points and the area turns green as a "simulation test" visit.
+    void stayAt(double lat, double lng) {
+      sendSimulatedUpdate(lat, lng);
+      int tick = 0;
+      _simulationTimer = Timer.periodic(const Duration(seconds: 5), (Timer t) {
+        if (!mounted || !_isSimulationMode) {
+          t.cancel();
+          return;
+        }
+        tick++;
+        // a few metres of movement inside the area, so each fix is a new recorded point
+        final double off = 0.00003 * ((tick % 4) - 1.5);
+        sendSimulatedUpdate(lat + off, lng - off);
+      });
+    }
+
+    // On the way: follow the Balintawak streets (RoadNetwork) from where the truck is to the area entrance,
+    // a point every 25 m or less with every street corner kept, played in a few seconds. The short duration
+    // is what marks the trip as a simulation; the path itself is a drivable street route.
+    RoadNetwork.load().then((RoadNetwork net) {
+      if (!mounted || !_isSimulationMode) return;
+      final Position? from = _currentPosition;
+      final List<List<double>>? street = from == null ? null : net.route(from.latitude, from.longitude, toLat, toLng);
+      if (street == null) {
+        debugPrint("[SIMULATION] No street route from the current position: starting at the area");
+        stayAt(toLat, toLng);
         return;
       }
-      tick++;
-      // a few metres of movement inside the area, so each fix is a new recorded point
-      final double off = 0.00003 * ((tick % 4) - 1.5);
-      sendSimulatedUpdate(<String, dynamic>{...config, 'lat': (config['lat'] as num).toDouble() + off, 'lng': (config['lng'] as num).toDouble() - off});
+      final List<List<double>> path = RoadNetwork.densify(<List<double>>[...street, <double>[toLng, toLat]], 25);
+      final int stepMs = (8000 / path.length).clamp(40, 200).round();
+      int i = 0;
+      _simulationTimer = Timer.periodic(Duration(milliseconds: stepMs), (Timer t) {
+        if (!mounted || !_isSimulationMode) {
+          t.cancel();
+          return;
+        }
+        if (i >= path.length) {
+          t.cancel();
+          stayAt(toLat, toLng);
+          return;
+        }
+        final List<double> p = path[i];
+        final List<double> next = path[math.min(i + 1, path.length - 1)];
+        final double heading = (math.atan2(next[0] - p[0], next[1] - p[1]) * 180 / math.pi + 360) % 360;
+        sendSimulatedUpdate(p[1], p[0], speed: 8.0, heading: heading);
+        i++;
+      });
+    }).catchError((Object e) {
+      debugPrint("[SIMULATION] Street network unavailable ($e): starting at the area");
+      if (mounted && _isSimulationMode) stayAt(toLat, toLng);
     });
   }
 

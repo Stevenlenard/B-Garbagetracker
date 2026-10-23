@@ -42,7 +42,7 @@ class MatchedRoute {
 class MapMatchingService {
   MapMatchingService._();
 
-  static const int cacheVersion = 2;
+  static const int cacheVersion = 3;
 
   /// Mapbox Map Matching requests allowed per calendar month (UTC) for all devices together.
   /// Enforced by the server (`backend/mapbox_quota.php`); shown here for reference.
@@ -279,15 +279,17 @@ class MapMatchingService {
     }
   }
 
-  /// Google polyline encoding, precision 6 (compact storage of [lng, lat] lines).
+  /// Google polyline encoding, precision 6 (compact storage of [lng, lat] lines). Written with plain
+  /// arithmetic instead of bit operators: on the Web those work on unsigned 32-bit values, which turned
+  /// negative steps into huge numbers (a line shooting off the map).
   static String encodePolyline(List<List<double>> coords) {
     final StringBuffer out = StringBuffer();
     int lastLat = 0, lastLng = 0;
     void enc(int v) {
-      int x = v < 0 ? ~(v << 1) : (v << 1);
-      while (x >= 0x20) {
-        out.writeCharCode((0x20 | (x & 0x1f)) + 63);
-        x >>= 5;
+      int x = v < 0 ? -v * 2 - 1 : v * 2;
+      while (x >= 32) {
+        out.writeCharCode(32 + x % 32 + 63);
+        x = x ~/ 32;
       }
       out.writeCharCode(x + 63);
     }
@@ -306,13 +308,13 @@ class MapMatchingService {
     final List<List<double>> out = <List<double>>[];
     int i = 0, lat = 0, lng = 0;
     int dec() {
-      int result = 0, shift = 0, b;
+      int result = 0, mult = 1, b;
       do {
         b = s.codeUnitAt(i++) - 63;
-        result |= (b & 0x1f) << shift;
-        shift += 5;
-      } while (b >= 0x20 && i < s.length);
-      return (result & 1) != 0 ? ~(result >> 1) : (result >> 1);
+        result += (b % 32) * mult;
+        mult *= 32;
+      } while (b >= 32 && i < s.length);
+      return result.isOdd ? -(result + 1) ~/ 2 : result ~/ 2;
     }
 
     while (i < s.length) {
