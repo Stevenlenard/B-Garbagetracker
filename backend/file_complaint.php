@@ -44,6 +44,9 @@ function gt_notify_admin_complaint($complaintId, $residentId, $residentName, $pu
     }
 }
 
+/** Reports one resident may send in 24 hours (form and Truck Buddy together). */
+const GT_COMPLAINT_DAILY_LIMIT = 3;
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $resident_id = $_POST['resident_id'] ?? null;
     $category = $_POST['category'] ?? null;
@@ -80,6 +83,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             // Insert only into columns that exist in the deployed table (older databases may
             // not have purok/location). The complaint itself is always saved.
             $existing = $conn->query("DESCRIBE complaints")->fetchAll(PDO::FETCH_COLUMN);
+
+            // Anti-spam: at most GT_COMPLAINT_DAILY_LIMIT reports per resident in 24 hours, whether
+            // they come from the Complaint form or from Truck Buddy. Counted on the server, so the
+            // limit holds for every device and app version.
+            if (in_array('created_at', $existing, true)) {
+                $countStmt = $conn->prepare("SELECT COUNT(*) FROM complaints WHERE resident_id = ? AND created_at >= NOW() - INTERVAL 1 DAY");
+                $countStmt->execute([$resident_id]);
+                if ((int)$countStmt->fetchColumn() >= GT_COMPLAINT_DAILY_LIMIT) {
+                    echo json_encode([
+                        "success" => false,
+                        "limit_reached" => true,
+                        "message" => "You have already sent " . GT_COMPLAINT_DAILY_LIMIT . " reports in the last 24 hours. Please wait before sending another; the barangay is reviewing the ones you sent."
+                    ]);
+                    exit;
+                }
+            }
+
             $fields = ['resident_id', 'category', 'description', 'status'];
             $values = [$resident_id, $category, $description, 'pending'];
             if (in_array('purok', $existing, true)) { $fields[] = 'purok'; $values[] = $purok; }

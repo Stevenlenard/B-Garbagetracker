@@ -308,6 +308,12 @@ class FakeConn
             return new FakeStmt();
         }
 
+        // file_complaint.php daily limit: every stored complaint counts as recent (the fake has no clock).
+        if (preg_match('/^SELECT COUNT\(\*\) FROM complaints WHERE resident_id = \? AND created_at >= NOW\(\) - INTERVAL 1 DAY$/i', $sql)) {
+            $n = 0;
+            foreach ($this->tables['complaints'] as $c) if ((string)($c['resident_id'] ?? '') === (string)$params[0]) $n++;
+            return new FakeStmt([[$n]]);
+        }
         if (preg_match("/^SHOW COLUMNS FROM complaints LIKE 'status'$/i", $sql)) {
             return new FakeStmt([['Field' => 'status', 'Type' => getenv('GT_FAKE_STATUS_TYPE') ?: 'varchar(20)']]);
         }

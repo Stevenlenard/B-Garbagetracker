@@ -58,6 +58,34 @@ class _TermsAcceptanceDialogState extends State<TermsAcceptanceDialog>
   bool _agreed = false;
   bool _isSubmitting = false;
 
+  // The agreement can only be ticked after BOTH documents were scrolled to their end.
+  final ScrollController _termsScroll = ScrollController();
+  final ScrollController _privacyScroll = ScrollController();
+  bool _readTerms = false;
+  bool _readPrivacy = false;
+  bool get _canAgree => _readTerms && _readPrivacy && !_isLoading && !_hasError && !_isSubmitting;
+
+  void _checkRead() {
+    bool atEnd(ScrollController c) => c.hasClients && c.position.extentAfter <= 24;
+    final bool t = _readTerms || atEnd(_termsScroll);
+    final bool pv = _readPrivacy || atEnd(_privacyScroll);
+    if (t != _readTerms || pv != _readPrivacy) {
+      setState(() {
+        _readTerms = t;
+        _readPrivacy = pv;
+      });
+    }
+  }
+
+  /// Opens the document still to be read (the checkbox explains why it is not available yet).
+  void _showUnread() {
+    if (!_readTerms) {
+      _tabController.animateTo(0);
+    } else if (!_readPrivacy) {
+      _tabController.animateTo(1);
+    }
+  }
+
   String _termsContent = '';
   String _privacyContent = '';
 
@@ -65,12 +93,18 @@ class _TermsAcceptanceDialogState extends State<TermsAcceptanceDialog>
   void initState() {
     super.initState();
     _tabController = TabController(length: 2, vsync: this);
+    _termsScroll.addListener(_checkRead);
+    _privacyScroll.addListener(_checkRead);
+    // A short document that fits without scrolling counts as read once it is shown.
+    _tabController.addListener(() => WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted) _checkRead(); }));
     _loadDocumentContents();
   }
 
   @override
   void dispose() {
     _tabController.dispose();
+    _termsScroll.dispose();
+    _privacyScroll.dispose();
     super.dispose();
   }
 
@@ -190,9 +224,9 @@ class _TermsAcceptanceDialogState extends State<TermsAcceptanceDialog>
               indicatorColor: AppColors.tealText,
               indicatorWeight: 3,
               labelStyle: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
-              tabs: const [
-                Tab(text: "Terms & Conditions"),
-                Tab(text: "Privacy Policy"),
+              tabs: [
+                _docTab("Terms & Conditions", _readTerms),
+                _docTab("Privacy Policy", _readPrivacy),
               ],
             ),
 
@@ -243,8 +277,8 @@ class _TermsAcceptanceDialogState extends State<TermsAcceptanceDialog>
                       : TabBarView(
                           controller: _tabController,
                           children: [
-                            _buildDocumentScrollArea(_termsContent),
-                            _buildDocumentScrollArea(_privacyContent),
+                            _buildDocumentScrollArea(_termsContent, _termsScroll),
+                            _buildDocumentScrollArea(_privacyContent, _privacyScroll),
                           ],
                         ),
             ),
@@ -261,10 +295,32 @@ class _TermsAcceptanceDialogState extends State<TermsAcceptanceDialog>
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   // Explicit Checkbox
+                  if (!_isLoading && !_hasError && !(_readTerms && _readPrivacy))
+                    Container(
+                      margin: const EdgeInsets.only(bottom: 12),
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: AppColors.tealText.withValues(alpha: 0.07),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Row(children: [
+                        Icon(Icons.swipe_up_rounded, size: 18, color: AppColors.tealText),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            "Scroll to the end of both documents to continue.",
+                            style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: Colors.grey.shade800),
+                          ),
+                        ),
+                        _readChip("Terms", _readTerms),
+                        const SizedBox(width: 6),
+                        _readChip("Privacy", _readPrivacy),
+                      ]),
+                    ),
                   InkWell(
                     onTap: (_isLoading || _hasError || _isSubmitting)
                         ? null
-                        : () => setState(() => _agreed = !_agreed),
+                        : (_canAgree ? () => setState(() => _agreed = !_agreed) : _showUnread),
                     borderRadius: BorderRadius.circular(8),
                     child: Padding(
                       padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 4),
@@ -276,9 +332,7 @@ class _TermsAcceptanceDialogState extends State<TermsAcceptanceDialog>
                             width: 24,
                             child: Checkbox(
                               value: _agreed,
-                              onChanged: (_isLoading || _hasError || _isSubmitting)
-                                  ? null
-                                  : (v) => setState(() => _agreed = v ?? false),
+                              onChanged: _canAgree ? (v) => setState(() => _agreed = v ?? false) : null,
                               activeColor: AppColors.tealText,
                               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
                             ),
@@ -323,7 +377,7 @@ class _TermsAcceptanceDialogState extends State<TermsAcceptanceDialog>
                       Expanded(
                         flex: 2,
                         child: ElevatedButton(
-                          onPressed: (_agreed && !_isLoading && !_hasError && !_isSubmitting)
+                          onPressed: (_agreed && _canAgree)
                               ? _handleSubmit
                               : null,
                           style: ElevatedButton.styleFrom(
@@ -363,8 +417,34 @@ class _TermsAcceptanceDialogState extends State<TermsAcceptanceDialog>
     );
   }
 
-  Widget _buildDocumentScrollArea(String textContent) {
+  Widget _docTab(String text, bool read) => Tab(
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Flexible(child: Text(text, overflow: TextOverflow.ellipsis)),
+          if (read) ...[
+            const SizedBox(width: 6),
+            Icon(Icons.check_circle_rounded, size: 16, color: AppColors.tealText),
+          ],
+        ]),
+      );
+
+  Widget _readChip(String text, bool read) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        decoration: BoxDecoration(
+          color: read ? AppColors.tealText : Colors.white,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: read ? AppColors.tealText : Colors.grey.shade300),
+        ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Icon(read ? Icons.check_rounded : Icons.more_horiz_rounded, size: 12, color: read ? Colors.white : Colors.grey.shade500),
+          const SizedBox(width: 3),
+          Text(text, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: read ? Colors.white : Colors.grey.shade600)),
+        ]),
+      );
+
+  Widget _buildDocumentScrollArea(String textContent, ScrollController controller) {
+    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted) _checkRead(); });
     return SingleChildScrollView(
+      controller: controller,
       physics: const BouncingScrollPhysics(),
       padding: const EdgeInsets.fromLTRB(24, 16, 24, 24),
       child: SelectableText(

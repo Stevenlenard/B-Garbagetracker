@@ -187,6 +187,21 @@ class _FileComplaintScreenState extends State<FileComplaintScreen> {
                         ? const CircularProgressIndicator(color: Colors.white)
                         : const Text("Submit Complaint", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16)),
                     ),
+                    const SizedBox(height: 12),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(Icons.info_outline_rounded, size: 15, color: Colors.grey.shade500),
+                        const SizedBox(width: 6),
+                        Flexible(
+                          child: Text(
+                            "You can send up to 3 reports in 24 hours.",
+                            textAlign: TextAlign.center,
+                            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Colors.grey.shade600),
+                          ),
+                        ),
+                      ],
+                    ),
                   ],
                 ),
               ),

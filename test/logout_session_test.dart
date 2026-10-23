@@ -128,12 +128,9 @@ void main() {
       expect(await choose(tester, 'Cancel'), LogoutChoice.cancel);
     });
 
-    testWidgets('Logout and Remember Login', (WidgetTester tester) async {
-      expect(await choose(tester, 'Logout and Remember Login'), LogoutChoice.remember);
-    });
-
-    testWidgets('Logout and Forget Login', (WidgetTester tester) async {
-      expect(await choose(tester, 'Logout and Forget Login'), LogoutChoice.forget);
+    testWidgets('Log out keeps what Remember me saved at sign-in (no second question)', (WidgetTester tester) async {
+      expect(await choose(tester, 'Log out'), LogoutChoice.remember);
+      expect(find.text('Logout and Forget Login'), findsNothing);
     });
   });
 }

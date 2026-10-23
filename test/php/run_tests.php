@@ -251,6 +251,14 @@ $mail = is_file($state . '.mail') ? file_get_contents($state . '.mail') : '';
 check('an admin e-mail was prepared for the complaint', $mail !== '');
 check('HTML in a complaint is escaped in the admin e-mail', $mail !== '' && strpos($mail, '<img') === false && strpos($mail, '&lt;img') !== false);
 
+// Anti-spam: 3 reports per resident in 24 hours (two are stored above: the first and the escaped HTML one).
+$r = call('file_complaint.php', null, ['resident_id' => (string)$residentId, 'category' => 'Other', 'description' => 'Third report']);
+check('a third report within 24 hours is accepted', ($r['json']['success'] ?? false) === true, $r['raw'] ?? '');
+$before = count(db()['complaints']);
+$r = call('file_complaint.php', null, ['resident_id' => (string)$residentId, 'category' => 'Other', 'description' => 'Fourth report']);
+check('a fourth report within 24 hours is refused with a clear message', ($r['json']['success'] ?? true) === false
+    && ($r['json']['limit_reached'] ?? false) === true && count(db()['complaints']) === $before, $r['raw'] ?? '');
+
 begin('Complaint review and resolution');
 call('register.php', $goodResident);
 $residentId = db()['residents'][0]['resident_id'];

@@ -929,7 +929,7 @@ const List<FaqEntry> faqKnowledgeBase = <FaqEntry>[
   FaqEntry(
     id: 'file_complaint',
     question: 'How do I report a missed collection?',
-    answer: 'Go to Report Complaints and tap New Complaint. Choose a category (Uncollected Garbage, Spilled Waste, Driver Behavior, Schedule Issue or Other), your purok, and describe the problem. The barangay will review it.',
+    answer: 'Go to Report Complaints and tap New Complaint. Choose a category (Uncollected Garbage, Spilled Waste, Driver Behavior, Schedule Issue or Other), your purok, and describe the problem. The barangay will review it. You can send up to 3 reports in 24 hours.',
     roles: _resident,
     keywords: <String, int>{'complaint': 3, 'report': 2, 'reklamo': 3, 'missed': 3, 'uncollected': 3, 'hindi nakolekta': 4, 'hindi kinuha': 4, 'spilled': 2, 'file': 1, 'isumbong': 3, 'sumbong': 3, 'problem': 1, 'problema': 1},
     action: BotAction.fileComplaint,

@@ -847,6 +847,13 @@ class _ResidentSettingsScreenState extends State<ResidentSettingsScreen> with Ti
               _buildProfileRow("Contact Number", _user?.phone ?? "Not set", labelFontSize: labelFontSize, valueFontSize: valueFontSize),
               const Divider(height: 32, thickness: 0.5),
               _buildProfileRow("Resident Area", _user?.purok ?? "Not set", labelFontSize: labelFontSize, valueFontSize: valueFontSize),
+              const Divider(height: 32, thickness: 0.5),
+              _buildProfileRow(
+                "Complete Address",
+                (_user?.completeAddress ?? '').trim().isEmpty ? "Not set" : _user!.completeAddress!.trim(),
+                labelFontSize: labelFontSize,
+                valueFontSize: valueFontSize,
+              ),
             ],
           ),
         ),

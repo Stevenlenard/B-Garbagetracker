@@ -105,6 +105,7 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
   StreamSubscription<Map<String, CollectionSchedule>>? _scheduleSub;
   int _inProgressComplaints = 0;
   int _residentsCount = 0;
+  bool _residentsLoaded = false;
   int _unreadNotificationsCount = 0;
   double _coveragePercent = 0.0; // collection areas with a verified visit in the last 7 days
   int _coverageVisited = 0;
@@ -376,14 +377,27 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
     debugPrint("[REFRESH] Refresh sequence complete.");
   }
 
-  Future<void> _fetchUserCounts() async {
+  /// Residents count from MySQL. A failed request (e.g. the sign-in token is not ready yet when the
+  /// page opens) is retried a few times; until a real answer arrives the card shows "—", never 0.
+  Future<void> _fetchUserCounts({int attempt = 0}) async {
     try {
       final response = await _apiService.getUsers();
       if (response.data['success'] == true) {
         final List residents = response.data['residents'] ?? [];
-        if (mounted) setState(() => _residentsCount = residents.length);
+        if (mounted) {
+          setState(() {
+            _residentsCount = residents.length;
+            _residentsLoaded = true;
+          });
+        }
+        return;
       }
     } catch (e) { debugPrint("Error fetching user counts: $e"); }
+    if (attempt < 3 && mounted) {
+      Future<void>.delayed(Duration(seconds: 2 + attempt * 3), () {
+        if (mounted) _fetchUserCounts(attempt: attempt + 1);
+      });
+    }
   }
 
   void _listenToUsersPresence() {
@@ -2152,7 +2166,7 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
                 : "Route Coverage · $_coverageVisited/$_coverageAreas ${_coverageScheduled ? 'scheduled' : 'areas'}",
             "${_coveragePercent.round()}%",
             Icons.map_rounded, const Color(0xFFFB8C00), period: _period.label),
-        _buildModernStatCard("Total Residents", "$_residentsCount",
+        _buildModernStatCard("Total Residents", _residentsLoaded ? "$_residentsCount" : "—",
             Icons.people_alt_rounded, const Color(0xFF8E24AA), period: "All registered"),
       ],
     );

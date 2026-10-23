@@ -201,6 +201,14 @@ class _DriverRegisterScreenState extends State<DriverRegisterScreen> {
       _setErrorWithTimer('username', 'err_username_reg');
       return;
     }
+    if (RegExp(r'\s').hasMatch(_usernameController.text)) {
+      _setErrorWithTimer('username', 'err_username_space');
+      return;
+    }
+    if (val.length < 3) {
+      _setErrorWithTimer('username', 'err_username_length');
+      return;
+    }
     try {
       final res = await _apiService.checkUsername(val);
       if (res.data['success'] == true) {
@@ -451,7 +459,7 @@ class _DriverRegisterScreenState extends State<DriverRegisterScreen> {
                                       children: [
                                         _buildSectionHeader(Icons.lock_outline_rounded, AppLocalizations.get('credentials')),
                                         const SizedBox(height: 8),
-                                        _buildInput(_usernameController, AppLocalizations.get('username'), AppLocalizations.get('username'), icon: Icons.person_outline_rounded, focus: _usernameFocus, error: _usernameError),
+                                        _buildInput(_usernameController, AppLocalizations.get('username'), AppLocalizations.get('username_hint'), icon: Icons.person_outline_rounded, focus: _usernameFocus, error: _usernameError),
                                         _buildInput(_emailController, AppLocalizations.get('email'), AppLocalizations.get('email'), icon: Icons.email_outlined, focus: _emailFocus, error: _emailError),
                                         _buildInput(_passwordController, AppLocalizations.get('password'), AppLocalizations.get('password'), isPass: true, obs: _obs1, onToggle: () => setState(() => _obs1 = !_obs1), icon: Icons.lock_outline_rounded, focus: _passwordFocus, error: _passwordError),
                                         _buildInput(_confirmPasswordController, AppLocalizations.get('confirm_password'), AppLocalizations.get('confirm_password'), isPass: true, obs: _obs2, onToggle: () => setState(() => _obs2 = !_obs2), icon: Icons.lock_clock_outlined, focus: _confirmPasswordFocus, error: _confirmPasswordError),
@@ -712,7 +720,7 @@ class _DriverRegisterScreenState extends State<DriverRegisterScreen> {
           child: TextFormField(
             controller: ctrl, focusNode: focus, obscureText: obs, textInputAction: action,
             cursorColor: const Color(0xFF424242),
-            inputFormatters: label.contains(AppLocalizations.get('contact_number')) ? [FilteringTextInputFormatter.digitsOnly, LengthLimitingTextInputFormatter(11)] : null,
+            inputFormatters: label.contains(AppLocalizations.get('contact_number')) ? [FilteringTextInputFormatter.digitsOnly, LengthLimitingTextInputFormatter(11)] : (identical(ctrl, _usernameController) ? [FilteringTextInputFormatter.deny(RegExp(r'\s')), LengthLimitingTextInputFormatter(50)] : null),
             style: ResponsiveText.inputText(context),
             onFieldSubmitted: (_) { if(action == TextInputAction.done) _submitRequest(); },
             decoration: InputDecoration(
