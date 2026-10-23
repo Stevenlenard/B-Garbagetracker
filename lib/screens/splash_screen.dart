@@ -166,7 +166,8 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
             }
 
             if (mounted) {
-              Navigator.pushReplacementNamed(context, route, arguments: user.toJson());
+              // The restored page becomes the only page (the public map must not stay underneath).
+              Navigator.pushNamedAndRemoveUntil(context, route, (Route<dynamic> r) => false, arguments: user.toJson());
             }
           } else {
             debugPrint("[AUTH DEBUG] Auto-login result: FAILED (No active session or Remember Me disabled)");

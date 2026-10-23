@@ -257,12 +257,14 @@ class _LoginScreenState extends State<LoginScreen> {
     }
     if (!mounted) return;
     CustomSnackBar.show(context, message: AppLocalizations.get('welcome_name').replaceFirst('{name}', name.toString()));
+    // The dashboard becomes the only page: on the Web the public map ('/') sits under the login
+    // page, and leaving it in the stack let a stray "back" or pop drop the user onto the public site.
     if (role == 'admin') {
-      Navigator.pushReplacementNamed(context, '/admin_dashboard');
+      Navigator.pushNamedAndRemoveUntil(context, '/admin_dashboard', (Route<dynamic> r) => false);
     } else if (role == 'driver') {
-      Navigator.pushReplacementNamed(context, '/driver_dashboard', arguments: user);
+      Navigator.pushNamedAndRemoveUntil(context, '/driver_dashboard', (Route<dynamic> r) => false, arguments: user);
     } else if (role == 'resident') {
-      Navigator.pushReplacementNamed(context, '/resident_dashboard', arguments: user);
+      Navigator.pushNamedAndRemoveUntil(context, '/resident_dashboard', (Route<dynamic> r) => false, arguments: user);
     }
   }
 

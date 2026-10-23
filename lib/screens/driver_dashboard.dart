@@ -287,8 +287,12 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
             barrierColor: Colors.black.withOpacity(0.1),
             barrierDismissible: false,
             builder: (context) {
+              // Close THIS dialog only, and only while it is still open: a plain pop could close the page
+              // underneath (e.g. the admin dashboard) when the dialog was already dismissed.
+              final ModalRoute<dynamic>? autoRoute = ModalRoute.of(context);
+              final NavigatorState autoNav = Navigator.of(context);
               Future.delayed(const Duration(milliseconds: 1500), () {
-                if (Navigator.canPop(context)) Navigator.pop(context);
+                if (autoRoute != null && autoRoute.isActive) autoNav.removeRoute(autoRoute);
               });
               return Center(
                 child: Container(
