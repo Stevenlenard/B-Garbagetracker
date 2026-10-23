@@ -1,3 +1,4 @@
+import '../widgets/period_selector.dart';
 import '../utils/route_history_navigation.dart';
 import '../utils/trip_links.dart';
 import '../utils/eta_evaluation.dart';
@@ -87,10 +88,19 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
   int _residentComplaintsTotal = 0;
   int _residentComplaintsUnresolved = 0;
   String _selectedArea = "All Areas";
-  DateTimeRange _selectedDateRange = DateTimeRange(
-    start: DateTime.now().subtract(const Duration(days: 30)),
-    end: DateTime.now(),
-  );
+  // Period (same presets as the Dashboard and Route History). Analytics opens on the last 30 days:
+  // trends, regression and moving averages need more than one day of trips.
+  ReportPeriod _period = ReportPeriod.lastDays(30);
+  DateTimeRange _selectedDateRange = ReportPeriod.lastDays(30).range;
+
+  void _applyPeriod(ReportPeriod p) {
+    setState(() {
+      _period = p;
+      _selectedDateRange = p.range;
+      _isDateRange = true;
+    });
+    refreshAllData();
+  }
 
   bool _isDateRange = true;
 
@@ -2294,9 +2304,9 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
             ),
             const Spacer(),
             _buildAreaDropdown(),
-            const SizedBox(width: 32),
-            _filterChip(Icons.calendar_today_rounded, dateLabel, onTap: () => _showDateRangePicker(context)),
-            const SizedBox(width: 48),
+            const SizedBox(width: 24),
+            Tooltip(message: dateLabel, child: PeriodSelector(value: _period, onChanged: _applyPeriod)),
+            const SizedBox(width: 24),
             ElevatedButton.icon(
               onPressed: () => _showExportDialog(context),
               icon: const Icon(Icons.download_rounded, size: 18),
@@ -2420,8 +2430,13 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
       child: Row(
         children: [
           _buildAreaDropdown(),
-          const SizedBox(width: 24),
-          _filterChip(Icons.calendar_today_rounded, dateLabel, onTap: () => _showDateRangePicker(context)),
+          const SizedBox(width: 12),
+          Flexible(
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Tooltip(message: dateLabel, child: PeriodSelector(value: _period, compact: true, onChanged: _applyPeriod)),
+            ),
+          ),
         ],
       ),
     );
@@ -2467,41 +2482,6 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
           const Icon(Icons.location_on_rounded, size: 18, color: Color(0xFF00897B)),
           const SizedBox(width: 8),
           Text(_selectedArea, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 14, color: Color(0xFF1A1A1A))),
-          const SizedBox(width: 4),
-          const Icon(Icons.arrow_drop_down_rounded, size: 24, color: Colors.grey),
-        ],
-      ),
-    );
-  }
-
-  Future<void> _showDateRangePicker(BuildContext context) async {
-    final AppDatePick? pick = await showAppDateRangePicker(context, initialRange: _selectedDateRange, clearable: true);
-    if (pick == null) return; // cancelled: keep the current period
-
-    if (pick.range != null) {
-      setState(() { _selectedDateRange = pick.range!; _isDateRange = true; });
-    } else {
-      // Clear: back to the default last 30 days
-      setState(() {
-        _selectedDateRange = DateTimeRange(
-          start: DateTime.now().subtract(const Duration(days: 30)),
-          end: DateTime.now(),
-        );
-        _isDateRange = true;
-      });
-    }
-    refreshAllData();
-  }
-
-  Widget _filterChip(IconData icon, String label, {VoidCallback? onTap}) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 18, color: const Color(0xFF00897B)),
-          const SizedBox(width: 8),
-          Text(label, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 14, color: Color(0xFF1A1A1A))),
           const SizedBox(width: 4),
           const Icon(Icons.arrow_drop_down_rounded, size: 24, color: Colors.grey),
         ],

@@ -1,3 +1,5 @@
+import '../services/collection_schedule_service.dart';
+import '../widgets/period_selector.dart';
 import '../utils/rtdb_map.dart';
 import '../services/server_clock.dart';
 import '../widgets/logout_choice_dialog.dart';
@@ -96,6 +98,11 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
   Map<dynamic, dynamic>? _rawUsers; // latest raw `users`, re-evaluated as it ages
   String _fleetSignature = '';
   int _pendingComplaints = 0;
+  // Period of the Route Coverage card (shared presets: Today / 7 days / 30 days / custom).
+  ReportPeriod _period = ReportPeriod.today();
+  bool _coverageScheduled = false;
+  Map<String, CollectionSchedule> _schedules = const <String, CollectionSchedule>{};
+  StreamSubscription<Map<String, CollectionSchedule>>? _scheduleSub;
   int _inProgressComplaints = 0;
   int _residentsCount = 0;
   int _unreadNotificationsCount = 0;
@@ -237,6 +244,7 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
     _circleController.dispose();
     _refreshRotationController.dispose();
     _clockTimer?.cancel();
+    _scheduleSub?.cancel();
     _userSubscription?.cancel();
     _usersPresenceSubscription?.cancel();
     _fleetAgingTimer?.cancel();
@@ -580,8 +588,12 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
       }
     });
 
-    // Route Coverage = share of the collection areas with a verified visit in the last 7 days
+    // Route Coverage = share of the collection areas with a verified visit in the selected period
     // (the same visit rule as Analytics and Purok Coverage).
+    _scheduleSub = CollectionScheduleService.watch().listen((Map<String, CollectionSchedule> s) {
+      _schedules = s;
+      _updateRouteCoverage();
+    }, onError: (Object _) {});
     _database.ref('driver_routes').onValue.listen((event) {
       _coverageTrips = (event.snapshot.exists && event.snapshot.value is Map) ? event.snapshot.value as Map : const <dynamic, dynamic>{};
       _updateRouteCoverage();
@@ -2099,6 +2111,27 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
     final double aspectRatio = isMobile
         ? 1.50
         : (isTablet ? 1.80 : 2.10);
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: <Widget>[
+      Align(
+        alignment: Alignment.centerRight,
+        child: SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: PeriodSelector(
+            value: _period,
+            compact: isMobile,
+            onChanged: (ReportPeriod p) {
+              setState(() => _period = p);
+              _updateRouteCoverage();
+            },
+          ),
+        ),
+      ),
+      const SizedBox(height: 10),
+      _statGridCards(isMobile, isTablet, aspectRatio),
+    ]);
+  }
+
+  Widget _statGridCards(bool isMobile, bool isTablet, double aspectRatio) {
     return GridView.count(
       shrinkWrap: true,
       padding: EdgeInsets.zero,
@@ -2114,9 +2147,11 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
         _buildModernStatCard("Pending Issues", "$_pendingComplaints",
             Icons.warning_amber_rounded, const Color(0xFFE53935), period: "Open now"),
         _buildModernStatCard(
-            _coverageAreas == 0 ? "Route Coverage" : "Route Coverage · $_coverageVisited/$_coverageAreas areas",
+            _coverageAreas == 0
+                ? "Route Coverage"
+                : "Route Coverage · $_coverageVisited/$_coverageAreas ${_coverageScheduled ? 'scheduled' : 'areas'}",
             "${_coveragePercent.round()}%",
-            Icons.map_rounded, const Color(0xFFFB8C00), period: "Last 7 days"),
+            Icons.map_rounded, const Color(0xFFFB8C00), period: _period.label),
         _buildModernStatCard("Total Residents", "$_residentsCount",
             Icons.people_alt_rounded, const Color(0xFF8E24AA), period: "All registered"),
       ],
@@ -2153,21 +2188,34 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
     final List<AreaGeofence> areas = _coverageGeofences!;
     final Set<String> stops = areas.where((AreaGeofence g) => g.isTruckStop).map((AreaGeofence g) => g.name).toSet();
     if (stops.isEmpty) return;
-    final DateTime now = DateTime.now();
-    final DateTime today = DateTime(now.year, now.month, now.day);
+    // The selected period (same presets as Analytics and Route History). A single day is measured
+    // against the areas scheduled for collection that weekday, when a schedule exists: not every area
+    // is collected every day.
+    final ReportPeriod period = _period.refreshed();
     final VisitSummary v = CollectionVisits.detect(
       trips: _coverageTrips,
       areas: areas,
-      start: today.subtract(const Duration(days: 6)),
-      end: today,
+      start: period.startDay,
+      end: period.endDay,
     );
     final Map<String, int> counts = v.countByArea();
-    final int visited = stops.where((String a) => (counts[a] ?? 0) > 0).length;
+    Set<String> target = stops;
+    bool scheduled = false;
+    if (period.isSingleDay && _schedules.isNotEmpty) {
+      final int weekday = period.startDay.weekday;
+      final Set<String> due = stops.where((String a) => CollectionScheduleService.forPurok(_schedules, a)?.days.contains(weekday) ?? false).toSet();
+      if (due.isNotEmpty) {
+        target = due;
+        scheduled = true;
+      }
+    }
+    final int visited = target.where((String a) => (counts[a] ?? 0) > 0).length;
     if (!mounted) return;
     setState(() {
       _coverageVisited = visited;
-      _coverageAreas = stops.length;
-      _coveragePercent = visited * 100.0 / stops.length;
+      _coverageAreas = target.length;
+      _coverageScheduled = scheduled;
+      _coveragePercent = visited * 100.0 / target.length;
     });
   }
 

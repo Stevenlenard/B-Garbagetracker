@@ -27,6 +27,8 @@ import '../utils/route_export_manager.dart';
 import '../widgets/custom_snackbar.dart';
 import '../api/api_service.dart';
 import '../widgets/map_style_toggle.dart';
+import '../widgets/period_selector.dart';
+import '../utils/history_playback.dart' show HistoryDates;
 import '../widgets/mapbox_gate.dart';
 import '../utils/map_colors.dart';
 import '../widgets/app_date_range_picker.dart';
@@ -72,6 +74,8 @@ class _RouteHistoryScreenState extends State<RouteHistoryScreen> with TickerProv
   DriverTrip? _analyzedTrip;
   // Road-snapped line of the selected trip (Map Matching), for the exact display points it was made from.
   MatchedRoute? _matched;
+  // Period shown (same presets as the Dashboard and Analytics); Today by default.
+  ReportPeriod _period = ReportPeriod.today();
   // Balintawak street network overlay (assets/maps/balintawak_roads.json), off by default.
   bool _showStreets = false;
   static String? _streetsGeoJson;
@@ -152,13 +156,16 @@ class _RouteHistoryScreenState extends State<RouteHistoryScreen> with TickerProv
       final DateTime targetDate = (_effectiveInitialTrip?.fullTime ?? _effectiveInitialTrip?.startTime) ?? DateTime.now();
       _startDate = DateTime(targetDate.year, targetDate.month, targetDate.day, 0, 0, 0);
       _endDate = DateTime(targetDate.year, targetDate.month, targetDate.day, 23, 59, 59);
+      _period = ReportPeriod.custom(DateTimeRange(start: _startDate!, end: _endDate!));
       _selectedDriverId = "all";
       _selectedTruckId = "all";
       _selectedArea = "all";
       _selectedStatus = "all";
     } else {
-      _startDate = DateTime.now().subtract(const Duration(days: 7));
-      _endDate = DateTime.now();
+      final ReportPeriod p = ReportPeriod.today();
+      _period = p;
+      _startDate = p.range.start;
+      _endDate = p.range.end;
     }
     _loadUserAndData();
   }
@@ -181,6 +188,7 @@ class _RouteHistoryScreenState extends State<RouteHistoryScreen> with TickerProv
         final DateTime targetDate = (_effectiveInitialTrip?.fullTime ?? _effectiveInitialTrip?.startTime) ?? DateTime.now();
         _startDate = DateTime(targetDate.year, targetDate.month, targetDate.day, 0, 0, 0);
         _endDate = DateTime(targetDate.year, targetDate.month, targetDate.day, 23, 59, 59);
+        _period = ReportPeriod.custom(DateTimeRange(start: _startDate!, end: _endDate!));
         _selectedDriverId = "all";
         _selectedTruckId = "all";
         _selectedArea = "all";
@@ -379,8 +387,10 @@ class _RouteHistoryScreenState extends State<RouteHistoryScreen> with TickerProv
 
   void _clearFilters() {
     setState(() {
-      _startDate = DateTime.now().subtract(const Duration(days: 7));
-      _endDate = DateTime.now();
+      final ReportPeriod p = ReportPeriod.today();
+      _period = p;
+      _startDate = p.range.start;
+      _endDate = p.range.end;
       _selectedDriverId = "all";
       _selectedTruckId = "all";
       _selectedArea = "all";
@@ -587,13 +597,17 @@ class _RouteHistoryScreenState extends State<RouteHistoryScreen> with TickerProv
     );
     final DateTimeRange? range = pick?.range;
 
-    if (range != null) {
-      setState(() {
-        _startDate = range.start;
-        _endDate = range.end;
-      });
-      _fetchTrips();
-    }
+    if (range != null) _applyPeriod(ReportPeriod.custom(range));
+  }
+
+  /// Shows the trips of [p] (shared presets: Today / 7 days / 30 days / custom).
+  void _applyPeriod(ReportPeriod p) {
+    setState(() {
+      _period = p;
+      _startDate = p.range.start;
+      _endDate = p.range.end;
+    });
+    _fetchTrips();
   }
 
   Future<void> _updateReplayMapPosition() async {
@@ -1437,13 +1451,9 @@ class _RouteHistoryScreenState extends State<RouteHistoryScreen> with TickerProv
         ? "${DateFormat('MMM d').format(_startDate!)} – ${DateFormat('MMM d, yyyy').format(_endDate ?? DateTime.now())}"
         : "Select dates";
     final List<Widget> filters = [
-      Material(
-        color: Colors.transparent,
-        child: InkWell(
-          borderRadius: BorderRadius.circular(12),
-          onTap: _showAestheticDateRangePicker,
-          child: _pillBody(icon: Icons.calendar_month_rounded, label: dateLabel, trailing: true),
-        ),
+      Tooltip(
+        message: dateLabel,
+        child: PeriodSelector(value: _period, compact: isMobile, maxDays: HistoryDates.maxRangeDays, onChanged: _applyPeriod),
       ),
       _buildDropdownFilter("Driver", _selectedDriverId, _driverOptions.map((d) => DropdownMenuItem(value: d['id']!, child: Text(d['name']!, overflow: TextOverflow.ellipsis))).toList(), (val) {
         if (val != null) {
