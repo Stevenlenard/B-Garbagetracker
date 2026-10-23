@@ -4,6 +4,7 @@ import 'analytics_screen.dart' show showLoadHistoryDialog;
 import '../utils/load_history.dart';
 import '../utils/trip_links.dart';
 import '../utils/route_geometry.dart';
+import '../utils/replay_timeline.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
@@ -593,11 +594,9 @@ class _RouteHistoryScreenState extends State<RouteHistoryScreen> with TickerProv
   Future<void> _updateReplayMapPosition() async {
     if (_mapboxMap == null || _analyzedTrip == null || _analyzedTrip!.points.isEmpty) return;
     final points = DriverRouteHistoryService.smoothForDisplay(_analyzedTrip!.points);
-    final int idx = ((points.length - 1) * _replayProgress).clamp(0, points.length - 1).toInt();
     final MatchedRoute? road = _roadLineFor(_analyzedTrip!, points);
-    final List<double> current = road != null
-        ? road.line[road.vertexOfPoint[idx]]
-        : <double>[points[idx].longitude, points[idx].latitude];
+    final ReplayPose pose = _replayTimeline(_analyzedTrip!).at(_replayProgress);
+    final List<double> current = pose.position;
 
     try {
       final style = _mapboxMap!.style;
@@ -606,9 +605,7 @@ class _RouteHistoryScreenState extends State<RouteHistoryScreen> with TickerProv
       const String markersSourceId = "trip-markers-source";
 
       // Replay route line coordinates up to current index
-      final List<List<double>> replayCoords = road != null
-          ? road.line.sublist(0, road.vertexOfPoint[idx] + 1)
-          : points.sublist(0, idx + 1).map((p) => [p.longitude, p.latitude]).toList();
+      final List<List<double>> replayCoords = pose.trail;
       final replayFeature = {
         "type": "FeatureCollection",
         "features": replayCoords.length >= 2 ? [
@@ -733,9 +730,18 @@ class _RouteHistoryScreenState extends State<RouteHistoryScreen> with TickerProv
     if (_analyzedTrip == null || _analyzedTrip!.points.isEmpty) {
       return DateTime.now();
     }
-    final points = _analyzedTrip!.points;
-    final int idx = ((points.length - 1) * _replayProgress).clamp(0, points.length - 1).toInt();
-    return points[idx].timestamp;
+    return _replayTimeline(_analyzedTrip!).at(_replayProgress).time;
+  }
+
+  /// Time-based replay of [trip] along the line the map draws (road-matched when available).
+  ReplayTimeline _replayTimeline(DriverTrip trip) {
+    final List<GpsPoint> pts = DriverRouteHistoryService.smoothForDisplay(trip.points);
+    final MatchedRoute? road = _roadLineFor(trip, pts);
+    return ReplayTimeline(
+      timesMs: pts.map((p) => p.timestamp.millisecondsSinceEpoch).toList(),
+      line: road?.line ?? pts.map((p) => <double>[p.longitude, p.latitude]).toList(),
+      vertexOfPoint: road?.vertexOfPoint ?? List<int>.generate(pts.length, (int i) => i),
+    );
   }
 
   // --- MAPBOX MAP CREATION & ROUTE DRAWING ---
@@ -1489,68 +1495,147 @@ class _RouteHistoryScreenState extends State<RouteHistoryScreen> with TickerProv
 
   void _confirmDeleteTrip(DriverTrip trip) {
     if (_isResident) return; // read-only: residents cannot delete
+    const Color danger = Color(0xFFD93025);
+    const Color ink = Color(0xFF1F2A27);
+    final Color truckColor = TruckIdentity.color(trip.truckId);
+    final String when = trip.endTime != null
+        ? '${DateFormat('MMM d, yyyy · h:mm a').format(trip.startTime)} – ${DateFormat('h:mm a').format(trip.endTime!)}'
+        : DateFormat('MMM d, yyyy · h:mm a').format(trip.startTime);
+
+    Widget detail(IconData icon, String label, String value) => Padding(
+          padding: const EdgeInsets.symmetric(vertical: 5),
+          child: Row(
+            children: [
+              Icon(icon, size: 17, color: Colors.grey.shade500),
+              const SizedBox(width: 10),
+              SizedBox(width: 64, child: Text(label, style: TextStyle(fontSize: 12.5, color: Colors.grey.shade600))),
+              Expanded(
+                child: Text(value, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: ink), overflow: TextOverflow.ellipsis),
+              ),
+            ],
+          ),
+        );
+
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: const Row(
-          children: [
-            Icon(Icons.delete_forever_rounded, color: Colors.redAccent, size: 24),
-            SizedBox(width: 8),
-            Text("Delete Trip", style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
-          ],
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              "Are you sure you want to delete this trip record?",
-              style: TextStyle(fontSize: 14, color: Colors.grey.shade800, fontWeight: FontWeight.w600),
+      barrierColor: Colors.black.withValues(alpha: 0.45),
+      builder: (context) => Dialog(
+        backgroundColor: Colors.white,
+        surfaceTintColor: Colors.transparent,
+        insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 420),
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(24, 26, 24, 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 60,
+                  height: 60,
+                  decoration: BoxDecoration(color: danger.withValues(alpha: 0.10), shape: BoxShape.circle),
+                  child: const Icon(Icons.delete_outline_rounded, color: danger, size: 30),
+                ),
+                const SizedBox(height: 16),
+                const Text("Delete this trip?", textAlign: TextAlign.center, style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900, color: ink)),
+                const SizedBox(height: 6),
+                Text("Its recorded GPS route will be removed from Route History.",
+                    textAlign: TextAlign.center, style: TextStyle(fontSize: 13.5, height: 1.4, color: Colors.grey.shade600)),
+                const SizedBox(height: 18),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.fromLTRB(14, 12, 14, 10),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF6F8F7),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: const Color(0xFFE3E9E6)),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+                            decoration: BoxDecoration(color: truckColor.withValues(alpha: 0.14), borderRadius: BorderRadius.circular(8)),
+                            child: Text(trip.truckId,
+                                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: Color.lerp(truckColor, Colors.black, 0.35))),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(trip.driverName,
+                                style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: ink), overflow: TextOverflow.ellipsis),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      detail(Icons.schedule_rounded, "When", when),
+                      detail(Icons.route_rounded, "Distance", "${trip.totalDistanceKm.toStringAsFixed(1)} km"),
+                      detail(Icons.timer_outlined, "Duration", trip.formattedDuration),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(color: danger.withValues(alpha: 0.07), borderRadius: BorderRadius.circular(12)),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Icon(Icons.info_outline_rounded, size: 18, color: danger),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text.rich(
+                          TextSpan(children: [
+                            const TextSpan(text: "This cannot be undone. ", style: TextStyle(fontWeight: FontWeight.w800, color: danger)),
+                            TextSpan(text: "Load History and waste records for this trip are kept.", style: TextStyle(color: Colors.grey.shade800)),
+                          ]),
+                          style: const TextStyle(fontSize: 12.5, height: 1.4),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 20),
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton(
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: const Color(0xFF3C4A45),
+                          side: const BorderSide(color: Color(0xFFD5DDD9)),
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                        ),
+                        onPressed: () => Navigator.pop(context),
+                        child: const Text("Cancel", style: TextStyle(fontWeight: FontWeight.w700)),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: FilledButton.icon(
+                        style: FilledButton.styleFrom(
+                          backgroundColor: danger,
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                        ),
+                        onPressed: () async {
+                          Navigator.pop(context);
+                          await _performDeleteTrip(trip);
+                        },
+                        icon: const Icon(Icons.delete_rounded, size: 18),
+                        label: const Text("Delete trip", style: TextStyle(fontWeight: FontWeight.w800)),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
             ),
-            const SizedBox(height: 12),
-            Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: const Color(0xFFF5F5F5),
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text("Driver: ${trip.driverName}", style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
-                  const SizedBox(height: 4),
-                  Text("Truck: ${trip.truckId}", style: const TextStyle(fontSize: 12, color: Colors.grey)),
-                  const SizedBox(height: 4),
-                  Text("Date: ${DateFormat('MMM d, yyyy · h:mm a').format(trip.startTime)}", style: const TextStyle(fontSize: 12, color: Colors.grey)),
-                ],
-              ),
-            ),
-            const SizedBox(height: 12),
-            const Text(
-              "This action cannot be undone and will permanently remove this trip from history.",
-              style: TextStyle(fontSize: 12, color: Colors.red, fontWeight: FontWeight.bold),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text("Cancel", style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold)),
           ),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.red,
-              foregroundColor: Colors.white,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-            ),
-            onPressed: () async {
-              Navigator.pop(context);
-              await _performDeleteTrip(trip);
-            },
-            child: const Text("Delete Trip", style: TextStyle(fontWeight: FontWeight.bold)),
-          ),
-        ],
+        ),
       ),
     );
   }
