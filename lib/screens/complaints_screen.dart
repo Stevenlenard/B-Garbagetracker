@@ -446,8 +446,10 @@ class _ComplaintsScreenState extends State<ComplaintsScreen> {
           ),
         ),
       ),
-      const SizedBox(width: 10),
-      _viewToggle(),
+      if (MediaQuery.sizeOf(context).width >= _tableMinWidth) ...<Widget>[
+        const SizedBox(width: 10),
+        _viewToggle(),
+      ],
       const SizedBox(width: 10),
       Material(
         color: filters > 0 ? const Color(0xFFE6F4F1) : Colors.white,
@@ -699,7 +701,9 @@ class _ComplaintsScreenState extends State<ComplaintsScreen> {
 
   // Table (default on wide screens) or Cards; the admin can switch.
   bool? _tableView;
-  bool _useTable(double width) => _tableView ?? width >= 1000;
+  // Phones always get the cards: a table is too wide to read there.
+  static const double _tableMinWidth = 700;
+  bool _useTable(double width) => width >= _tableMinWidth && (_tableView ?? width >= 1000);
 
   Widget _viewToggle() {
     final bool table = _useTable(MediaQuery.sizeOf(context).width);
@@ -730,6 +734,10 @@ class _ComplaintsScreenState extends State<ComplaintsScreen> {
     );
   }
 
+  /// Resident complaints have short numbers (#23); driver reports have long database keys, shown as
+  /// their last 5 characters (the full key is in the tooltip and the details).
+  static String _shortRef(String id) => int.tryParse(id) != null || id.length <= 6 ? '#$id' : '#${id.substring(id.length - 5).toUpperCase()}';
+
   Widget _complaintTable(List<ComplaintRecord> items) {
     final bool resident = _c.query.source == ComplaintSource.resident;
     String label(ComplaintStatus s) => switch (s) {
@@ -751,7 +759,10 @@ class _ComplaintsScreenState extends State<ComplaintsScreen> {
           label: '#',
           flex: 1,
           sortKey: (ComplaintRecord r) => int.tryParse(r.id) ?? 0,
-          cell: (ComplaintRecord r, int i) => Text('#${r.id}', style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w900, color: _teal)),
+          cell: (ComplaintRecord r, int i) => Tooltip(
+            message: '#${r.id}',
+            child: Text(_shortRef(r.id), maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w900, color: _teal)),
+          ),
         ),
         AppTableColumn<ComplaintRecord>(
           label: resident ? 'Complaint' : 'Issue',

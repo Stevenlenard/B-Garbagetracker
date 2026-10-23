@@ -42,7 +42,9 @@ class _UserManagementScreenState extends State<UserManagementScreen> with Ticker
 
   // Table (default on desktop) or Cards (default on phones); the admin can switch.
   bool? _tableView;
-  bool get _useTable => _tableView ?? Responsive.isDesktop(context);
+  // Phones always get the cards: a table is too wide to read there.
+  bool get _tableAllowed => MediaQuery.sizeOf(context).width >= 700;
+  bool get _useTable => _tableAllowed && (_tableView ?? Responsive.isDesktop(context));
 
   bool _isUserPending(dynamic user) {
     final String role = (user['role'] ?? '').toString().toLowerCase().trim();
@@ -470,8 +472,10 @@ class _UserManagementScreenState extends State<UserManagementScreen> with Ticker
               ),
               const SizedBox(width: 12),
               _buildFilterChip(),
-              const SizedBox(width: 12),
-              _buildViewToggle(),
+              if (_tableAllowed) ...<Widget>[
+                const SizedBox(width: 12),
+                _buildViewToggle(),
+              ],
               const SizedBox(width: 12),
               _buildAddDriverButton(isDesktop),
             ],
