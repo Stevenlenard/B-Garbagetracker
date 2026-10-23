@@ -98,6 +98,50 @@ void main() {
     });
   });
 
+  group('GPS spikes', () {
+    Map<String, Object?> pt(double lat, double lng, int ts, {double acc = 8, double speed = 0}) =>
+        <String, Object?>{'lat': lat, 'lng': lng, 'timestamp': ts, 'accuracy': acc, 'speed': speed, 'status': 'ACTIVE', 'color': 'GREEN'};
+
+    // The first fixes of a real walk test (2026-10-23, GT-001): fixes 1-2 jump ~110 m east and are back 43 s later.
+    final List<Map> walk = <Map>[
+      pt(13.9540285, 121.1600664, 0, acc: 10.5, speed: 0.0),
+      pt(13.9535033, 121.1609617, 27865, acc: 8.4, speed: 0.0),
+      pt(13.9536083, 121.1606950, 32848, acc: 7.6, speed: 3.2),
+      pt(13.9540659, 121.1600360, 42542, acc: 38.0, speed: 3.5),
+      pt(13.9538006, 121.1599096, 96570, acc: 5.5, speed: 3.7),
+      pt(13.9537460, 121.1599349, 101357, acc: 6.1, speed: 4.0),
+      pt(13.9537085, 121.1599614, 106079, acc: 6.5, speed: 3.9),
+      pt(13.9536524, 121.1599650, 111035, acc: 6.2, speed: 4.1),
+      pt(13.9536232, 121.1599270, 115976, acc: 5.4, speed: 3.7),
+      pt(13.9536045, 121.1598804, 120787, acc: 5.1, speed: 3.8),
+      pt(13.9535975, 121.1598304, 125657, acc: 5.1, speed: 3.9),
+      pt(13.9536008, 121.1597790, 130487, acc: 5.1, speed: 4.0),
+    ];
+
+    test('a warm-up jump that goes out ~110 m and back within 43 s is not drawn', () {
+      final List<Map> drawn = RouteGeometry.smoothForDisplay(RouteGeometry.cleanPoints(walk));
+      for (final Map p in drawn) {
+        expect(RouteGeometry.distanceM(13.9540285, 121.1600664, p['lat'] as double, p['lng'] as double), lessThan(70));
+      }
+      expect(drawn.length, greaterThan(3)); // the real walk afterwards is still drawn
+    });
+
+    test('a real drive away that does not come back is kept', () {
+      final List<Map> drive = <Map>[for (int i = 0; i < 6; i++) pt(13.95 + i * 0.0005, 121.16, i * 10000, acc: 6, speed: 5)];
+      expect(RouteGeometry.smoothForDisplay(RouteGeometry.cleanPoints(drive)).last['lat'], closeTo(13.9525, 0.0001));
+    });
+
+    test('a slow out-and-back (truck backing out of a dead end) is kept', () {
+      final List<Map> uTurn = <Map>[
+        pt(13.9500, 121.16, 0), pt(13.9505, 121.16, 40000), pt(13.9500, 121.16, 80000), pt(13.9495, 121.16, 120000),
+      ];
+      expect(GpsSmoothing.withoutSpikes(uTurn
+              .map((m) => GpsSample(lat: m['lat'] as double, lng: m['lng'] as double, accuracyM: 8, timestampMs: m['timestamp'] as int))
+              .toList())
+          .length, 4);
+    });
+  });
+
   group('Map Matching', () {
     final List<GpsPoint> pts = <GpsPoint>[
       for (int i = 0; i < 5; i++) GpsPoint(latitude: 13.95 + i * 0.0006, longitude: 121.16 + 0.00002, accuracyM: 8, timestamp: DateTime.fromMillisecondsSinceEpoch(i * 10000)),

@@ -170,8 +170,18 @@ class MapMatchingService {
         },
       );
       final Object? data = res.data;
-      if (data is! Map || data['code'] != 'Ok') return null;
+      if (data is! Map) return null;
+      // A stretch no road fits is an answer, not a failure: it keeps its GPS positions.
+      if (data['code'] != 'Ok') return _Chunk.parse(const <String, Object?>{}, offset, part.length, profile);
       return _Chunk.parse(data, offset, part.length, profile);
+    } on DioException catch (e) {
+      // Mapbox answers 422 with code NoMatch / NoSegment for stretches it cannot place on a road.
+      final Object? body = e.response?.data;
+      if (body is Map && (body['code'] == 'NoMatch' || body['code'] == 'NoSegment')) {
+        return _Chunk.parse(const <String, Object?>{}, offset, part.length, profile);
+      }
+      debugPrint('[MAP MATCHING] $profile request failed: $e');
+      return null;
     } catch (e) {
       debugPrint('[MAP MATCHING] $profile request failed: $e');
       return null;

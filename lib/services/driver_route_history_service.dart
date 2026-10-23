@@ -386,22 +386,22 @@ class DriverRouteHistoryService {
     return secs == 0 ? "${mins}m" : "${mins}m ${secs}s";
   }
 
-  /// Points to DRAW for a trip: unusable fixes dropped, positions smoothed by the Kalman filter
+  /// Points to DRAW for a trip: unusable fixes and short GPS spikes dropped, positions smoothed by the Kalman filter
   /// ([GpsSmoothing]), then standing-still jitter removed ([filterStationaryGpsJitter]). Display only:
   /// distance, stops, visits and analytics use the recorded points.
   static List<GpsPoint> smoothForDisplay(List<GpsPoint> inputPoints) {
-    final List<GpsPoint> usable =
+    final List<GpsPoint> valid =
         inputPoints.where((p) => !(p.latitude == 0.0 && p.longitude == 0.0) && p.accuracyM <= 100.0).toList();
+    GpsSample sample(GpsPoint p) => GpsSample(
+          lat: p.latitude,
+          lng: p.longitude,
+          accuracyM: p.accuracyM,
+          timestampMs: p.timestamp.millisecondsSinceEpoch,
+          speedMps: p.speedKmh / 3.6,
+        );
+    final List<GpsPoint> usable = <GpsPoint>[for (final int i in GpsSmoothing.withoutSpikes(valid.map(sample).toList())) valid[i]];
     if (usable.length <= 2) return filterStationaryGpsJitter(inputPoints);
-    final List<List<double>> smooth = GpsSmoothing.kalman(usable
-        .map((p) => GpsSample(
-              lat: p.latitude,
-              lng: p.longitude,
-              accuracyM: p.accuracyM,
-              timestampMs: p.timestamp.millisecondsSinceEpoch,
-              speedMps: p.speedKmh / 3.6,
-            ))
-        .toList());
+    final List<List<double>> smooth = GpsSmoothing.kalman(usable.map(sample).toList());
     final List<GpsPoint> smoothed = <GpsPoint>[
       for (int i = 0; i < usable.length; i++)
         GpsPoint(

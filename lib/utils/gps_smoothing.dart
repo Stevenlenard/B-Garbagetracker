@@ -92,6 +92,53 @@ class GpsSmoothing {
     return out;
   }
 
+  /// A detour of at most this many fixes can be a GPS spike.
+  static const int spikeMaxFixes = 3;
+
+  /// A spike reaches at least this far (metres) from where it left...
+  static const double spikeMinReachM = 50;
+
+  /// ...comes back to within this distance of that place...
+  static const double spikeReturnM = 30;
+
+  /// ...within this time...
+  static const int spikeMaxMs = 60000;
+
+  /// ...faster (out and back) than walking pace, in m/s.
+  static const double spikeMinSpeedMps = 3;
+
+  /// Indexes of the samples that are not GPS spikes. A spike is a short out-and-back jump: up to
+  /// [spikeMaxFixes] fixes that leave a place by [spikeMinReachM] or more and are back within
+  /// [spikeReturnM] of it in under [spikeMaxMs], moving faster than [spikeMinSpeedMps] - the typical
+  /// warm-up or reflected fix that would otherwise draw a straight line to nowhere. [keep] protects a
+  /// sample (e.g. the live position) from being dropped.
+  static List<int> withoutSpikes(List<GpsSample> samples, {bool Function(int i)? keep}) {
+    final int n = samples.length;
+    final List<bool> drop = List<bool>.filled(n, false);
+    for (int i = 0; i < n - 2; i++) {
+      if (drop[i]) continue;
+      final GpsSample a = samples[i];
+      for (int len = 1; len <= spikeMaxFixes && i + len + 1 < n; len++) {
+        final GpsSample back = samples[i + len + 1];
+        final int dt = back.timestampMs - a.timestampMs;
+        if (dt <= 0 || dt > spikeMaxMs) break;
+        if (distanceM(a.lat, a.lng, back.lat, back.lng) > math.max(spikeReturnM, back.accuracyM)) continue;
+        double reach = 0;
+        bool protectedFix = false;
+        for (int j = i + 1; j <= i + len; j++) {
+          reach = math.max(reach, distanceM(a.lat, a.lng, samples[j].lat, samples[j].lng));
+          if (keep != null && keep(j)) protectedFix = true;
+        }
+        if (protectedFix || reach < spikeMinReachM || 2 * reach / (dt / 1000.0) < spikeMinSpeedMps) continue;
+        for (int j = i + 1; j <= i + len; j++) {
+          drop[j] = true;
+        }
+        break;
+      }
+    }
+    return <int>[for (int i = 0; i < n; i++) if (!drop[i]) i];
+  }
+
   /// Indexes of the samples to draw after smoothing: the first and last always, a sample whose
   /// [keep] is true always (e.g. a colour change), otherwise only real movement.
   static List<int> movingIndexes(List<GpsSample> samples, List<List<double>> smoothed, {bool Function(int i)? keep}) {

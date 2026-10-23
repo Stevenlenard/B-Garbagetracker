@@ -149,20 +149,16 @@ class RouteGeometry {
     return features;
   }
 
-  /// [cleanPoints] smoothed for drawing ([GpsSmoothing]: Kalman filter, then standing-still jitter dropped).
+  /// [cleanPoints] smoothed for drawing ([GpsSmoothing]: short out-and-back spikes removed, Kalman filter,
+  /// then standing-still jitter dropped).
   /// Returns copies with smoothed coordinates; the first and last point, every colour change and the live
   /// tail (the marker position) are always kept, so stretches and the line end stay where they were.
-  static List<Map> smoothForDisplay(List<Map> pts) {
+  static List<Map> smoothForDisplay(List<Map> input) {
+    if (input.length < 3) return input;
+    final List<int> real = GpsSmoothing.withoutSpikes(_samples(input), keep: (int i) => input[i]['live_tail'] == true);
+    final List<Map> pts = <Map>[for (final int i in real) input[i]];
     if (pts.length < 3) return pts;
-    final List<GpsSample> samples = pts
-        .map((Map p) => GpsSample(
-              lat: _lat(p),
-              lng: _lng(p),
-              accuracyM: _num(p['accuracy']),
-              timestampMs: _ts(p['timestamp']),
-              speedMps: _num(p['speed']),
-            ))
-        .toList();
+    final List<GpsSample> samples = _samples(pts);
     final List<List<double>> smooth = GpsSmoothing.kalman(samples);
     String colorOf(int i) => (pts[i]['color'] ?? 'GREEN').toString().toUpperCase();
     final List<int> keep = GpsSmoothing.movingIndexes(samples, smooth,
@@ -173,6 +169,16 @@ class RouteGeometry {
       return <String, Object?>{...p.cast<String, Object?>(), 'lat': smooth[i][0], 'lng': smooth[i][1], 'latitude': smooth[i][0], 'longitude': smooth[i][1]};
     }).toList();
   }
+
+  static List<GpsSample> _samples(List<Map> pts) => pts
+      .map((Map p) => GpsSample(
+            lat: _lat(p),
+            lng: _lng(p),
+            accuracyM: _num(p['accuracy']),
+            timestampMs: _ts(p['timestamp']),
+            speedMps: _num(p['speed']),
+          ))
+      .toList();
 
   /// Why a historical route cannot be shown as a complete collection path, or null
   /// when it can. Used to label routes honestly instead of drawing guesses.
