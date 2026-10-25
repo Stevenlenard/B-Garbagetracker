@@ -151,8 +151,15 @@ void main() {
       expect(FleetStatus.hasActiveTrip(node(status: 'COMPLETED')), isFalse);
     });
 
+    test('8a brief disconnect (app left, network handover): the driver stays online', () {
+      final n = node(status: 'FULL', ownerToken: 'tok-1', offlineToken: 'tok-1', ageMs: 30000);
+      expect(count(n), 1);
+      expect(FleetStatus.hasOnlineFlag(n, nowMs: t0 + FleetStatus.disconnectGraceMs), isFalse);
+    });
+
     test('8 disconnect: connectivity goes offline without corrupting status', () {
-      final n = node(status: 'FULL', ownerToken: 'tok-1', offlineToken: 'tok-1');
+      final n = node(status: 'FULL', ownerToken: 'tok-1', offlineToken: 'tok-1',
+          ageMs: FleetStatus.disconnectGraceMs + 1000);
       expect(count(n), 0);
       expect(n['status'], 'FULL'); // collection state untouched
       expect(FleetStatus.collectionState(n), 'FULL');

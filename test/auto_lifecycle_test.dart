@@ -493,7 +493,8 @@ void main() {
         ('resume', nodeFor('ACTIVE'), 1, 1),
         ('full', nodeFor('FULL'), 1, 1),
         ('completed', nodeFor('COMPLETED'), 1, 0),
-        ('disconnect', nodeFor('COMPLETED', offlineToken: 'tok-A'), 0, 0),
+        ('brief disconnect', nodeFor('COMPLETED', offlineToken: 'tok-A', age: 30000), 1, 0),
+        ('disconnect', nodeFor('COMPLETED', offlineToken: 'tok-A', age: FleetStatus.disconnectGraceMs + 1000), 0, 0),
       ];
       for (final s in steps) {
         final snap = snapFor(s.$2);

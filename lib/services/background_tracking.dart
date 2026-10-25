@@ -41,18 +41,19 @@ class BackgroundTracking {
     } catch (_) {}
   }
 
-  /// Once per install, explains why the app must not be put to sleep and opens the system prompt.
+  /// At most once a day while the app is still not exempt, explains why it must not be put to sleep and opens the
+  /// system prompt. A driver who chose "Later" is asked again the next day: without the exemption the phone freezes
+  /// the app in the background and the truck drops off every map.
   static Future<void> askOnce(BuildContext context) async {
     if (!supported) return;
     try {
+      if (await isBatteryExempt()) return;
       final SharedPreferences prefs = await SharedPreferences.getInstance();
-      if (prefs.getBool(_askedKey) == true) return;
-      if (await isBatteryExempt()) {
-        await prefs.setBool(_askedKey, true);
-        return;
-      }
+      final DateTime now = DateTime.now();
+      final String today = '${now.year}-${now.month}-${now.day}';
+      if (prefs.get(_askedKey) == today) return;
+      await prefs.setString(_askedKey, today);
       if (!context.mounted) return;
-      await prefs.setBool(_askedKey, true);
       final bool? go = await showDialog<bool>(
         context: context,
         barrierDismissible: false,

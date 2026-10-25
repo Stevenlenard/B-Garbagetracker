@@ -361,6 +361,36 @@ void main() {
       await pub.publish(<String, Object?>{'isOnline': true, 'offline_token': null});
       expect(FleetStatus.hasOnlineFlag(db.read(kTruckPath) as Map), isTrue);
     });
+
+    test('an old connection\'s handler firing AFTER the reconnect is healed by the next heartbeat', () async {
+      final db = FakeRtdb();
+      final g = runtime(db, 'B');
+      await g.claim(truckId: kTruck);
+      final pub = truckPub(db, g);
+      await pub.publish(fix(14.0));
+      // Back from the background: reconnect clears the marker first ...
+      await pub.publish(<String, Object?>{'isOnline': true, 'offline_token': null});
+      // ... then the server notices the dead socket and runs the old handler (same runtime token).
+      await db.update(kTruckPath, <String, Object?>{'offline_token': g.token});
+      expect(FleetStatus.hasOnlineFlag(db.read(kTruckPath) as Map), isFalse);
+      await pub.publish(PresenceBeat.fields(status: 'ACTIVE', loginTime: 1));
+      final Map node = db.read(kTruckPath) as Map;
+      expect(FleetStatus.hasOnlineFlag(node), isTrue);
+      expect(node['status'], 'ACTIVE');
+      expect(node['login_time'], 1);
+    });
+
+    test('the heartbeat never revives a node for a replaced runtime', () async {
+      final db = FakeRtdb();
+      final a = runtime(db, 'A');
+      await a.claim(truckId: kTruck);
+      final b = runtime(db, 'B');
+      await b.claim(truckId: kTruck);
+      await truckPub(db, b).publish(fix(14.0));
+      await db.update(kTruckPath, <String, Object?>{'offline_token': b.token}); // B disconnected
+      await truckPub(db, a).publish(PresenceBeat.fields(status: 'ACTIVE'));
+      expect(FleetStatus.hasOnlineFlag(db.read(kTruckPath) as Map), isFalse);
+    });
   });
 
   group('Marker and route consistency', () {

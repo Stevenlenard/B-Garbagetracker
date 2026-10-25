@@ -54,18 +54,31 @@ class FleetStatus {
     return (now - loginMs) < sessionLimitMs;
   }
 
+  /// How long a dropped connection is tolerated before the driver counts as
+  /// offline. Leaving the app, a network handover or the phone putting the app
+  /// to sleep for a moment drops the connection for a few seconds; only a phone
+  /// that stays silent (powered off, no signal) is taken offline. A logout is
+  /// still immediate (it writes `isOnline: false`).
+  static const int disconnectGraceMs = 90000;
+
   /// Strict connectivity flag. A missing flag is NOT online.
   ///
-  /// A runtime's disconnect handler records `offline_token` (its own token) rather
-  /// than flipping `isOnline`. The node is offline only when that token is the
-  /// CURRENT owner's token, so a replaced runtime disconnecting late can never
-  /// mark a newer session offline.
-  static bool hasOnlineFlag(Map node) {
+  /// A runtime's disconnect handler records `offline_token` (its own token) and
+  /// `lastSeen` (the disconnect time) rather than flipping `isOnline`. The node is
+  /// offline only when that token is the CURRENT owner's token, so a replaced
+  /// runtime disconnecting late can never mark a newer session offline, and only
+  /// once the disconnect is older than [disconnectGraceMs].
+  static bool hasOnlineFlag(Map node, {int? nowMs}) {
     final bool flag = node['isOnline'] == true || node['is_online'] == true || node['is_online'] == 1;
     if (!flag) return false;
     final String off = (node['offline_token'] ?? '').toString();
     final String owner = (node['owner_token'] ?? '').toString();
-    if (off.isNotEmpty && owner.isNotEmpty && off == owner) return false;
+    if (off.isNotEmpty && owner.isNotEmpty && off == owner) {
+      final int at = parseTimestampMs(node['lastSeen'] ?? node['last_seen']);
+      if (at == 0) return false;
+      final int now = nowMs ?? ServerClock.instance.nowMs();
+      return (now - at).abs() < disconnectGraceMs;
+    }
     return true;
   }
 
@@ -103,7 +116,7 @@ class FleetStatus {
   /// within the freshness window and within the session limit.
   static bool isLive(Map node, {int? nowMs}) {
     final int now = nowMs ?? ServerClock.instance.nowMs();
-    if (!hasOnlineFlag(node)) return false;
+    if (!hasOnlineFlag(node, nowMs: now)) return false;
     if (isInactiveStatus(normalizeStatus(node['status']))) return false;
     final int lastSeen = parseTimestampMs(node['lastSeen'] ?? node['last_seen']);
     if (!isFresh(lastSeen, now)) return false;
@@ -114,7 +127,7 @@ class FleetStatus {
   /// Driver connectivity: owner-aware online flag AND a fresh `lastSeen`.
   /// A stale `isOnline: true` is NOT connectivity.
   static bool isConnected(Map node, {int? nowMs}) {
-    if (!hasOnlineFlag(node)) return false;
+    if (!hasOnlineFlag(node, nowMs: nowMs)) return false;
     return isFresh(parseTimestampMs(node['lastSeen'] ?? node['last_seen']), nowMs);
   }
 

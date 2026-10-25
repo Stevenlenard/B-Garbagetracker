@@ -233,6 +233,9 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     _purokStatusSubscription?.cancel();
     _notificationSubscription?.cancel();
     _connectionSubscription?.cancel();
+    for (final StreamSubscription s in _offlineMarkerSubs) {
+      s.cancel();
+    }
     _guardSub?.cancel();
     _tripFinishedSub?.cancel();
     _guard?.dispose();
@@ -559,6 +562,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
   // connection can never overwrite ACTIVE/IDLE/FULL/COMPLETED.
   StreamSubscription? _connectionSubscription;
   bool _isConnectionLost = false;
+  final List<StreamSubscription> _offlineMarkerSubs = <StreamSubscription>[];
 
   // --- Runtime ownership (see DriverSessionGuard / driver_lifecycle.dart) ---
   // Identity of THIS runtime and its authority to write live state. Trip identity
@@ -647,6 +651,39 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
         'offline_token': g.token,
         'lastSeen': ServerValue.timestamp,
       });
+    }
+    _watchOwnOfflineMarker(truckId, driverIdStr);
+  }
+
+  /// The server may run an OLD connection's disconnect handler after this runtime has already reconnected (it
+  /// notices a dead socket late, e.g. after the app was in the background). That handler carries this runtime's own
+  /// token, so the driver would look offline everywhere although the app is running. While connected, such a marker
+  /// is removed the moment it appears; a real disconnect is only seen here after reconnecting, when it is stale.
+  void _watchOwnOfflineMarker(String truckId, String driverIdStr) {
+    for (final StreamSubscription s in _offlineMarkerSubs) {
+      s.cancel();
+    }
+    _offlineMarkerSubs.clear();
+
+    void watch(String path, OwnedNodePublisher? Function() publisher) {
+      _offlineMarkerSubs.add(_database.ref('$path/offline_token').onValue.listen((DatabaseEvent e) {
+        final DriverSessionGuard? g = _guard;
+        if (g == null || !g.canWrite || _isConnectionLost) return;
+        if (e.snapshot.value?.toString() != g.token) return;
+        debugPrint("[CONNECTION] Late disconnect marker on $path while connected: clearing it.");
+        publisher()?.publish(<String, Object?>{
+          'isOnline': true,
+          'offline_token': null,
+          'lastSeen': ServerValue.timestamp,
+        });
+      }));
+    }
+
+    if (truckId.isNotEmpty && truckId.toUpperCase() != "UNKNOWN") {
+      watch('truck_locations/$truckId', () => _truckPublisher(truckId));
+    }
+    if (driverIdStr.isNotEmpty && driverIdStr.toUpperCase() != "UNKNOWN") {
+      watch('users/$driverIdStr', () => _userPub);
     }
   }
 
@@ -1951,6 +1988,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       'gps_at': ServerValue.timestamp, // server time of this GPS publish (GPS freshness, ETA)
       'status': effectiveStatus,
       'isOnline': true,
+      'offline_token': null, // a fix published by the owner proves it is connected (see PresenceBeat)
       'trip_active': true,
       'current_session': _sessionId,
       'plate_number': _truckPlateNumber,
@@ -2354,12 +2392,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       if (guard == null || !guard.canWrite) return;
 
       final String truckId = _user?.preferredTruck ?? "Unknown";
-      final Map<String, Object?> beat = <String, Object?>{
-        'isOnline': true,
-        'status': _status,
-        if (_driverLoginTimestamp != null) 'login_time': _driverLoginTimestamp,
-        'lastSeen': ServerValue.timestamp,
-      };
+      final Map<String, Object?> beat = PresenceBeat.fields(status: _status, loginTime: _driverLoginTimestamp);
       _userPub?.publish(beat);
       if (_status != "OFFLINE") {
         // Self-heal: an open trip is always bound to the live truck node, so every map can find its route line.

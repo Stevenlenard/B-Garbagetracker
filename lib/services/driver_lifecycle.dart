@@ -340,6 +340,25 @@ class ReconnectPolicy {
   }
 }
 
+/// The 30 s presence heartbeat of the runtime that owns the session.
+///
+/// It always clears `offline_token`: a committed owner write proves this runtime
+/// is alive and connected. Without that, the disconnect handler of an OLD
+/// connection of the same runtime (the server notices a dead socket only after
+/// the app has already reconnected, e.g. after a few minutes in the background)
+/// would leave the driver offline on every screen until the next login.
+class PresenceBeat {
+  PresenceBeat._();
+
+  static Map<String, Object?> fields({required String status, int? loginTime}) => <String, Object?>{
+        'isOnline': true,
+        'status': status,
+        if (loginTime != null) 'login_time': loginTime,
+        'offline_token': null,
+        'lastSeen': kServerTimestamp,
+      };
+}
+
 enum RecoveredTrip { none, collecting, awaitingUnload }
 
 class TripResumePolicy {

@@ -126,7 +126,7 @@ class FleetSnapshot {
           reject(FleetRejection.excluded);
           return;
         }
-        if (!FleetStatus.hasOnlineFlag(value)) {
+        if (!FleetStatus.hasOnlineFlag(value, nowMs: now)) {
           reject(FleetRejection.offline);
           return;
         }
