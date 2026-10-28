@@ -91,8 +91,10 @@ class AreaGeofence {
 
 class VisitPolicy {
   const VisitPolicy({
-    this.minFixes = 2, // with minDwellMs: two fixes at least one minute apart (phones that report every 45 s)
-    this.minDwellMs = 60 * 1000,
+    // with minDwellMs: two fixes at least 40 s apart. Phones on battery saving report only every ~40-50 s,
+    // so a real stop gives just two fixes 45 s apart; a pass-through (one fix, or seconds apart) still never counts.
+    this.minFixes = 2,
+    this.minDwellMs = 40 * 1000,
     this.maxAccuracyM = 40.0,
     this.maxGapMs = 3 * 60 * 1000,
     this.outsideTolerance = 1,

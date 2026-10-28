@@ -2778,7 +2778,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
           const SizedBox(height: 12),
           Text(
             "Collection areas with at least one verified visit in this period. A visit needs at least 2 accurate "
-            "GPS fixes inside the area, at least 1 minute apart, while the trip is ACTIVE (paused, full and completed "
+            "GPS fixes inside the area, at least 40 seconds apart, while the trip is ACTIVE (paused, full and completed "
             "travel is excluded), counted once per trip and area. It shows the truck was there to collect, not that "
             "every household was serviced. There is no schedule data, so no completion rate is shown.",
             style: TextStyle(fontSize: 13, color: Colors.grey.shade700, height: 1.4),
@@ -3189,7 +3189,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
           ),
           const SizedBox(height: 10),
           Text(
-            "A verified visit = one trip with at least 2 accurate GPS fixes inside the area, at least 1 minute apart, while "
+            "A verified visit = one trip with at least 2 accurate GPS fixes inside the area, at least 40 seconds apart, while "
             "ACTIVE, counted once per trip and area. Paused, full and completed travel is excluded. It does not prove every "
             "household was serviced. Complaints = resident complaints filed in the period.",
             style: TextStyle(fontSize: 10.5, color: Colors.grey.shade600, height: 1.4),
@@ -8443,7 +8443,7 @@ Map _etaRoutes = {};
 List<AreaGeofence> _etaAreas = const <AreaGeofence>[];
 
 /// The notifications with their arrivals replaced by the VERIFIED (green) visits: an arrival
-/// is the first fix of a stay of at least 2 accurate GPS fixes, at least 1 minute apart,
+/// is the first fix of a stay of at least 2 accurate GPS fixes, at least 40 seconds apart,
 /// inside the area while ACTIVE (VisitPolicy) - the same rule that turns an area green on
 /// Collection Route Optimization. Driver-app arrival alerts no longer count on their own.
 Object? _withVerifiedArrivals(Object? rawNotifications) {

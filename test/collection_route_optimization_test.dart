@@ -169,8 +169,8 @@ void main() {
     test('a quick GPS pass through an area is NOT a confirmed visit', () {
       final Map<String, Object?> pass = trip(msAt(now.subtract(const Duration(hours: 3))), <Object>[
         <double>[13.9490, 121.1590],
-        <double>[13.9510, 121.1610], // straight through Purok 2 at 20 s steps, no stay
-      ]);
+        <double>[13.9510, 121.1610], // straight through Purok 2 at 5 s steps (about 22 km/h), no stay
+      ], stepMs: 5000);
       final VisitSummary v = CollectionVisits.detect(
           trips: <String, Object?>{'pass': pass}, areas: areas, start: DateTime(2026, 10, 1), end: DateTime(2026, 10, 15));
       expect(v.visits, isEmpty);

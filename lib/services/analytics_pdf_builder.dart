@@ -496,7 +496,7 @@ class AnalyticsPdfBuilder {
     final pw.Widget head = _sec('A.2', 'Verified Collection Visits per Area', objective: '1.2');
     if (!c.available) return <pw.Widget>[head, _unavailable('Collection visits', c.reason)];
     const String policy = 'A verified visit is one trip that recorded at least 2 accurate GPS fixes inside the area, '
-        'at least 1 minute apart, while collecting (ACTIVE). Paused, full and completed travel is excluded, and each trip '
+        'at least 40 seconds apart, while collecting (ACTIVE). Paused, full and completed travel is excluded, and each trip '
         'counts at most once per area. A visit does not prove that every household was serviced.';
     return <pw.Widget>[
       if (c.rows.isEmpty) ...<pw.Widget>[
@@ -1083,7 +1083,7 @@ class AnalyticsPdfBuilder {
               'Recorded weight of FULL trips; a hypothetical ${AnalyticsReportData.tons(d.waste.perTripEstimateKg)} tons per '
                   'trip when none was recorded.',
             ],
-            <String>['Verified visit', 'At least 2 accurate GPS fixes inside the area, 1 minute apart, while collecting; once per trip and area.'],
+            <String>['Verified visit', 'At least 2 accurate GPS fixes inside the area, 40 seconds apart, while collecting; once per trip and area.'],
             <String>['Approach alert', 'In-app notification to residents of an area when an ACTIVE truck is approaching, with the ETA.'],
             <String>['ETA', 'Estimated arrival time from the distance to the area and the recent speed of the truck.'],
             <String>['Unavailable / n/a', 'The source could not be reached or there is not enough recorded data; never reported as 0.'],

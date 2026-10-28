@@ -2,7 +2,7 @@
 ///
 /// Evidence (strongest first):
 ///  * VERIFIED VISIT - a [CollectionVisit] from `CollectionVisits.detect`: GPS fixes recorded
-///    while the trip was ACTIVE, at least 3 fixes and 60 s in one continuous stay inside the
+///    while the trip was ACTIVE, at least 2 fixes and 40 s in one continuous stay inside the
 ///    area. It shows the truck stayed in the area to collect; it does NOT prove that every
 ///    household was served (no such record exists in the system).
 ///  * PARTIAL - a record that explicitly says the collection was partial. The current app
