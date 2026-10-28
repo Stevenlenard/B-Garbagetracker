@@ -45,6 +45,7 @@ import '../utils/tracking_telemetry.dart';
 import '../services/rtdb_port.dart';
 import '../services/driver_session_guard.dart';
 import '../services/driver_lifecycle.dart';
+import '../services/offline_point_queue.dart';
 
 import '../widgets/header_circle_painter.dart';
 import '../widgets/hover_action_button.dart';
@@ -152,6 +153,9 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
   StreamSubscription? _routePointsSubscription;
 
   List<Map> _tripRoutePoints = [];
+  // Offline storage: route points stay on the phone until Firebase confirms them.
+  final OfflinePointQueue _pointQueue = OfflinePointQueue.sharedPreferences();
+  final Set<String> _pointsInFlight = <String>{};
   List<Map>? _debugTestRoute; // NEW: For web testing
   Position? _lastRecordedRoutePosition;
   DateTime? _lastRecordedRouteTime;
@@ -1039,14 +1043,16 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
   }
 
   /// Guarded write of a route point and/or trip metadata (see TripRouteWriter).
-  Future<void> _writeTrip({
+  /// null when nothing could be attempted or the write threw (the caller may retry).
+  Future<TripWriteResult?> _writeTrip({
     Map<String, Object?>? point,
     Map<String, Object?>? meta,
     bool allowWhileFinishing = false,
+    String? pointKey,
   }) async {
     final DriverSessionGuard? guard = _guard;
     final String? tripId = _sessionId;
-    if (guard == null || tripId == null) return;
+    if (guard == null || tripId == null) return null;
     final String root = _isSimulationMode ? 'simulation_routes' : 'driver_routes';
     try {
       final TripWriteResult res = await TripRouteWriter(db: _rtdb, guard: guard, root: root).write(
@@ -1055,14 +1061,46 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
         finishing: allowWhileFinishing ? false : _isFinishing,
         point: point,
         meta: meta,
+        pointKey: pointKey,
       );
       if (res.denial == WriteDenial.tripFinished) {
         _onTripFinishedElsewhere(tripId);
       } else if (res.denial == WriteDenial.notOwner && guard.state == OwnershipState.lost) {
         _handleOwnershipLost();
       }
+      return res;
     } catch (e) {
       debugPrint("[ROUTE TRACKING] Firebase write error: $e");
+      return null;
+    }
+  }
+
+  /// Sends one stored point. It leaves the phone's storage once Firebase confirms it, or when it can
+  /// never be written (trip finished, another trip, ownership lost); a failed attempt keeps it for a retry.
+  Future<void> _sendQueuedPoint(QueuedPoint q, {Map<String, Object?>? meta}) async {
+    if (q.tripId != _sessionId || !_pointsInFlight.add(q.key)) return;
+    try {
+      final TripWriteResult? res = await _writeTrip(
+        point: q.point,
+        meta: meta,
+        allowWhileFinishing: q.allowWhileFinishing,
+        pointKey: q.key,
+      );
+      if (res != null && !res.failed) await _pointQueue.remove(q.key);
+    } finally {
+      _pointsInFlight.remove(q.key);
+    }
+  }
+
+  /// Resends the points of the current trip that were stored while the phone was offline.
+  Future<void> _flushQueuedPoints() async {
+    final String? tripId = _sessionId;
+    if (tripId == null || _guard == null) return;
+    final List<QueuedPoint> pending = await _pointQueue.pendingFor(tripId);
+    if (pending.isNotEmpty) debugPrint("[ROUTE TRACKING] Resending ${pending.length} stored GPS point(s)");
+    for (final QueuedPoint q in pending) {
+      if (_sessionId != tripId) return;
+      await _sendQueuedPoint(q);
     }
   }
 
@@ -2309,11 +2347,12 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
   }
 
   Future<void> _appendRoutePoint(Position pos, String status, String color,
-      {Map<String, Object?>? meta, bool allowWhileFinishing = false}) {
+      {Map<String, Object?>? meta, bool allowWhileFinishing = false}) async {
     if (_sessionId == null) {
       debugPrint("[ROUTE TRACKING] Cannot append route point: _sessionId is null");
-      return Future<void>.value();
+      return;
     }
+    final String tripId = _sessionId!;
     final int ts = DateTime.now().millisecondsSinceEpoch;
     final String driverId = _user?.userId?.toString() ?? "Unknown";
     final String truckId = (_truckPlateNumber != null && _truckPlateNumber!.isNotEmpty)
@@ -2322,13 +2361,16 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
 
     debugPrint("[ROUTE TRACKING] Appending GPS point: Trip=$_sessionId | Acc=${pos.accuracy.toStringAsFixed(1)}m");
 
-    // Persisted through TripRouteWriter: ownership + "trip not finished" are confirmed
-    // against the server immediately before the point is written.
-    return _writeTrip(
+    // Stored on the phone first (offline storage), then persisted through TripRouteWriter:
+    // ownership + "trip not finished" are confirmed against the server before the point is written.
+    final QueuedPoint q = QueuedPoint(
+      key: _database.ref().push().key!,
+      root: _isSimulationMode ? 'simulation_routes' : 'driver_routes',
+      tripId: tripId,
+      queuedAtMs: ts,
       allowWhileFinishing: allowWhileFinishing,
-      meta: meta,
       point: <String, Object?>{
-        'tripId': _sessionId,
+        'tripId': tripId,
         'driverId': driverId,
         'truckId': truckId,
         'latitude': pos.latitude,
@@ -2346,6 +2388,12 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
         'rt': _runtimeTag, // which runtime wrote the point (forensics)
       },
     );
+    try {
+      await _pointQueue.add(q);
+    } catch (e) {
+      debugPrint("[ROUTE TRACKING] Could not store the point on the phone: $e");
+    }
+    await _sendQueuedPoint(q, meta: meta);
   }
 
   void _startIdleDetection() {
@@ -2376,6 +2424,9 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
         return;
       }
       final int now = DateTime.now().millisecondsSinceEpoch;
+
+      // Points stored while offline (or before the app was closed) are sent again.
+      unawaited(_flushQueuedPoints());
 
       // 12-Hour Automatic Session Expiry Check
       if (_driverLoginTimestamp != null && _driverLoginTimestamp! > 0) {

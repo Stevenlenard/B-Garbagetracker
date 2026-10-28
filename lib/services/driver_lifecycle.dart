@@ -234,6 +234,9 @@ class TripRouteWriter {
     required bool finishing,
     Map<String, Object?>? point,
     Map<String, Object?>? meta,
+    /// Fixed key for [point] (a point from the offline queue): writing it again after a lost
+    /// acknowledgement replaces it instead of adding a duplicate.
+    String? pointKey,
   }) async {
     final WriteDecision d = TripWriteGate.decide(
       ownership: guard.state,
@@ -269,7 +272,13 @@ class TripRouteWriter {
     }
     if (!guard.isCurrent(gen)) return const TripWriteResult.denied(WriteDenial.notOwner);
 
-    if (point != null) await db.push('$root/$tripId/route', point);
+    if (point != null) {
+      if (pointKey != null) {
+        await db.update('$root/$tripId/route', <String, Object?>{pointKey: point});
+      } else {
+        await db.push('$root/$tripId/route', point);
+      }
+    }
     if (meta != null) await db.update('$root/$tripId', meta);
     return const TripWriteResult.written();
   }

@@ -11,7 +11,8 @@ void main() {
     'lib/screens/track_trucks_screen.dart',
   ]) {
     test('$path: empty map overlays stay Positioned', () {
-      final String src = File(path).readAsStringSync();
+      // Normalized so the pattern below also matches a CRLF (Windows) checkout.
+      final String src = File(path).readAsStringSync().replaceAll('\r\n', '\n');
       final RegExp legend = RegExp(r'Widget _buildTruckLegend\([\s\S]*?\n  }\n');
       final String body = legend.firstMatch(src)!.group(0)!;
       expect(body.contains('return const SizedBox.shrink()'), isFalse);
