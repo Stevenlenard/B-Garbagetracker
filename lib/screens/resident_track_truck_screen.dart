@@ -17,6 +17,9 @@ import 'package:pointer_interceptor/pointer_interceptor.dart';
 import 'package:geolocator/geolocator.dart' as geo;
 import '../utils/eta_evaluation.dart';
 import '../utils/trip_eta.dart';
+import '../utils/trip_activity_log.dart';
+import '../utils/collection_visits.dart';
+import '../services/service_area_service.dart';
 import '../utils/fleet_status.dart';
 import 'package:intl/intl.dart';
 import '../utils/tracking_telemetry.dart';
@@ -2171,6 +2174,34 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
     });
   }
 
+  /// Collection areas for the Activity Log (read once; retried after a failed read).
+  static Future<List<AreaGeofence>>? _activityAreas;
+  Future<List<AreaGeofence>> _loadActivityAreas() => _activityAreas ??= () async {
+        final List<AreaGeofence> list = <AreaGeofence>[];
+        try {
+          final DataSnapshot snap = await _database.ref('puroks').get().timeout(const Duration(seconds: 10));
+          if (snap.value is Map) {
+            (snap.value as Map).forEach((Object? k, Object? v) {
+              if (v is! Map) return;
+              try {
+                final Map<String, dynamic> m = Map<String, dynamic>.from(v);
+                m['id'] ??= k.toString();
+                final ServiceArea a = ServiceArea.fromJson(m);
+                list.add(AreaGeofence(
+                  name: ServiceAreaService.canonicalizeAreaName(a.name) ?? a.name,
+                  lat: a.entranceLat,
+                  lng: a.entranceLng,
+                  radiusM: AreaGeofence.areaRadiusM,
+                  isTruckStop: a.isTruckStop && a.verificationStatus.toUpperCase() == 'VERIFIED',
+                ));
+              } catch (_) {}
+            });
+          }
+        } catch (_) {}
+        if (list.isEmpty) _activityAreas = null;
+        return list;
+      }();
+
   void _showHistoryOverlay(BuildContext context, String truckId) {
     final List<Map> history = _lastRoutePoints[truckId] ?? [];
     final bool isMobile = MediaQuery.of(context).size.width < 900;
@@ -2220,45 +2251,59 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
               )
             else
               Flexible(
-                child: history.isEmpty
-                    ? const Center(child: Text("No recent data recorded.", style: TextStyle(color: Colors.grey)))
-                    : ListView.builder(
-                        shrinkWrap: true,
-                        itemCount: history.length > 5 ? 5 : history.length,
-                        itemBuilder: (context, index) {
-                          final point = history.reversed.toList()[index];
-                          return Container(
-                            margin: const EdgeInsets.only(bottom: 16),
-                            padding: const EdgeInsets.all(16),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFFF8F9FA),
-                              borderRadius: BorderRadius.circular(16),
-                              border: Border.all(color: Colors.grey.shade100),
+                child: FutureBuilder<List<AreaGeofence>>(
+                  future: _loadActivityAreas(),
+                  builder: (BuildContext context, AsyncSnapshot<List<AreaGeofence>> snap) {
+                    // Built from the trip's own route points: areas entered, FULL, latest position, with times.
+                    final List<TripActivity> log = TripActivityLog.build(history, snap.data ?? const <AreaGeofence>[]);
+                    if (log.isEmpty) {
+                      return const Center(child: Text("No recent data recorded.", style: TextStyle(color: Colors.grey)));
+                    }
+                    final int nowMs = DateTime.now().millisecondsSinceEpoch;
+                    String ago(int ms) {
+                      final int m = ((nowMs - ms) / 60000).floor();
+                      if (m < 1) return "just now";
+                      if (m < 60) return "$m min ago";
+                      return "${m ~/ 60} h ${m % 60} min ago";
+                    }
+                    return ListView.builder(
+                      shrinkWrap: true,
+                      itemCount: log.length,
+                      itemBuilder: (context, index) {
+                        final TripActivity a = log[index];
+                        return Container(
+                          margin: const EdgeInsets.only(bottom: 16),
+                          padding: const EdgeInsets.all(16),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFF8F9FA),
+                            borderRadius: BorderRadius.circular(16),
+                            border: Border.all(color: Colors.grey.shade100),
+                          ),
+                          child: Row(children: [
+                            Container(
+                              width: 10, height: 10,
+                              decoration: BoxDecoration(
+                                color: a.full ? Colors.pink : const Color(0xFF00796B),
+                                shape: BoxShape.circle,
+                              ),
                             ),
-                            child: Row(children: [
-                              Container(
-                                width: 10, height: 10,
-                                decoration: BoxDecoration(
-                                  color: (point['color'] == 'PINK' ? Colors.pink : const Color(0xFF00796B)),
-                                  shape: BoxShape.circle,
-                                ),
+                            const SizedBox(width: 16),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(a.title, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 14)),
+                                  Text("${DateFormat('h:mm a').format(EtaEvaluation.manila(a.ms))} · ${ago(a.ms)}",
+                                      style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                                ],
                               ),
-                              const SizedBox(width: 16),
-                              Expanded(
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text("At ${point['purok'] ?? 'Balintawak'}",
-                                        style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 14)),
-                                    Text("Recorded recently",
-                                        style: const TextStyle(fontSize: 12, color: Colors.grey)),
-                                  ],
-                                ),
-                              ),
-                            ]),
-                          );
-                        },
-                      ),
+                            ),
+                          ]),
+                        );
+                      },
+                    );
+                  },
+                ),
               ),
           ],
         ),
