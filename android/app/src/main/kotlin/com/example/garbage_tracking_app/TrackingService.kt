@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
@@ -142,12 +143,21 @@ class TrackingService : Service() {
             }
         }
 
-        /** Must be called while the app is on screen (Android does not allow starting it from the background). */
-        fun start(context: Context): Boolean = try {
-            ContextCompat.startForegroundService(context, Intent(context, TrackingService::class.java).setAction(ACTION_START))
-            true
-        } catch (_: Exception) {
-            false
+        /**
+         * Must be called while the app is on screen (Android does not allow starting it from the background), and only
+         * with location permission: a location foreground service without it is refused, and a service started with
+         * startForegroundService that never becomes a foreground service makes Android crash the app.
+         */
+        fun start(context: Context): Boolean {
+            val fine = ContextCompat.checkSelfPermission(context, android.Manifest.permission.ACCESS_FINE_LOCATION)
+            val coarse = ContextCompat.checkSelfPermission(context, android.Manifest.permission.ACCESS_COARSE_LOCATION)
+            if (fine != PackageManager.PERMISSION_GRANTED && coarse != PackageManager.PERMISSION_GRANTED) return false
+            return try {
+                ContextCompat.startForegroundService(context, Intent(context, TrackingService::class.java).setAction(ACTION_START))
+                true
+            } catch (_: Exception) {
+                false
+            }
         }
 
         fun stop(context: Context) {

@@ -111,6 +111,12 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     if (!BackgroundTracking.supported || _isSimulationMode) return;
     if (_tripNeedsService) {
       if (!BackgroundTracking.serviceRunning && _inForeground) {
+        // A resumed trip (e.g. signing in on another phone) can get here before location is allowed; the service
+        // is started on a later resume once it is.
+        LocationPermission perm = await Geolocator.checkPermission();
+        if (perm == LocationPermission.denied) perm = await Geolocator.requestPermission();
+        if (perm != LocationPermission.whileInUse && perm != LocationPermission.always) return;
+        if (!_tripNeedsService || !_inForeground || BackgroundTracking.serviceRunning) return; // changed meanwhile
         final bool ok = await BackgroundTracking.startTripService();
         debugPrint("[TRIP SERVICE] start: ${ok ? 'running' : 'not available (GPS stream keeps its own service)'}");
         if (ok && rearmStream && _positionSubscription != null && mounted) {
