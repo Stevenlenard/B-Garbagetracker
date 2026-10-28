@@ -1,4 +1,5 @@
 import '../utils/rtdb_map.dart';
+import '../services/eta_model_sync.dart';
 import '../services/server_clock.dart';
 import '../widgets/logout_choice_dialog.dart';
 import '../services/rtdb_port.dart';
@@ -142,6 +143,7 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
   @override
   void initState() {
     super.initState();
+    EtaModelSync.start();
     NotificationService.openHomeRequests.addListener(_openHomeFromNotification);
     RoutePersistenceManager.saveLastRoute('/resident_dashboard');
     _loadUser();
@@ -486,6 +488,7 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
             status: FleetStatus.collectionState(val),
             gpsAgeMs: FleetStatus.gpsAgeMs(val, nowMs: nowMs),
             distanceKm: EtaPolicy.roadDistanceKm(distKm),
+            straightKm: distKm,
             speedKmh: double.tryParse('${val['eta_speed']}') ?? double.tryParse('${val['speed']}'),
             averageSpeedKmh: double.tryParse('${val['avg_speed']}'),
           );

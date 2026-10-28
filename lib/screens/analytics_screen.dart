@@ -3,6 +3,7 @@ import '../utils/route_history_navigation.dart';
 import '../utils/trip_links.dart';
 import '../utils/eta_evaluation.dart';
 import '../utils/verified_eta.dart';
+import '../services/eta_model_sync.dart';
 import '../utils/predictive_models.dart';
 import '../utils/analytics_report_data.dart';
 import '../services/analytics_pdf_builder.dart';
@@ -1550,6 +1551,10 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
         _etaClosedTripIds = VerifiedEta.closedTripIds(_allDriverRoutes);
         _etaRoutes = _allDriverRoutes;
         _refreshEtaVisits();
+        // The arrival-time model the alerts use is refitted on every recorded trip (shared via admin_settings).
+        if (_geofences.isNotEmpty) {
+          EtaModelSync.publish(ArrivalRegression.evaluate(ArrivalRegression.extract(_allDriverRoutes, _geofences)));
+        }
         _recalculateRoutesMetrics();
         _calculateAnalytics();
 

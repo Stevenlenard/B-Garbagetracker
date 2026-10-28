@@ -40,6 +40,7 @@ import '../utils/gps_fix_policy.dart';
 import '../utils/gps_quality.dart';
 import '../utils/area_pass.dart';
 import '../services/background_tracking.dart';
+import '../services/eta_model_sync.dart';
 import '../services/server_clock.dart';
 import '../utils/tracking_telemetry.dart';
 import '../services/rtdb_port.dart';
@@ -225,6 +226,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    EtaModelSync.start();
     _gpsWatchdog = Timer.periodic(const Duration(seconds: 15), (_) => _ensureGpsAlive());
     NotificationService.openHomeRequests.addListener(_openHomeFromNotification);
     _startClock();
@@ -2362,6 +2364,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       status: _status,
       gpsAgeMs: 0, // this very fix was just accepted
       distanceKm: EtaPolicy.roadDistanceKm((distM - radiusM) / 1000.0),
+      straightKm: (distM - radiusM) / 1000.0,
       speedKmh: _recentTravelSpeed.kmhAt(DateTime.now().millisecondsSinceEpoch),
       averageSpeedKmh: _lastAvgSpeedKmh,
       arrivalRadiusM: 0,
