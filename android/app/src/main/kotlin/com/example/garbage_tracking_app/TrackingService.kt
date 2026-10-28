@@ -41,11 +41,19 @@ class TrackingService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        val notification = buildNotification(this)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
+        // Never take the app down: if Android refuses the foreground start, the service ends quietly and the GPS
+        // stream keeps its own service (the earlier behaviour).
+        try {
+            val notification = buildNotification(this)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+        } catch (e: Exception) {
+            running = false
+            stopSelf()
+            return START_NOT_STICKY
         }
         acquireWakeLock()
         running = true
@@ -59,16 +67,23 @@ class TrackingService : Service() {
     }
 
     private fun acquireWakeLock() {
-        if (wakeLock?.isHeld == true) return
-        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "GarbageTracker:trip").apply {
-            setReferenceCounted(false)
-            acquire(12 * 60 * 60 * 1000L) // never longer than the 12-hour driver session
+        try {
+            if (wakeLock?.isHeld == true) return
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "GarbageTracker:trip").apply {
+                setReferenceCounted(false)
+                acquire(12 * 60 * 60 * 1000L) // never longer than the 12-hour driver session
+            }
+        } catch (_: Exception) {
+            wakeLock = null // the foreground service alone still keeps the app running
         }
     }
 
     private fun releaseWakeLock() {
-        wakeLock?.let { if (it.isHeld) it.release() }
+        try {
+            wakeLock?.let { if (it.isHeld) it.release() }
+        } catch (_: Exception) {
+        }
         wakeLock = null
     }
 
