@@ -334,7 +334,7 @@ void main() {
       expect(legacy.hasFullEvent, isFalse);
     });
 
-    test('a zero-distance legacy finished stub is not a load, a real FULL event always is', () {
+    test('a finished trip that never moved is not a load, even with a FULL event', () {
       final stub = DriverTrip.fromJson({
         'trip_id': 'stub',
         'route_status': 'COMPLETED',
@@ -348,7 +348,14 @@ void main() {
         'total_distance_km': 0,
         'start_time': '2026-08-01 08:00:00',
       });
-      expect(LoadHistory.isLoad(fullAtZero), isTrue);
+      expect(LoadHistory.isLoad(fullAtZero), isFalse);
+      final fullMoved = DriverTrip.fromJson({
+        'trip_id': 'fm',
+        'route_status': 'FULL',
+        'total_distance_km': 2.3,
+        'start_time': '2026-08-01 08:00:00',
+      });
+      expect(LoadHistory.isLoad(fullMoved), isTrue);
     });
 
     test('PHP display string for full_time no longer hides the real FULL time', () {

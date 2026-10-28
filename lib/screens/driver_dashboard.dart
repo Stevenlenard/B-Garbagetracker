@@ -7,6 +7,8 @@ import '../widgets/logout_choice_dialog.dart';
 import '../utils/relative_time.dart';
 import '../services/notification_inbox.dart';
 import '../utils/eta_policy.dart';
+import '../utils/approach_tracking.dart';
+import '../utils/load_history.dart';
 import '../services/arrival_notifications.dart';
 import 'dart:async';
 import 'dart:ui';
@@ -1723,6 +1725,8 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       _startFixes.clear();
       _trackGate.reset();
       _speedSmoother.clear();
+      _recentTravelSpeed.clear();
+      _approachDetector.clear();
       if (!kIsWeb && mounted) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) BackgroundTracking.askOnce(context);
@@ -1904,7 +1908,6 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     final truckId = _user?.preferredTruck ?? "Unknown";
     double speedKmH = (pos.speed * 3.6);
     _speedSmoother.add(now.millisecondsSinceEpoch, speedKmH);
-    final double? smoothSpeed = _speedSmoother.valueAt(now.millisecondsSinceEpoch);
 
     // Which fixes become route points and add distance (RoutePointPolicy): only real movement, not the 10-30 m
     // wander of a receiver standing still. The live marker above is still updated by every fix.
@@ -1946,6 +1949,8 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
         // and an explicit PAUSE stays PAUSED.
       });
     }
+    if (!_collectionFrozen) _recentTravelSpeed.add(now.millisecondsSinceEpoch, _distance);
+    final double? recentSpeed = _recentTravelSpeed.kmhAt(now.millisecondsSinceEpoch);
 
     _checkPurokProximity(pos);
 
@@ -1981,7 +1986,8 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       'distance': _distance,
       'speed': speedKmH,
       'avg_speed': avgSpeed,
-      if (smoothSpeed != null) 'eta_speed': smoothSpeed,
+      // ETAs use the recent travel speed (stops included), not the speed while moving.
+      if (recentSpeed != null) 'eta_speed': recentSpeed,
       'heading': pos.heading,
       'accuracy': pos.accuracy,
       'fix_time': pos.timestamp.millisecondsSinceEpoch, // when the receiver took the fix
@@ -2122,11 +2128,11 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       // --- STAGED APPROACH (15 / 10 / 5 min) ---
       // Only while collecting, with a fresh fix, for an area still to be collected, and
       // only while the truck is actually getting closer to it.
-      final double? previousDist = _lastPurokDistance[key];
-      _lastPurokDistance[key] = dist;
-      if (!completedThisWeek && dist > geofenceRadius) {
-        final bool gettingCloser = previousDist == null || dist < previousDist - 5.0;
-        if (gettingCloser) _maybeNotifyApproach(p['name'].toString(), key, dist, geofenceRadius, pos);
+      // Sustained closing only: never on the first fix, never on a few metres of GPS wander.
+      final int nowMs = DateTime.now().millisecondsSinceEpoch;
+      _approachDetector.add(key, nowMs, dist);
+      if (!completedThisWeek && dist > geofenceRadius && _approachDetector.isApproaching(key, nowMs)) {
+        _maybeNotifyApproach(p['name'].toString(), key, dist, geofenceRadius, pos);
       }
 
       // Skip if already completed this week
@@ -2216,7 +2222,8 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     final int unread = NotificationInbox.unreadCount(_driverVisibleNotifications(), _inboxState);
     if (mounted) setState(() => _unreadNotifications = unread);
   }
-  final Map<String, double> _lastPurokDistance = <String, double>{}; // is the truck getting closer?
+  final ApproachDetector _approachDetector = ApproachDetector(); // is the truck really getting closer?
+  final RecentTravelSpeed _recentTravelSpeed = RecentTravelSpeed();
   final Set<String> _publishedArrivalKeys = <String>{}; // local guard in front of the once-only write
   double _lastAvgSpeedKmh = 0.0;
   final TrackGate _trackGate = TrackGate();
@@ -2256,8 +2263,8 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
   final Set<String> _approachNotifiedPuroks = {};
 
   /// "On the way" notification at the 15 / 10 / 5 minute stage. The ETA comes from the
-  /// real distance and the truck's real speed; when it cannot be justified (not ACTIVE,
-  /// stale GPS, unknown speed) nothing is sent and nothing is invented.
+  /// road-adjusted distance and the truck's recent travel speed (stops included); when it
+  /// cannot be justified (not ACTIVE, stale GPS, unknown speed) nothing is sent.
   void _maybeNotifyApproach(String areaName, String areaKey, double distM, double radiusM, Position pos) {
     if (_isSimulationMode || _sessionId == null) return;
     if (_collectionFrozen || _gpsSignalLost) return;
@@ -2265,8 +2272,8 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     final EtaResult eta = EtaPolicy.evaluate(
       status: _status,
       gpsAgeMs: 0, // this very fix was just accepted
-      distanceKm: (distM - radiusM) / 1000.0,
-      speedKmh: _speedSmoother.valueAt(DateTime.now().millisecondsSinceEpoch),
+      distanceKm: EtaPolicy.roadDistanceKm((distM - radiusM) / 1000.0),
+      speedKmh: _recentTravelSpeed.kmhAt(DateTime.now().millisecondsSinceEpoch),
       averageSpeedKmh: _lastAvgSpeedKmh,
       arrivalRadiusM: 0,
     );
@@ -2291,6 +2298,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
         'purok': areaName,
         if (truckId != 'Unknown') 'truck_id': truckId,
         'eta_minutes': eta.minutes,
+        'eta_method': EtaPolicy.method,
       },
     ).then((bool created) {
       debugPrint("[AUTO-NOTIFY] $stageName for $areaName: ${created ? 'sent' : 'already sent for this trip'}");
@@ -5586,6 +5594,25 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       }
 
       await _updateTripStatus("FULL");
+
+      // A session that never really moved is not a collection: archive it (hidden from
+      // history, loads and analytics) and do not record it as a load on the server.
+      final double collectedKm = d is num ? d.toDouble() : frozenDistance;
+      if (collectedKm < LoadHistory.minLoadKm) {
+        try {
+          await _database.ref('$root/$tripId').update(<String, Object?>{
+            'archived': true,
+            'archived_reason': 'no_movement',
+            'archived_at': ServerValue.timestamp,
+          });
+        } catch (e) {
+          debugPrint("[FULL] could not archive no-movement session: $e");
+        }
+        if (mounted) {
+          CustomSnackBar.show(context, message: "No movement was recorded, so this session was not saved as a trip.", isError: true);
+        }
+        return true;
+      }
 
       if (res == CollectionFinalResult.finalized) {
         try {

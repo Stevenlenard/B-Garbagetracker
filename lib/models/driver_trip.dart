@@ -198,6 +198,10 @@ class DriverTrip {
   final String weightType;
   final DateTime? fullTime;
   final bool hasRecordedStartTime;
+
+  /// False when the record carries no date at all (no GPS point, timestamp or stored
+  /// date), so [startTime] is only a placeholder and must never place the trip on a day.
+  final bool hasKnownDate;
   final String durationDisplay;
   final String distanceDisplay;
 
@@ -268,6 +272,7 @@ class DriverTrip {
     this.weightType = "ESTIMATED",
     this.fullTime,
     this.hasRecordedStartTime = true,
+    this.hasKnownDate = true,
     this.durationDisplay = "Not recorded",
     this.distanceDisplay = "Unavailable",
     this.collectionDurationSeconds,
@@ -336,6 +341,7 @@ class DriverTrip {
       weightType: weightType ?? this.weightType,
       fullTime: fullTime ?? this.fullTime,
       hasRecordedStartTime: hasRecordedStartTime,
+      hasKnownDate: hasKnownDate,
       durationDisplay: durationDisplay,
       distanceDisplay: distanceDisplay,
       collectionDurationSeconds: collectionDurationSeconds ?? this.collectionDurationSeconds,
@@ -381,22 +387,62 @@ class DriverTrip {
     return unclassified > 0 ? unclassified : 0;
   }
 
+  /// Start of the Manila calendar day stored as "yyyy-MM-dd" (`date` / `route_date`).
+  static DateTime? _recordedDay(Object? raw) {
+    if (raw == null) return null;
+    final RegExpMatch? m = RegExp(r'^(\d{4})-(\d{2})-(\d{2})$').firstMatch(raw.toString().trim());
+    if (m == null) return null;
+    return DateTime.utc(int.parse(m.group(1)!), int.parse(m.group(2)!), int.parse(m.group(3)!))
+        .subtract(const Duration(hours: 8));
+  }
+
+  /// A stored time: a full date-time, or a time of day only ("8:05 PM", "20:05") placed
+  /// on [day]. A time of day without a day is unreadable (null), never "now".
+  static DateTime? _recordedInstant(Object? raw, DateTime? day) {
+    if (raw == null) return null;
+    final String s = raw.toString().trim();
+    if (s.isEmpty || s.startsWith('0000')) return null;
+    final DateTime? full = DateTime.tryParse(s);
+    if (full != null) return full;
+    if (day == null) return null;
+    final RegExpMatch? m = RegExp(r'^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([AaPp][Mm])?$').firstMatch(s);
+    if (m == null) return null;
+    int h = int.parse(m.group(1)!);
+    final int min = int.parse(m.group(2)!);
+    final int sec = int.tryParse(m.group(3) ?? '') ?? 0;
+    final String? ampm = m.group(4)?.toUpperCase();
+    if (ampm != null) {
+      if (h < 1 || h > 12) return null;
+      if (h == 12) h = 0;
+      if (ampm == 'PM') h += 12;
+    }
+    if (h > 23 || min > 59 || sec > 59) return null;
+    return day.add(Duration(hours: h, minutes: min, seconds: sec));
+  }
+
   factory DriverTrip.fromJson(Map<String, dynamic> json, {List<GpsPoint>? pointsList, List<TripEvent>? eventsList}) {
     final List<GpsPoint> pts = pointsList ?? [];
+    final DateTime? day = _recordedDay(json['date'] ?? json['route_date']);
 
-    DateTime st;
+    // Older Firebase trips store start_time/end_time as a time of day only ("8:05 PM")
+    // next to a `date`; they are combined. A record with no readable time keeps its
+    // stored day; one with neither is flagged instead of being dated "now".
+    DateTime? st;
+    bool startRecorded = true;
     if (pts.isNotEmpty) {
       st = pts.first.timestamp;
-    } else if (json['start_time'] != null) {
-      st = DateTime.tryParse(json['start_time'].toString()) ?? DateTime.now();
-    } else if (json['server_start_time'] != null) {
-      final raw = int.tryParse(json['server_start_time'].toString());
-      st = raw != null ? DateTime.fromMillisecondsSinceEpoch(raw) : DateTime.now();
-    } else if (json['created_at'] != null) {
-      st = DateTime.tryParse(json['created_at'].toString()) ?? DateTime.now();
     } else {
-      st = DateTime.now();
+      st = _recordedInstant(json['start_time'], null);
+      if (st == null && json['server_start_time'] != null) {
+        final raw = int.tryParse(json['server_start_time'].toString());
+        if (raw != null) st = DateTime.fromMillisecondsSinceEpoch(raw);
+      }
+      st ??= _recordedInstant(json['start_time'], day);
+      st ??= _recordedInstant(json['created_at'], day);
     }
+    if (st == null) startRecorded = false;
+    final bool knownDate = st != null || day != null;
+    st ??= day ?? DateTime.now();
 
     final String statusStr = (json['route_status'] ?? json['status'] ?? "ACTIVE").toString().toUpperCase();
 
@@ -404,7 +450,11 @@ class DriverTrip {
     if (pts.isNotEmpty && statusStr == 'COMPLETED') {
       et = pts.last.timestamp;
     } else if (json['end_time'] != null) {
-      et = DateTime.tryParse(json['end_time'].toString());
+      et = _recordedInstant(json['end_time'], day);
+      // A time-of-day end earlier than the start finished after midnight.
+      if (et != null && day != null && DateTime.tryParse(json['end_time'].toString()) == null && et.isBefore(st)) {
+        et = et.add(const Duration(days: 1));
+      }
     } else if (json['finished_at'] != null) {
       et = DateTime.tryParse(json['finished_at'].toString());
     } else if (json['completed_at'] != null) {
@@ -488,6 +538,9 @@ class DriverTrip {
     if (rec != null && rec['finalized_at_ms'] is num) {
       fTime = DateTime.fromMillisecondsSinceEpoch((rec['finalized_at_ms'] as num).toInt());
     }
+    if (fTime == null && json['full_time_ms'] is num) {
+      fTime = DateTime.fromMillisecondsSinceEpoch((json['full_time_ms'] as num).toInt());
+    }
     // `full_time` from the PHP load history is a display string ("9:30 AM"); the
     // machine-readable value is `raw_full_time`.
     fTime ??= json['full_time'] != null ? DateTime.tryParse(json['full_time'].toString()) : null;
@@ -503,7 +556,7 @@ class DriverTrip {
         json['has_full_event'] == true ||
         (json['full_time'] != null && DateTime.tryParse(json['full_time'].toString()) != null);
 
-    final bool hasStart = json['start_time'] != null && json['start_time'].toString().isNotEmpty && !json['start_time'].toString().startsWith("0000");
+    final bool hasStart = startRecorded;
     final String durDisp = (json['duration'] ?? json['duration_display'])?.toString() ?? (hasStart ? "" : "Not recorded");
     final String distDisp = (json['distance_display'])?.toString() ?? (calcDist > 0.01 ? "${calcDist.toStringAsFixed(1)} km" : "Unavailable");
 
@@ -535,6 +588,7 @@ class DriverTrip {
       weightType: weightTypeVal,
       fullTime: fTime,
       hasRecordedStartTime: hasStart,
+      hasKnownDate: knownDate,
       durationDisplay: durDisp,
       distanceDisplay: distDisp,
       collectionDurationSeconds: collectionSec,

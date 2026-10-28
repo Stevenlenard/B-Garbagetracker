@@ -142,11 +142,15 @@ void main() {
       expect(r.loads.length, 1);
     });
 
-    test('a FULL trip with zero distance is a load (not silently dropped)', () async {
-      final r = await repo(mysql: [trip('zero', km: 0.0)]).load();
+    test('a FULL trip that never moved is not a load', () async {
+      final r = await repo(mysql: [trip('zero', km: 0.0), trip('wander', km: 0.008)]).load();
+      expect(r.loads, isEmpty);
+      expect(LoadHistory.totals(r.loads).weightKg, 0);
+    });
+
+    test('a FULL trip that moved at least 50 m is a load', () async {
+      final r = await repo(mysql: [trip('short', km: 0.05)]).load();
       expect(r.loads.length, 1);
-      expect(r.loads.single.totalDistanceKm, 0.0);
-      expect(LoadHistory.totals(r.loads).weightKg, 5000);
     });
 
     test('a legacy COMPLETED trip with no FULL event and no movement is not a load', () async {

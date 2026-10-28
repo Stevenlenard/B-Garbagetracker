@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
+import '../models/driver_trip.dart';
 import '../utils/collection_visits.dart';
 import '../utils/eta_evaluation.dart';
 import '../utils/predictive_models.dart';
@@ -15,10 +16,14 @@ class PredictiveModelsCard extends StatefulWidget {
     required this.areas,
     required this.range,
     required this.etaVisits,
+    required this.loads,
   });
 
-  /// `driver_routes` snapshot.
+  /// `driver_routes` snapshot (GPS routes for the arrival regression).
   final Map trips;
+
+  /// The Load History list (same records as the Waste Collection Summary) for the load forecast.
+  final List<DriverTrip> loads;
   final List<AreaGeofence> areas;
   final DateTimeRange range;
 
@@ -46,11 +51,11 @@ class _PredictiveModelsCardState extends State<PredictiveModelsCard> {
 
   _Models _models() {
     final Object key = Object.hash(identityHashCode(widget.trips), widget.trips.length, widget.areas.length,
-        widget.range.start, widget.range.end, widget.etaVisits.length);
+        widget.range.start, widget.range.end, widget.etaVisits.length, identityHashCode(widget.loads), widget.loads.length);
     if (_cache != null && _cacheKey == key) return _cache!;
     final ArrivalRegressionReport reg = ArrivalRegression.evaluate(ArrivalRegression.extract(widget.trips, widget.areas));
     final ({List<DateTime> days, List<double> kg}) daily =
-        MovingAverageForecast.dailyLoads(widget.trips, from: widget.range.start, to: widget.range.end);
+        MovingAverageForecast.dailyLoadsFrom(widget.loads, from: widget.range.start, to: widget.range.end);
     final MovingAverageReport ma = MovingAverageForecast.evaluate(daily.days, daily.kg);
     final List<double> act = <double>[], pred = <double>[];
     for (final EtaVisit v in widget.etaVisits) {

@@ -15,7 +15,10 @@ function gt_is_finalized_trip(array $row)
     return !empty($row['full_time']) && $row['full_time'] !== '0000-00-00 00:00:00';
 }
 
-/** Rows -> finalized, unique per trip_id (the richest row wins: FULL time + load known). */
+/** Less than this over a whole collection is a parked truck's GPS wander, not a trip (same rule as the app). */
+const GT_MIN_LOAD_KM = 0.05;
+
+/** Rows -> finalized trips that really moved, unique per trip_id (the richest row wins: FULL time + load known). */
 function gt_unique_finalized_trips(array $rows)
 {
     $byId = [];
@@ -33,7 +36,9 @@ function gt_unique_finalized_trips(array $rows)
         };
         if ($score($r) > $score($byId[$id])) $byId[$id] = $r;
     }
-    return array_values($byId);
+    return array_values(array_filter($byId, function ($t) {
+        return (float)($t['total_distance_km'] ?? 0) >= GT_MIN_LOAD_KM;
+    }));
 }
 
 /** Weight of one load in kg: the stored estimate/measurement, otherwise the 5 t default. */

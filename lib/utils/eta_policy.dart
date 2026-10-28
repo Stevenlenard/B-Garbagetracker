@@ -63,6 +63,16 @@ class EtaPolicy {
   static const int maxMinutes = 90; // beyond this an estimate is not meaningful
   static const List<int> stages = <int>[15, 10, 5];
 
+  /// Roads are longer than the straight line between two points; a straight-line
+  /// distance is scaled by this typical urban detour factor before it is used.
+  static const double roadFactor = 1.3;
+
+  static double roadDistanceKm(double straightKm) => straightKm * roadFactor;
+
+  /// Stamped on every approach alert computed this way. Alerts from the earlier method
+  /// (first-fix alerts, speed while moving) carry no stamp and are not evaluated.
+  static const String method = 'recent_travel_speed';
+
   static EtaResult evaluate({
     required String? status,
     required int? gpsAgeMs,

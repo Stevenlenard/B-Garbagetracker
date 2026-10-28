@@ -195,11 +195,14 @@ class EtaEvaluation {
   /// [canonicalize] maps an area label to its canonical name (identity by default).
   /// [closedTripIds] are trips known to have ended (FULL/COMPLETED); a visit of such a trip with
   /// no arrival is "withdrawn".
+  /// [requiredMethod], when given, keeps only approach alerts stamped with that `eta_method`
+  /// (alerts from an earlier, superseded method are not evaluated). Arrivals are unaffected.
   static List<EtaVisit> build(
     Object? rawNotifications, {
     required int nowMs,
     String? Function(String raw)? canonicalize,
     Set<String> closedTripIds = const <String>{},
+    String? requiredMethod,
   }) {
     if (rawNotifications is! Map) return const <EtaVisit>[];
     String canon(String raw) => (canonicalize?.call(raw) ?? raw).trim();
@@ -224,6 +227,7 @@ class EtaEvaluation {
       final bool isApproach = type == 'auto_approach' ||
           (!isArrival && (lower.contains('approaching') || lower.contains('on the way')));
       if (!isArrival && !isApproach) return;
+      if (isApproach && requiredMethod != null && _str(val['eta_method']) != requiredMethod) return;
 
       final String area = canon(areaRaw);
       String truck = _cleanTruck(_str(val['truck_id']));

@@ -400,9 +400,10 @@ void main() {
       expect(LoadHistory.isLoad(active), isFalse);
     });
 
-    test('a FULL trip with zero distance still has a load record', () {
-      final t = trip('trip-0', km: 0);
-      expect(TripLinks.toLoad(t).isAvailable, isTrue);
+    test('a FULL trip that never moved has no load record, and says why', () {
+      final TripLink link = TripLinks.toLoad(trip('trip-0', km: 0));
+      expect(link.isAvailable, isFalse);
+      expect(link.message, contains('no recorded movement'));
     });
 
     test('a trip without an id cannot be linked', () {

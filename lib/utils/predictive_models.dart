@@ -1,6 +1,8 @@
 import 'dart:math' as math;
 
+import '../models/driver_trip.dart';
 import 'collection_visits.dart';
+import 'load_history.dart';
 import 'trip_archive.dart';
 
 /// Objective 3 of the study: data modeling and the evaluation of its predictive performance.
@@ -290,6 +292,27 @@ class MovingAverageForecast {
   MovingAverageForecast._();
 
   static const Duration manila = Duration(hours: 8);
+
+  /// Daily load (kg) from the SAME load list as Load History and the Waste Collection Summary
+  /// ([loads] = LoadHistoryResult.loads: finalized, moved, one record per trip), Asia/Manila days, zero-filled.
+  static ({List<DateTime> days, List<double> kg}) dailyLoadsFrom(Iterable<DriverTrip> loads,
+      {required DateTime from, required DateTime to}) {
+    final DateTime start = DateTime.utc(from.year, from.month, from.day), end = DateTime.utc(to.year, to.month, to.day);
+    final Map<DateTime, double> kg = <DateTime, double>{};
+    for (final DriverTrip t in LoadHistory.uniqueLoads(loads.where(LoadHistory.isLoad))) {
+      final DateTime m = LoadHistory.manila(LoadHistory.eventTime(t));
+      final DateTime d = DateTime.utc(m.year, m.month, m.day);
+      if (d.isBefore(start) || d.isAfter(end)) continue;
+      kg[d] = (kg[d] ?? 0) + t.weightKg;
+    }
+    final List<DateTime> days = <DateTime>[];
+    final List<double> values = <double>[];
+    for (DateTime d = start; !d.isAfter(end); d = d.add(const Duration(days: 1))) {
+      days.add(d);
+      values.add(kg[d] ?? 0);
+    }
+    return (days: days, kg: values);
+  }
 
   /// Daily load (kg) from finalized collections (FULL) of real trips, Asia/Manila calendar days, zero-filled.
   static ({List<DateTime> days, List<double> kg}) dailyLoads(Map trips, {required DateTime from, required DateTime to}) {

@@ -485,7 +485,7 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
           final EtaResult r = EtaPolicy.evaluate(
             status: FleetStatus.collectionState(val),
             gpsAgeMs: FleetStatus.gpsAgeMs(val, nowMs: nowMs),
-            distanceKm: distKm,
+            distanceKm: EtaPolicy.roadDistanceKm(distKm),
             speedKmh: double.tryParse('${val['eta_speed']}') ?? double.tryParse('${val['speed']}'),
             averageSpeedKmh: double.tryParse('${val['avg_speed']}'),
           );

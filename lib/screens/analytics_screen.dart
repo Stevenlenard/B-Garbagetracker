@@ -2,6 +2,7 @@ import '../widgets/period_selector.dart';
 import '../utils/route_history_navigation.dart';
 import '../utils/trip_links.dart';
 import '../utils/eta_evaluation.dart';
+import '../utils/eta_policy.dart';
 import '../utils/predictive_models.dart';
 import '../utils/analytics_report_data.dart';
 import '../services/analytics_pdf_builder.dart';
@@ -1099,7 +1100,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
     try {
       final ArrivalRegressionReport reg = ArrivalRegression.evaluate(ArrivalRegression.extract(_allDriverRoutes, _geofences));
       final ({List<DateTime> days, List<double> kg}) daily =
-          MovingAverageForecast.dailyLoads(_allDriverRoutes, from: _selectedDateRange.start, to: _selectedDateRange.end);
+          MovingAverageForecast.dailyLoadsFrom(_loadTrips, from: _selectedDateRange.start, to: _selectedDateRange.end);
       final MovingAverageReport ma = MovingAverageForecast.evaluate(daily.days, daily.kg);
       final List<double> act = <double>[], pred = <double>[];
       for (final EtaVisit v in _etaFilteredVisits) {
@@ -3451,6 +3452,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
           areas: _geofences,
           range: _selectedDateRange,
           etaVisits: _etaFilteredVisits,
+          loads: _loadTrips,
         ),
         const SizedBox(height: 16),
         _buildScheduledRoutesCard(),
@@ -8412,6 +8414,9 @@ List<EtaVisit> _buildEtaVisits(Object? rawNotifications) {
     rawNotifications,
     nowMs: DateTime.now().millisecondsSinceEpoch,
     canonicalize: (String raw) => ServiceAreaService.canonicalizeAreaName(raw) ?? raw,
+    // Only alerts from the corrected method: earlier ones were sent on the first fix to areas
+    // the truck was not approaching, with the speed while moving.
+    requiredMethod: EtaPolicy.method,
   );
 }
 

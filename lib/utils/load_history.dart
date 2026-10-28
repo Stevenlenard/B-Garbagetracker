@@ -4,16 +4,20 @@ import '../models/driver_trip.dart';
 /// Summary. All three are computed from the SAME list, so one finalized collection is
 /// counted exactly once everywhere.
 ///
-/// A load is a FINALIZED collection trip (FULL, or a legacy COMPLETED trip that had
-/// real movement). Unfinished trips are never loads, however far they travelled.
+/// A load is a FINALIZED collection trip (FULL or COMPLETED) that really moved.
+/// Unfinished trips are never loads, however far they travelled, and a finished session
+/// that covered less than [minLoadKm] is not a collection at all.
 class LoadHistory {
   LoadHistory._();
 
+  /// Less than this over a whole collection is GPS wander of a parked truck, not a trip.
+  static const double minLoadKm = 0.05;
+
   static bool isLoad(DriverTrip t) {
     if (!t.isFinalizedCollection) return false;
-    // A real FULL event always counts; a legacy finished trip must show real movement
-    // (zero-distance stubs are not loads).
-    return t.hasFullEvent || t.totalDistanceKm >= 0.015 || t.points.length >= 2;
+    // A record with no recorded date cannot be placed on any day.
+    if (!t.hasKnownDate && t.fullTime == null && t.endTime == null) return false;
+    return t.totalDistanceKm >= minLoadKm;
   }
 
   /// The time a load is reported under: when the truck became FULL.
