@@ -2190,6 +2190,8 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     }
 
     final String driverId = _user!.userId.toString();
+    // The nearest area still to be collected (see below): the only one that may get an "on the way" alert.
+    ({String name, String key, double dist, bool approaching})? next;
 
     for (var p in _purokConfigs) {
       // Canonical id: the weekly records, the maps and the analytics all read areas by id.
@@ -2208,8 +2210,8 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       // Sustained closing only: never on the first fix, never on a few metres of GPS wander.
       final int nowMs = DateTime.now().millisecondsSinceEpoch;
       _approachDetector.add(key, nowMs, dist);
-      if (!completedThisWeek && dist > geofenceRadius && _approachDetector.isApproaching(key, nowMs)) {
-        _maybeNotifyApproach(p['name'].toString(), key, dist, geofenceRadius, pos);
+      if (!completedThisWeek && !_autoNotifiedPuroks.contains(p['name'].toString()) && (next == null || dist < next.dist)) {
+        next = (name: p['name'].toString(), key: key, dist: dist, approaching: _approachDetector.isApproaching(key, nowMs));
       }
 
       // Skip if already completed this week
@@ -2264,6 +2266,14 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
         // Reset counter if they leave
         _purokConsecutivePoints[key] = 0;
       }
+    }
+    // Next area only: of the areas still to be collected, the truck serves the NEAREST one next. Only that area is
+    // alerted, and only while the truck is closing in on it. Farther areas were alerted far too early (Purok 3 was
+    // told "8 min" while the truck still served Brixton Homes, and it arrived 23 min later); they get their alert
+    // once they are the next area.
+    final n = next;
+    if (n != null && n.approaching && n.dist > 100.0) {
+      _maybeNotifyApproach(n.name, n.key, n.dist, 100.0, pos);
     }
     _proxPrev = pos;
     _proxPrevAt = DateTime.now();
