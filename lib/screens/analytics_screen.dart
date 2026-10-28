@@ -2,7 +2,6 @@ import '../widgets/period_selector.dart';
 import '../utils/route_history_navigation.dart';
 import '../utils/trip_links.dart';
 import '../utils/eta_evaluation.dart';
-import '../utils/eta_policy.dart';
 import '../utils/predictive_models.dart';
 import '../utils/analytics_report_data.dart';
 import '../services/analytics_pdf_builder.dart';
@@ -76,6 +75,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
   // Verified collection visits (GPS evidence; utils/collection_visits.dart).
   VisitSummary? _visitSummary;
   List<AreaGeofence> _geofences = const <AreaGeofence>[];
+  Object? _etaRawNotifications;
   bool _geofencesFromDefaults = false;
   Timer? _visitDebounce;
 
@@ -1466,6 +1466,15 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
       _geofencesFromDefaults = defaults;
       _applyVisitSummary();
     });
+    _etaAreas = list;
+    _refreshEtaVisits();
+  }
+
+  /// ETA arrivals are the verified (green) visits, so the ETA list is rebuilt whenever the
+  /// trips or the areas change, not only when a notification arrives.
+  void _refreshEtaVisits() {
+    if (_etaRawNotifications == null || !mounted) return;
+    setState(() => _etaVisits = _buildEtaVisits(_etaRawNotifications));
   }
 
   /// Recomputes verified visits for the selected period and area (no setState).
@@ -1537,6 +1546,9 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
     _routesSubscription = _database.ref('driver_routes').onValue.listen((event) {
       if (event.snapshot.exists && event.snapshot.value != null) {
         _allDriverRoutes = event.snapshot.value as Map;
+        _etaClosedTripIds = _closedTripIds(_allDriverRoutes);
+        _etaRoutes = _allDriverRoutes;
+        _refreshEtaVisits();
         _recalculateRoutesMetrics();
         _calculateAnalytics();
 
@@ -4155,7 +4167,8 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
   void _listenToFirebaseEtaNotifications() {
     _etaNotifSubscription?.cancel();
     _etaNotifSubscription = _database.ref('notifications').onValue.listen((event) {
-      final List<EtaVisit> visits = _buildEtaVisits(event.snapshot.exists ? event.snapshot.value : null);
+      _etaRawNotifications = event.snapshot.exists ? event.snapshot.value : null;
+      final List<EtaVisit> visits = _buildEtaVisits(_etaRawNotifications);
       if (mounted) {
         setState(() {
           _etaVisits = visits;
@@ -8409,15 +8422,67 @@ class _EtaPerformanceModalState extends State<_EtaPerformanceModal> {
 
 /// Builds the visits from the raw `notifications` node: the single ETA evaluation entry point
 /// shared by the Analytics card and the ETA Performance details.
+/// Trips that have ended (FULL / COMPLETED / FINISHED, or archived): their trucks can no longer
+/// arrive anywhere, so an alert of theirs without an arrival is not "awaiting".
+Set<String> _etaClosedTripIds = <String>{};
+
+Set<String> _closedTripIds(Map trips) {
+  final Set<String> out = <String>{};
+  trips.forEach((Object? key, Object? v) {
+    if (v is! Map) return;
+    final String s = (v['route_status'] ?? v['status'] ?? '').toString().toUpperCase();
+    if (s == 'FULL' || s == 'COMPLETED' || s == 'FINISHED' || v['collection_finalized'] == true || TripArchive.isArchived(v)) {
+      out.add(key.toString());
+    }
+  });
+  return out;
+}
+
+/// Trips and areas the ETA arrivals are verified against (kept in sync by the Analytics screen).
+Map _etaRoutes = {};
+List<AreaGeofence> _etaAreas = const <AreaGeofence>[];
+
+/// The notifications with their arrivals replaced by the VERIFIED (green) visits: an arrival
+/// is the first fix of a stay of at least 2 accurate GPS fixes, at least 1 minute apart,
+/// inside the area while ACTIVE (VisitPolicy) - the same rule that turns an area green on
+/// Collection Route Optimization. Driver-app arrival alerts no longer count on their own.
+Object? _withVerifiedArrivals(Object? rawNotifications) {
+  if (rawNotifications is! Map) return rawNotifications;
+  final Map<String, Object?> out = <String, Object?>{};
+  rawNotifications.forEach((Object? k, Object? v) {
+    if (v is Map && (v['type'] ?? '').toString() == 'auto_arrival') return;
+    out[k.toString()] = v;
+  });
+  if (_etaRoutes.isEmpty || _etaAreas.isEmpty) return out;
+  final List<CollectionVisit> visits = CollectionVisits.detect(
+    trips: _etaRoutes,
+    areas: _etaAreas,
+    start: DateTime(2000),
+    end: DateTime.now().add(const Duration(days: 1)),
+  ).visits;
+  for (final CollectionVisit v in visits) {
+    if (v.simulated) continue;
+    out['verified_${v.tripId}_${v.area}'] = <String, Object?>{
+      'type': 'auto_arrival',
+      'purok': v.area,
+      'trip_id': v.tripId,
+      'timestamp': v.firstFixMs,
+    };
+  }
+  return out;
+}
+
 List<EtaVisit> _buildEtaVisits(Object? rawNotifications) {
+  // Valid ETAs only: an alert counts when the truck really reached that area on that trip
+  // (verified, green visit), or while its trip is still running and it can still arrive.
+  // Alerts for areas the truck never reached (sent to random areas) are invalid and are
+  // left out of every figure and list.
   return EtaEvaluation.build(
-    rawNotifications,
+    _withVerifiedArrivals(rawNotifications),
     nowMs: DateTime.now().millisecondsSinceEpoch,
     canonicalize: (String raw) => ServiceAreaService.canonicalizeAreaName(raw) ?? raw,
-    // Only alerts from the corrected method: earlier ones were sent on the first fix to areas
-    // the truck was not approaching, with the speed while moving.
-    requiredMethod: EtaPolicy.method,
-  );
+    closedTripIds: _etaClosedTripIds,
+  ).where((EtaVisit v) => v.status == EtaVisitStatus.evaluated || v.status == EtaVisitStatus.awaiting).toList();
 }
 
 String _etaClock(int? ms) => ms == null ? '\u2014' : DateFormat('MMM d, h:mm:ss a').format(EtaEvaluation.manila(ms));
