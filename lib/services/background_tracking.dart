@@ -1,3 +1,6 @@
+import 'dart:async';
+
+import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -28,12 +31,33 @@ class BackgroundTracking {
   /// True while the trip's own foreground service runs (see TrackingService.kt). Set from the results below.
   static bool serviceRunning = false;
 
+  /// Remote switch `admin_settings/trip_service_enabled` (default on): turning it off makes the app fall back to
+  /// the GPS stream's own service without a new APK.
+  static bool serviceAllowed = true;
+  static StreamSubscription<DatabaseEvent>? _switchSub;
+
+  static void watchSwitch() {
+    if (!supported || _switchSub != null) return;
+    try {
+      _switchSub = FirebaseDatabase.instance.ref('admin_settings/trip_service_enabled').onValue.listen((DatabaseEvent e) {
+        serviceAllowed = e.snapshot.value != false;
+      }, onError: (_) {});
+    } catch (_) {}
+  }
+
   /// Starts the trip-long foreground service that keeps the app running while another app is in front.
   /// Must be called while the app is on screen. False when not possible (web, iOS, no location permission).
   static Future<bool> startTripService() async {
     if (!supported) return false;
     try {
-      serviceRunning = (await _channel.invokeMethod<bool>('startTrackingService')) ?? false;
+      final bool requested = (await _channel.invokeMethod<bool>('startTrackingService')) ?? false;
+      // Relied on only once the service has really become a foreground service (Android may refuse it).
+      bool confirmed = false;
+      for (int i = 0; requested && !confirmed && i < 10; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+        confirmed = (await _channel.invokeMethod<bool>('isTrackingServiceRunning')) ?? false;
+      }
+      serviceRunning = confirmed;
     } catch (_) {
       serviceRunning = false;
     }

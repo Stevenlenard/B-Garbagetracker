@@ -109,7 +109,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
   /// throttle its location updates when the driver opens Messenger, takes a call or locks the phone.
   Future<void> _syncTripService({bool rearmStream = true}) async {
     if (!BackgroundTracking.supported || _isSimulationMode) return;
-    if (_tripNeedsService) {
+    if (_tripNeedsService && BackgroundTracking.serviceAllowed) {
       if (!BackgroundTracking.serviceRunning && _inForeground) {
         // A resumed trip (e.g. signing in on another phone) can get here before location is allowed; the service
         // is started on a later resume once it is.
@@ -233,6 +233,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     EtaModelSync.start();
+    BackgroundTracking.watchSwitch();
     _gpsWatchdog = Timer.periodic(const Duration(seconds: 15), (_) => _ensureGpsAlive());
     NotificationService.openHomeRequests.addListener(_openHomeFromNotification);
     _startClock();

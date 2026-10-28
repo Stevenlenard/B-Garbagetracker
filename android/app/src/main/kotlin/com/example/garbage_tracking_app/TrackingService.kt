@@ -116,7 +116,7 @@ class TrackingService : Service() {
         private fun buildNotification(context: Context): Notification {
             ensureChannel(context)
             return NotificationCompat.Builder(context, CHANNEL_ID)
-                .setSmallIcon(context.applicationInfo.icon)
+                .setSmallIcon(android.R.drawable.ic_menu_mylocation) // a valid status-bar icon on every phone (the adaptive app icon is not)
                 .setContentTitle("Garbage Truck Tracker")
                 .setContentText("Trip in progress: sharing this truck's live location.")
                 .setOngoing(true)
@@ -131,7 +131,7 @@ class TrackingService : Service() {
             try {
                 ensureChannel(context)
                 val n = NotificationCompat.Builder(context, CHANNEL_ID)
-                    .setSmallIcon(context.applicationInfo.icon)
+                    .setSmallIcon(android.R.drawable.ic_menu_mylocation) // a valid status-bar icon on every phone (the adaptive app icon is not)
                     .setContentTitle("Trip tracking stopped")
                     .setContentText("The phone closed the app. Tap to open it and continue the trip.")
                     .setPriority(NotificationCompat.PRIORITY_HIGH)
@@ -144,16 +144,16 @@ class TrackingService : Service() {
         }
 
         /**
-         * Must be called while the app is on screen (Android does not allow starting it from the background), and only
-         * with location permission: a location foreground service without it is refused, and a service started with
-         * startForegroundService that never becomes a foreground service makes Android crash the app.
+         * Must be called while the app is on screen, and only with location permission. Started with startService (the
+         * app is in the foreground): the service then promotes itself with startForeground, and if Android refuses that,
+         * the service simply ends. startForegroundService would make Android kill the whole app in that case.
          */
         fun start(context: Context): Boolean {
             val fine = ContextCompat.checkSelfPermission(context, android.Manifest.permission.ACCESS_FINE_LOCATION)
             val coarse = ContextCompat.checkSelfPermission(context, android.Manifest.permission.ACCESS_COARSE_LOCATION)
             if (fine != PackageManager.PERMISSION_GRANTED && coarse != PackageManager.PERMISSION_GRANTED) return false
             return try {
-                ContextCompat.startForegroundService(context, Intent(context, TrackingService::class.java).setAction(ACTION_START))
+                context.startService(Intent(context, TrackingService::class.java).setAction(ACTION_START))
                 true
             } catch (_: Exception) {
                 false
