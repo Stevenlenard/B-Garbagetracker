@@ -22,7 +22,8 @@ import 'package:geolocator/geolocator.dart' as geo;
 import '../utils/app_theme.dart';
 import '../widgets/fade_slide_entrance.dart';
 import '../utils/custom_notification.dart';
-import '../utils/prediction_engine.dart';
+import '../utils/eta_evaluation.dart';
+import '../utils/trip_eta.dart';
 import '../utils/fleet_status.dart';
 import '../services/truck_assignment_service.dart';
 import '../api/api_service.dart';
@@ -52,6 +53,9 @@ class TrackTrucksScreen extends StatefulWidget {
 }
 
 class _TrackTrucksScreenState extends State<TrackTrucksScreen> with TickerProviderStateMixin {
+  // "on the way" alerts: the ETA on the fleet cards.
+  Object? _etaNotifications;
+  StreamSubscription<DatabaseEvent>? _etaNotificationsSub;
   final FirebaseDatabase _database = FirebaseDatabase.instance;
   MapboxMap? mapboxMap;
   List<Map<dynamic, dynamic>> _trucks = [];
@@ -268,6 +272,9 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> with TickerProvid
   @override
   void initState() {
     super.initState();
+    _etaNotificationsSub = FirebaseDatabase.instance.ref('notifications').onValue.listen((DatabaseEvent e) {
+      if (mounted) setState(() => _etaNotifications = e.snapshot.value);
+    }, onError: (_) {});
     _loadCurrentUser();
     _listenToTrucks();
     _listenToTruckMeta();
@@ -839,6 +846,7 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> with TickerProvid
 
   @override
   void dispose() {
+    _etaNotificationsSub?.cancel();
     _replayTimer?.cancel();
     _historySheetExtent.dispose();
     _mapLoadTimeout?.cancel();
@@ -3163,14 +3171,19 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> with TickerProvid
     final Color statusBgColor = _getFleetStatusBgColor(status);
 
     final double speed = double.tryParse(truck['speed']?.toString() ?? '0') ?? 0.0;
-    final double dist = double.tryParse(truck['total_distance']?.toString() ?? truck['total_distance_km']?.toString() ?? '0') ?? 0.0;
+    final double dist = double.tryParse((truck['distance'] ?? truck['total_distance'] ?? truck['total_distance_km'] ?? 0).toString()) ?? 0.0;
     final double fuel = double.tryParse((truck['fuel'] ?? truck['fuel_level'] ?? 0.0).toString()) ?? 0.0;
     final int stops = int.tryParse((truck['detected_stops_count'] ?? truck['stops_count'] ?? truck['total_stops'] ?? 0).toString()) ?? 0;
     final String area = (truck['current_purok'] ?? truck['location'] ?? truck['area'] ?? truck['purok'] ?? "Balintawak").toString();
 
-    final double etaMins = PredictionEngine.estimateArrivalTime(dist > 0 ? dist : 2.5, [speed > 5 ? speed : 15.0]);
-    final String eta = isActive ? "${etaMins.toStringAsFixed(0)} mins" : "--";
-    String lastUpdate = truck['updatedAt'] != null || truck['lastSeen'] != null ? "just now" : "Offline";
+    // ETA: the latest "on the way" alert of this trip for an area not reached yet, counted down (never guessed).
+    final int nowMs = DateTime.now().millisecondsSinceEpoch;
+    final TripEta? tripEta = isActive ? TripEta.latest(_etaNotifications, truck['current_session']?.toString(), nowMs: nowMs) : null;
+    final String eta = tripEta == null ? "--" : (tripEta.minutesLeft <= 0 ? "due now" : "${tripEta.minutesLeft} min");
+    final String startText = isActive && (truck['start_time'] ?? '').toString().isNotEmpty ? truck['start_time'].toString() : '--:--';
+    final int seenMs = FleetStatus.parseTimestampMs(truck['lastSeen'] ?? truck['last_seen']);
+    final int ageS = seenMs == 0 ? -1 : ((nowMs - seenMs) / 1000).round();
+    final String lastUpdate = ageS < 0 ? "Offline" : (ageS < 60 ? "just now" : (ageS < 3600 ? "${ageS ~/ 60} min ago" : "${ageS ~/ 3600} h ago"));
 
     final bool isBeingFollowed = _isFollowLocked && _followedTruckId?.toUpperCase() == tid.toUpperCase();
 
@@ -3324,9 +3337,19 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> with TickerProvid
           // Footer
           Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
             _buildFooterInfo(Icons.access_time_rounded, "Last Update: $lastUpdate"),
-            _buildFooterInfo(null, "Start: --:--"),
+            _buildFooterInfo(null, "Start: $startText"),
             _buildFooterInfo(null, "ETA: $eta", isTeal: true),
           ]),
+          if (tripEta != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Text(
+                "Next area: ${tripEta.area} · alert sent ${DateFormat('h:mm a').format(EtaEvaluation.manila(tripEta.sentMs))}",
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 10, color: Colors.grey, fontWeight: FontWeight.w700),
+              ),
+            ),
         ])),
     );
   }

@@ -13,6 +13,8 @@ import '../chatbot/fleet_snapshot.dart';
 import '../services/service_area_service.dart';
 import '../utils/collection_status.dart';
 import '../utils/collection_visits.dart';
+import '../utils/eta_evaluation.dart';
+import '../utils/verified_eta.dart';
 import '../utils/history_playback.dart';
 import '../utils/map_colors.dart';
 import '../utils/path_comparison.dart';
@@ -29,6 +31,7 @@ class CollectionData {
     required this.weeklyProgress,
     this.areasFromDefaults = false,
     this.areaIdToName = const <String, String>{},
+    this.notifications,
   });
 
   /// `puroks` record id -> area name (weekly-progress records may be keyed by id).
@@ -42,6 +45,9 @@ class CollectionData {
   /// `weekly_collection_progress` (activity only, never counted as collection).
   final Object? weeklyProgress;
   final bool areasFromDefaults;
+
+  /// `notifications` (the "on the way" alerts whose ETA is compared with the verified arrival).
+  final Object? notifications;
 }
 
 abstract class CollectionDataSource {
@@ -70,6 +76,8 @@ class FirebaseCollectionDataSource implements CollectionDataSource {
     StreamSubscription<DatabaseEvent>? trips;
     StreamSubscription<DatabaseEvent>? simTrips;
     StreamSubscription<DatabaseEvent>? weekly;
+    StreamSubscription<DatabaseEvent>? notifs;
+    Object? notifValue;
     Map simMap = const <Object?, Object?>{};
     List<AreaGeofence>? areas;
     final Map<String, String> ids = <String, String>{};
@@ -89,7 +97,7 @@ class FirebaseCollectionDataSource implements CollectionDataSource {
                 for (final MapEntry<Object?, Object?> e in simMap.entries)
                   if (e.value is Map) 'sim:${e.key}': <Object?, Object?>{...(e.value as Map), 'is_simulation': true},
               };
-        c.add(CollectionData(areas: areas!, trips: merged, weeklyProgress: weeklyValue, areasFromDefaults: defaults, areaIdToName: ids));
+        c.add(CollectionData(areas: areas!, trips: merged, weeklyProgress: weeklyValue, areasFromDefaults: defaults, areaIdToName: ids, notifications: notifValue));
       }
     }
 
@@ -133,11 +141,16 @@ class FirebaseCollectionDataSource implements CollectionDataSource {
           weeklyValue = e.snapshot.value;
           emit();
         }, onError: (_) {});
+        notifs = _database.ref('notifications').onValue.listen((DatabaseEvent e) {
+          notifValue = e.snapshot.value;
+          emit();
+        }, onError: (_) {});
       },
       onCancel: () async {
         await trips?.cancel();
         await simTrips?.cancel();
         await weekly?.cancel();
+        await notifs?.cancel();
       },
     );
     return c.stream;
@@ -218,6 +231,7 @@ class _CollectionRouteOptimizationScreenState extends State<CollectionRouteOptim
   Object? _error;
   DateTime? _lastDataAt;
   List<CollectionVisit> _visits = const <CollectionVisit>[];
+  List<EtaVisit> _etaVisits = const <EtaVisit>[];
   Map<String, List<AreaActivity>> _activity = const <String, List<AreaActivity>>{};
   List<AreaCollectionStatus> _statuses = const <AreaCollectionStatus>[];
   PathAnalysis? _paths;
@@ -400,6 +414,8 @@ class _CollectionRouteOptimizationScreenState extends State<CollectionRouteOptim
       for (final String n in names) n.replaceAll('/', '_'): n,
     };
     _visits = v.visits;
+    // Arrival estimates: each "on the way" alert against the verified (green) arrival, as in Analytics.
+    _etaVisits = VerifiedEta.visits(d.notifications, trips: d.trips, areas: d.areas, nowMs: _statusNowMs);
     _activity = CollectionStatus.activityFromWeeklyProgress(
         d.weeklyProgress, (String k) => byKey[k] ?? byKey[ServiceAreaService.canonicalizeAreaName(k) ?? ''],
         includeSimulated: !_viewOnly);
@@ -1314,6 +1330,7 @@ class _CollectionRouteOptimizationScreenState extends State<CollectionRouteOptim
           row('Latest other activity',
               '${CollectionStatus.formatManila(s.latestActivity!.ms)} (${s.latestActivity!.source}; not a verified visit)'),
         row('Verified visits (${widget.config.windowDays} days)', '${s.confirmedVisits}'),
+        ..._etaDetails(area),
         if (history.isNotEmpty) ...<Widget>[
           const SizedBox(height: 8),
           const Text('Verified visit history', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 12.5, color: _ink)),
@@ -1336,6 +1353,59 @@ class _CollectionRouteOptimizationScreenState extends State<CollectionRouteOptim
         ],
       ],
     );
+  }
+
+  /// The arrival estimates of [area] on the selected day: when each "on the way" alert was sent, the ETA it
+  /// stated, when the truck actually arrived (verified visit) and the difference.
+  List<Widget> _etaDetails(String area) {
+    final DateTime day = _day;
+    bool onDay(int ms) {
+      final DateTime m = EtaEvaluation.manila(ms);
+      return m.year == day.year && m.month == day.month && m.day == day.day;
+    }
+
+    final List<EtaVisit> list = _etaVisits.where((EtaVisit v) => v.area == area && onDay(v.sentMs)).toList()
+      ..sort((EtaVisit a, EtaVisit b) => b.sentMs.compareTo(a.sentMs));
+    String clock(int ms) => DateFormat('h:mm a').format(EtaEvaluation.manila(ms));
+    String diff(double m) {
+      if (m.abs() < 0.05) return 'on time';
+      return '${m.abs().toStringAsFixed(1)} min ${m > 0 ? 'late' : 'early'}';
+    }
+
+    return <Widget>[
+      const SizedBox(height: 8),
+      Text('Arrival estimates (${_isToday ? 'today' : DateFormat('MMM d').format(day)})',
+          style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 12.5, color: _ink)),
+      const SizedBox(height: 4),
+      if (list.isEmpty)
+        const Text('No "on the way" alert with an estimate was sent for this area on this day.',
+            style: TextStyle(fontSize: 12, color: _muted)),
+      ...list.take(5).map((EtaVisit v) {
+        final int? predicted = v.predictedArrivalMs;
+        final String sent = 'Alert sent ${clock(v.sentMs)} · ETA ${v.predictedMinutes} min'
+            '${predicted != null ? ' (expected ${clock(predicted)})' : ''}';
+        final String result = v.isEvaluated && v.arrivalMs != null
+            ? 'Arrived ${clock(v.arrivalMs!)} · ${diff(v.signedErrorMin!)}'
+            : 'Awaiting arrival';
+        final Color color = !v.isEvaluated
+            ? _muted
+            : (v.absErrorMin! <= 5 ? const Color(0xFF2E7D32) : const Color(0xFFEF6C00));
+        return Padding(
+          key: ValueKey<String>('eta-${v.visitKey}'),
+          padding: const EdgeInsets.only(bottom: 6),
+          child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
+            Padding(padding: const EdgeInsets.only(top: 3), child: Icon(Icons.schedule_rounded, size: 13, color: color)),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
+                Text(sent, style: const TextStyle(fontSize: 12, color: Color(0xFF475569))),
+                Text(result, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: color)),
+              ]),
+            ),
+          ]),
+        );
+      }),
+    ];
   }
 
   /// Route suggestion from recorded trips: shown only when real history allows a comparison.

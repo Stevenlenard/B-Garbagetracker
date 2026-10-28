@@ -15,8 +15,10 @@ import 'package:firebase_database/firebase_database.dart';
 import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart' hide Size, Visibility;
 import 'package:pointer_interceptor/pointer_interceptor.dart';
 import 'package:geolocator/geolocator.dart' as geo;
-import '../utils/prediction_engine.dart';
+import '../utils/eta_evaluation.dart';
+import '../utils/trip_eta.dart';
 import '../utils/fleet_status.dart';
+import 'package:intl/intl.dart';
 import '../utils/tracking_telemetry.dart';
 import '../utils/app_theme.dart';
 import '../utils/session_manager.dart';
@@ -46,6 +48,9 @@ class ResidentTrackTruckScreen extends StatefulWidget {
 }
 
 class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> with TickerProviderStateMixin {
+  // "on the way" alerts: the ETA on the fleet cards.
+  Object? _etaNotifications;
+  StreamSubscription<DatabaseEvent>? _etaNotificationsSub;
   final FirebaseDatabase _database = FirebaseDatabase.instance;
   MapboxMap? mapboxMap;
   List<Map<dynamic, dynamic>> _trucks = [];
@@ -105,6 +110,9 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
   @override
   void initState() {
     super.initState();
+    _etaNotificationsSub = FirebaseDatabase.instance.ref('notifications').onValue.listen((DatabaseEvent e) {
+      if (mounted) setState(() => _etaNotifications = e.snapshot.value);
+    }, onError: (_) {});
     _loadUser();
     _listenToUsers();
     _listenToTrucks();
@@ -323,6 +331,7 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
 
   @override
   void dispose() {
+    _etaNotificationsSub?.cancel();
     _routeSubscriptions.forEach((key, sub) => sub.cancel());
     _tripMetaSubscriptions.forEach((key, sub) => sub.cancel());
     _usersSubscription?.cancel();
@@ -1807,13 +1816,18 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
     final Color statusBgColor = _getFleetStatusBgColor(status);
 
     final double speed = (truck['speed'] ?? 0.0).toDouble();
-    final double dist = (truck['distance'] ?? 0.0).toDouble();
+    final double dist = double.tryParse((truck['distance'] ?? truck['total_distance'] ?? 0).toString()) ?? 0.0;
     final double fuel = (truck['fuel_level'] ?? 0.0).toDouble();
     final int stops = (truck['stops_count'] ?? 0) as int;
 
-    final double etaMins = PredictionEngine.estimateArrivalTime(dist > 0 ? dist : 2.5, [speed > 5 ? speed : 15.0]);
-    final String eta = isActive ? "${etaMins.toStringAsFixed(0)} mins" : "--";
-    String lastUpdate = truck['updatedAt'] != null ? "just now" : "Offline";
+    // ETA: the latest "on the way" alert of this trip for an area not reached yet, counted down (never guessed).
+    final int nowMs = DateTime.now().millisecondsSinceEpoch;
+    final TripEta? tripEta = isActive ? TripEta.latest(_etaNotifications, truck['current_session']?.toString(), nowMs: nowMs) : null;
+    final String eta = tripEta == null ? "--" : (tripEta.minutesLeft <= 0 ? "due now" : "${tripEta.minutesLeft} min");
+    final String startText = isActive && (truck['start_time'] ?? '').toString().isNotEmpty ? truck['start_time'].toString() : '--:--';
+    final int seenMs = FleetStatus.parseTimestampMs(truck['lastSeen'] ?? truck['last_seen']);
+    final int ageS = seenMs == 0 ? -1 : ((nowMs - seenMs) / 1000).round();
+    final String lastUpdate = ageS < 0 ? "Offline" : (ageS < 60 ? "just now" : (ageS < 3600 ? "${ageS ~/ 60} min ago" : "${ageS ~/ 3600} h ago"));
 
     final bool isBeingFollowed = _isFollowLocked && _followedTruckId?.toUpperCase() == tid.toUpperCase();
 
@@ -1970,9 +1984,19 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
           // Footer
           Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
             _buildFooterInfo(Icons.access_time_rounded, "Last Update: $lastUpdate"),
-            _buildFooterInfo(null, "Start: --:--"),
+            _buildFooterInfo(null, "Start: $startText"),
             _buildFooterInfo(null, "ETA: $eta", isTeal: true),
           ]),
+          if (tripEta != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Text(
+                "Next area: ${tripEta.area} · alert sent ${DateFormat('h:mm a').format(EtaEvaluation.manila(tripEta.sentMs))}",
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 10, color: Colors.grey, fontWeight: FontWeight.w700),
+              ),
+            ),
         ])),
     );
   }

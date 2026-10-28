@@ -2299,6 +2299,8 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
   }
 
   final Set<String> _approachNotifiedPuroks = {};
+  /// trip|area -> most urgent "on the way" stage sent (15 / 10 / 5).
+  final Map<String, int> _approachStageSent = <String, int>{};
 
   /// "On the way" notification at the 15 / 10 / 5 minute stage. The ETA comes from the
   /// road-adjusted distance and the truck's recent travel speed (stops included); when it
@@ -2318,9 +2320,17 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     final int? stage = eta.stage;
     if (eta.kind != EtaKind.minutes || stage == null) return;
 
+    // Already arrived there on this trip: no more "on the way" alerts for that area.
+    if (_autoNotifiedPuroks.contains(areaName)) return;
+    // Never a less urgent stage after a more urgent one (15 min after 10 min would look like the truck went back).
+    final String stageKey = '$_sessionId|$areaKey';
+    final int? sentStage = _approachStageSent[stageKey];
+    if (sentStage != null && stage >= sentStage) return;
+
     final String stageName = 'approach_$stage';
     final String guard = '$_sessionId|$areaKey|$stageName';
     if (!_publishedArrivalKeys.add(guard)) return; // already handled in this runtime
+    _approachStageSent[stageKey] = stage;
 
     final String truckId = _user?.preferredTruck ?? "Unknown";
     ArrivalNotifications.publishOnce(
@@ -2329,6 +2339,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       tripId: _sessionId!,
       areaKey: areaKey,
       nowMs: ServerClock.instance.nowMs(),
+      skipIfPublished: ArrivalNotifications.moreUrgentThan(stageName), // also after an app restart
       payload: <String, Object?>{
         'type': 'auto_approach',
         'title': 'Garbage Truck Approaching',
@@ -2342,6 +2353,13 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       debugPrint("[AUTO-NOTIFY] $stageName for $areaName: ${created ? 'sent' : 'already sent for this trip'}");
     }).catchError((Object e) {
       _publishedArrivalKeys.remove(guard); // retry on a later fix
+      if (_approachStageSent[stageKey] == stage) {
+        if (sentStage == null) {
+          _approachStageSent.remove(stageKey);
+        } else {
+          _approachStageSent[stageKey] = sentStage;
+        }
+      }
       debugPrint("[AUTO-NOTIFY] approach write failed: $e");
     });
   }
