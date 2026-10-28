@@ -39,6 +39,14 @@ class MainActivity : FlutterActivity() {
                 "moveToBack" -> {
                     result.success(moveTaskToBack(true))
                 }
+                // Trip-long foreground service that keeps the process (and so GPS, publishing and the heartbeat)
+                // running while another app is in front.
+                "startTrackingService" -> result.success(TrackingService.start(this))
+                "stopTrackingService" -> {
+                    TrackingService.stop(this)
+                    result.success(true)
+                }
+                "isTrackingServiceRunning" -> result.success(TrackingService.running)
                 "isBatteryExempt" -> {
                     val pm = getSystemService(POWER_SERVICE) as PowerManager
                     result.success(Build.VERSION.SDK_INT < Build.VERSION_CODES.M || pm.isIgnoringBatteryOptimizations(packageName))

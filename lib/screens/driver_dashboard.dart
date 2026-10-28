@@ -93,7 +93,35 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _inForeground = state == AppLifecycleState.resumed;
-    if (state == AppLifecycleState.resumed) _ensureGpsAlive(force: true);
+    if (state == AppLifecycleState.resumed) {
+      // Back on screen: the only moment Android lets the trip service start (e.g. after the phone closed it).
+      _syncTripService().then((_) => _ensureGpsAlive(force: true));
+    }
+  }
+
+  /// A trip is being recorded: the app must keep running while another app is in front.
+  bool get _tripNeedsService =>
+      _sessionId != null && !_tripFinished && _status != "OFFLINE" && _status != "FINISHED" && _status != "COMPLETED";
+
+  /// Runs the trip-long foreground service (TrackingService.kt) exactly while a trip is recorded. Unlike the GPS
+  /// stream's own service it is never dropped when the stream is re-armed, so Android does not freeze the app or
+  /// throttle its location updates when the driver opens Messenger, takes a call or locks the phone.
+  Future<void> _syncTripService({bool rearmStream = true}) async {
+    if (!BackgroundTracking.supported || _isSimulationMode) return;
+    if (_tripNeedsService) {
+      if (!BackgroundTracking.serviceRunning && _inForeground) {
+        final bool ok = await BackgroundTracking.startTripService();
+        debugPrint("[TRIP SERVICE] start: ${ok ? 'running' : 'not available (GPS stream keeps its own service)'}");
+        if (ok && rearmStream && _positionSubscription != null && mounted) {
+          // One notification: the running stream drops its own service now that the trip service holds the app.
+          _positionSubscription?.cancel();
+          _positionSubscription = Geolocator.getPositionStream(locationSettings: _trackingSettings()).listen(_onRawFix);
+        }
+      }
+    } else if (BackgroundTracking.serviceRunning) {
+      await BackgroundTracking.stopTripService();
+      debugPrint("[TRIP SERVICE] stopped (no trip)");
+    }
   }
 
   bool _inForeground = true;
@@ -104,13 +132,14 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     _processNewPosition(pos);
   }
 
-  /// Keeps recording continuous while the app is OPEN: if no fix at all arrived for 30 s, the stream is re-armed
-  /// and a fresh fix requested. In the background it never touches the stream: cancelling it would stop the
-  /// foreground location service, and Android does not allow starting it again from the background (that was
-  /// what stopped background tracking).
+  /// Keeps recording continuous: if no fix at all arrived for 30 s, the stream is re-armed and a fresh fix
+  /// requested. In the background this is done only while the trip service holds the app in the foreground: the
+  /// stream then carries no service of its own, so re-arming it cannot drop the foreground state (without the trip
+  /// service, cancelling the stream would stop its location service, which Android does not let us restart from
+  /// the background).
   void _ensureGpsAlive({bool force = false}) {
     if (!mounted || kIsWeb || _isSimulationMode) return;
-    if (!_inForeground) return;
+    if (!_inForeground && !BackgroundTracking.serviceRunning) return;
     if (_sessionId == null || _status == "OFFLINE" || _status == "FINISHED") return;
     final DateTime? last = _lastRawFixAt;
     final bool stale = last == null || DateTime.now().difference(last).inSeconds > 30;
@@ -955,6 +984,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     debugPrint("[SESSION] Ownership lost: another runtime controls this driver. Stopping all writes.");
 
     _positionSubscription?.cancel();
+    BackgroundTracking.stopTripService();
     _heartbeatTimer?.cancel();
     _idleDetectionTimer?.cancel();
     _simulationTimer?.cancel();
@@ -1795,8 +1825,16 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
 
   /// On Android the stream runs inside a foreground service (a visible "tracking" notification): without it the
   /// system stops location updates, and the driver goes offline on every map, the moment the app is left.
+  /// While the trip service runs it holds the app in the foreground, and the stream needs no service of its own.
   LocationSettings _trackingSettings() {
     if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+      if (BackgroundTracking.serviceRunning) {
+        return AndroidSettings(
+          accuracy: LocationAccuracy.bestForNavigation,
+          distanceFilter: 0,
+          intervalDuration: const Duration(seconds: 1),
+        );
+      }
       return AndroidSettings(
         accuracy: LocationAccuracy.bestForNavigation,
         distanceFilter: 0,
@@ -1815,6 +1853,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
 
   void _startTracking() async {
     _positionSubscription?.cancel();
+    await _syncTripService(rearmStream: false); // before subscribing: the stream's settings depend on it
 
     try {
       Position initialPos = await Geolocator.getCurrentPosition(
@@ -2988,6 +3027,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       // 2. Clear state immediately for UI responsiveness
       _optimizedData = null;
       _positionSubscription?.cancel();
+      BackgroundTracking.stopTripService();
       _heartbeatTimer?.cancel();
       _idleDetectionTimer?.cancel();
 

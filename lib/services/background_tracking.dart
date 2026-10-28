@@ -25,6 +25,29 @@ class BackgroundTracking {
     }
   }
 
+  /// True while the trip's own foreground service runs (see TrackingService.kt). Set from the results below.
+  static bool serviceRunning = false;
+
+  /// Starts the trip-long foreground service that keeps the app running while another app is in front.
+  /// Must be called while the app is on screen. False when not possible (web, iOS, no location permission).
+  static Future<bool> startTripService() async {
+    if (!supported) return false;
+    try {
+      serviceRunning = (await _channel.invokeMethod<bool>('startTrackingService')) ?? false;
+    } catch (_) {
+      serviceRunning = false;
+    }
+    return serviceRunning;
+  }
+
+  static Future<void> stopTripService() async {
+    if (!supported) return;
+    serviceRunning = false;
+    try {
+      await _channel.invokeMethod<bool>('stopTrackingService');
+    } catch (_) {}
+  }
+
   static Future<bool> isBatteryExempt() async {
     if (!supported) return true;
     try {

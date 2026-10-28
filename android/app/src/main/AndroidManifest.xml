@@ -19,6 +19,14 @@
         android:label="Garbage Tracker"
         android:hardwareAccelerated="true">
 
+        <!-- Trip-long location foreground service: keeps the app running while another app is in front.
+             stopWithTask=false: swiping the app away from recent apps does not end the trip's tracking. -->
+        <service
+            android:name=".TrackingService"
+            android:exported="false"
+            android:foregroundServiceType="location"
+            android:stopWithTask="false" />
+
         <!-- Scheduled local notifications (collection-day reminders). -->
         <receiver android:exported="false" android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationReceiver" />
         <receiver android:exported="false" android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationBootReceiver">
