@@ -1638,9 +1638,27 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       } else {
         final DateTime nowT = DateTime.now();
         _startFixes.removeWhere((_ArrivedFix f) => nowT.difference(f.at).inSeconds > 60);
-        final int? idx = StartFixPicker.pick(
+        int? idx = StartFixPicker.pick(
             _startFixes.map((_ArrivedFix f) => FixSample(f.pos.latitude, f.pos.longitude, f.pos.accuracy, f.at)).toList(),
             now: nowT);
+        // Resuming an unfinished trip keeps its stored start point, so it does not wait for a confirmed start fix:
+        // the latest real fix of the last two minutes is enough, and the console shows the trip as ACTIVE again
+        // right after the app is reopened instead of IDLE while the receiver settles.
+        if (idx == null && _pendingResumeTripId != null && _startFixes.isNotEmpty) idx = _startFixes.length - 1;
+        if (idx == null && _pendingResumeTripId != null) {
+          Position? recent = _currentPosition;
+          if (recent == null || nowT.difference(recent.timestamp).inSeconds > 120) {
+            try {
+              recent = await Geolocator.getLastKnownPosition();
+            } catch (_) {
+              recent = null;
+            }
+          }
+          if (recent != null && nowT.difference(recent.timestamp).inSeconds <= 120) {
+            _startFixes.add(_ArrivedFix(recent, nowT));
+            idx = _startFixes.length - 1;
+          }
+        }
         if (idx == null) {
           if (_startFixes.isEmpty) {
             try {
