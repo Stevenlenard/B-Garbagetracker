@@ -122,7 +122,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
         if (ok && rearmStream && _positionSubscription != null && mounted) {
           // One notification: the running stream drops its own service now that the trip service holds the app.
           _positionSubscription?.cancel();
-          _positionSubscription = Geolocator.getPositionStream(locationSettings: _trackingSettings()).listen(_onRawFix);
+          _positionSubscription = Geolocator.getPositionStream(locationSettings: _trackingSettings()).listen(_onPluginFix);
         }
       }
     } else if (BackgroundTracking.serviceRunning) {
@@ -137,6 +137,22 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
   void _onRawFix(Position pos) {
     _lastRawFixAt = DateTime.now();
     _processNewPosition(pos);
+  }
+
+  // Fixes from the trip service (TrackingService.kt) continue after the app is swiped away; while they arrive, the
+  // location plugin's own fixes are skipped so no fix is processed twice. Without them the plugin is used as before.
+  StreamSubscription<Position>? _nativeFixSub;
+  DateTime? _lastNativeFixAt;
+
+  void _onNativeFix(Position pos) {
+    _lastNativeFixAt = DateTime.now();
+    _onRawFix(pos);
+  }
+
+  void _onPluginFix(Position pos) {
+    final DateTime? n = _lastNativeFixAt;
+    if (n != null && DateTime.now().difference(n).inSeconds < 10) return;
+    _onRawFix(pos);
   }
 
   /// Keeps recording continuous: if no fix at all arrived for 30 s, the stream is re-armed and a fresh fix
@@ -154,7 +170,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     if (!stale && !force) return;
     debugPrint("[GPS WATCHDOG] re-arming position stream");
     _positionSubscription?.cancel();
-    _positionSubscription = Geolocator.getPositionStream(locationSettings: _trackingSettings()).listen(_onRawFix);
+    _positionSubscription = Geolocator.getPositionStream(locationSettings: _trackingSettings()).listen(_onPluginFix);
     Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.bestForNavigation)
         .then(_onRawFix)
         .catchError((Object e) => debugPrint("[GPS WATCHDOG] fix failed: $e"));
@@ -235,6 +251,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     EtaModelSync.start();
     BackgroundTracking.watchSwitch();
     _gpsWatchdog = Timer.periodic(const Duration(seconds: 15), (_) => _ensureGpsAlive());
+    _nativeFixSub = BackgroundTracking.nativeFixes().listen(_onNativeFix, onError: (Object _) {});
     NotificationService.openHomeRequests.addListener(_openHomeFromNotification);
     _startClock();
     _circleController = AnimationController(
@@ -268,6 +285,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _gpsWatchdog?.cancel();
+    _nativeFixSub?.cancel();
     NotificationService.openHomeRequests.removeListener(_openHomeFromNotification);
     _clockTimer?.cancel();
     _currentTime.dispose();
@@ -1899,7 +1917,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       debugPrint("[GPS INITIAL FIX ERROR] $e");
     }
 
-    _positionSubscription = Geolocator.getPositionStream(locationSettings: _trackingSettings()).listen(_onRawFix);
+    _positionSubscription = Geolocator.getPositionStream(locationSettings: _trackingSettings()).listen(_onPluginFix);
   }
 
   void _processNewPosition(Position pos) {

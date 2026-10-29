@@ -9,16 +9,22 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
 import android.os.Build
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
+import io.flutter.plugin.common.EventChannel
 
 /**
  * Keeps the app process in the foreground while a collection trip is active, so Android never freezes it or throttles
- * its location updates when the driver opens another app (Messenger, calls) or locks the phone. GPS fixes, publishing
- * and the heartbeat stay in Dart (the cached engine of MainActivity); this service only holds the process.
+ * its location updates when the driver opens another app (Messenger, calls), locks the phone, or swipes the app away.
+ * The service also reads GPS itself and passes the fixes to Dart ("gt/location"); publishing and the heartbeat stay in
+ * Dart (the cached engine of MainActivity).
  *
  * Started and stopped by the driver dashboard ("startTrackingService" / "stopTrackingService" on the "gt/app" channel)
  * for the lifetime of a trip, independent of the GPS stream: re-arming the stream no longer drops the foreground state.
@@ -37,6 +43,7 @@ class TrackingService : Service() {
             return START_NOT_STICKY
         }
         if (intent.action == ACTION_STOP) {
+            stopLocationUpdates()
             releaseWakeLock()
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) stopForeground(STOP_FOREGROUND_REMOVE) else @Suppress("DEPRECATION") stopForeground(true)
             stopSelf()
@@ -57,14 +64,64 @@ class TrackingService : Service() {
             return START_NOT_STICKY
         }
         acquireWakeLock()
+        startLocationUpdates()
         running = true
         return START_STICKY
     }
 
     override fun onDestroy() {
         running = false
+        stopLocationUpdates()
         releaseWakeLock()
         super.onDestroy()
+    }
+
+    // GPS is read here, by the service itself, and passed to Dart through the "gt/location" event channel. The
+    // location plugin of the app stops its updates when the screen (activity) goes away, e.g. when the app is swiped
+    // away from recent apps; these updates belong to the service and keep coming as long as the trip service runs.
+    private var locationManager: LocationManager? = null
+    private val listener = object : LocationListener {
+        override fun onLocationChanged(location: Location) {
+            val m = HashMap<String, Any>()
+            m["latitude"] = location.latitude
+            m["longitude"] = location.longitude
+            m["accuracy"] = if (location.hasAccuracy()) location.accuracy.toDouble() else 0.0
+            m["altitude"] = if (location.hasAltitude()) location.altitude else 0.0
+            m["speed"] = if (location.hasSpeed()) location.speed.toDouble() else 0.0
+            m["heading"] = if (location.hasBearing()) location.bearing.toDouble() else 0.0
+            m["time"] = location.time
+            m["mocked"] = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) location.isMock else @Suppress("DEPRECATION") location.isFromMockProvider
+            try {
+                sink?.success(m)
+            } catch (_: Exception) {
+            }
+        }
+
+        @Deprecated("Deprecated in Java")
+        override fun onStatusChanged(provider: String?, status: Int, extras: android.os.Bundle?) {}
+        override fun onProviderEnabled(provider: String) {}
+        override fun onProviderDisabled(provider: String) {}
+    }
+
+    private fun startLocationUpdates() {
+        if (locationManager != null) return
+        val fine = ContextCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_FINE_LOCATION)
+        if (fine != PackageManager.PERMISSION_GRANTED) return
+        try {
+            val lm = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+            lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, listener, Looper.getMainLooper())
+            locationManager = lm
+        } catch (_: Exception) {
+            locationManager = null // the location plugin of the app still delivers fixes while the app is on screen
+        }
+    }
+
+    private fun stopLocationUpdates() {
+        try {
+            locationManager?.removeUpdates(listener)
+        } catch (_: Exception) {
+        }
+        locationManager = null
     }
 
     private fun acquireWakeLock() {
@@ -98,6 +155,10 @@ class TrackingService : Service() {
         @Volatile
         var running = false
             private set
+
+        /** Receiver of the fixes in Dart ("gt/location"), set while Dart listens. */
+        @Volatile
+        var sink: EventChannel.EventSink? = null
 
         private fun ensureChannel(context: Context) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {

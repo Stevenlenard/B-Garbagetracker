@@ -10,6 +10,7 @@ import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.embedding.engine.FlutterEngineCache
 import io.flutter.embedding.engine.dart.DartExecutor
+import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
@@ -28,10 +29,25 @@ class MainActivity : FlutterActivity() {
 
     companion object {
         private const val ENGINE_ID = "gt_main_engine"
+        private var locationEngine: FlutterEngine? = null
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        // GPS fixes read by the trip service. Registered once per engine: the engine outlives this screen, and Dart
+        // keeps its single subscription when the app is reopened.
+        if (locationEngine !== flutterEngine) {
+            EventChannel(flutterEngine.dartExecutor.binaryMessenger, "gt/location").setStreamHandler(object : EventChannel.StreamHandler {
+                override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                    TrackingService.sink = events
+                }
+
+                override fun onCancel(arguments: Any?) {
+                    TrackingService.sink = null
+                }
+            })
+            locationEngine = flutterEngine
+        }
         // Lets a signed-in driver leave the app WITHOUT closing it: finishing the activity would stop GPS and
         // take the truck offline, whereas moving the task to the background keeps the tracking service running.
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "gt/app").setMethodCallHandler { call, result ->

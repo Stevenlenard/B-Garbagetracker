@@ -4,6 +4,7 @@ import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// Keeps a signed-in driver tracked while the app is not on screen (Android).
@@ -14,6 +15,30 @@ class BackgroundTracking {
   BackgroundTracking._();
 
   static const MethodChannel _channel = MethodChannel('gt/app');
+  static const EventChannel _locationChannel = EventChannel('gt/location');
+
+  /// GPS fixes read by the trip service itself (TrackingService.kt). Unlike the location plugin they keep coming
+  /// after the app is swiped away from recent apps, for as long as the trip service runs.
+  static Stream<Position> nativeFixes() {
+    if (!supported) return const Stream<Position>.empty();
+    return _locationChannel.receiveBroadcastStream().where((Object? e) => e is Map).map((Object? e) {
+      final Map<Object?, Object?> m = e as Map<Object?, Object?>;
+      double d(String k) => (m[k] as num?)?.toDouble() ?? 0.0;
+      return Position(
+        latitude: d('latitude'),
+        longitude: d('longitude'),
+        timestamp: DateTime.fromMillisecondsSinceEpoch((m['time'] as num?)?.toInt() ?? DateTime.now().millisecondsSinceEpoch),
+        accuracy: d('accuracy'),
+        altitude: d('altitude'),
+        altitudeAccuracy: 0,
+        heading: d('heading'),
+        headingAccuracy: 0,
+        speed: d('speed'),
+        speedAccuracy: 0,
+        isMocked: m['mocked'] == true,
+      );
+    });
+  }
   static const String _askedKey = 'gt_battery_exemption_asked';
 
   static bool get supported => !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
