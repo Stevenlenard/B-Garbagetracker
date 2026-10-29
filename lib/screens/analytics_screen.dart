@@ -42,6 +42,7 @@ import '../services/driver_route_history_service.dart';
 import 'route_history_screen.dart';
 import '../widgets/app_date_range_picker.dart';
 import '../widgets/predictive_models_card.dart';
+import '../widgets/ai_suggested_actions.dart';
 import '../utils/trip_archive.dart';
 
 class AnalyticsScreen extends StatefulWidget {
@@ -6492,8 +6493,9 @@ class _OperationalInsightsModalState extends State<_OperationalInsightsModal> wi
           ],
         ),
         const SizedBox(height: 4),
-        Text("AI-generated and adaptive telemetry recommendations for ${widget.selectedArea}.", style: TextStyle(fontSize: 12, color: Colors.grey.shade600, fontWeight: FontWeight.w500)),
+        Text("Recommendations for ${widget.selectedArea}.", style: TextStyle(fontSize: 12, color: Colors.grey.shade600, fontWeight: FontWeight.w500)),
         const SizedBox(height: 16),
+        AiSuggestedActionsPanel(area: widget.selectedArea),
         ...recommendationsList.asMap().entries.map((entry) {
           int index = entry.key + 1;
           var rec = entry.value;

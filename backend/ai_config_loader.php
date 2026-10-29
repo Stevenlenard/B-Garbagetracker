@@ -181,6 +181,11 @@ function gt_ai_post(string $url, array $headers, array $body, int $timeoutSecond
 
 function gt_ai_call_gemini(array $cfg, string $prompt, array $generationConfig, int $timeoutSeconds): ?string
 {
+    // 2.5 Flash thinks before answering by default, and the thinking counts against maxOutputTokens:
+    // with the short limits used here it could leave no room for the answer.
+    if (strpos($cfg['model'], '2.5-flash') !== false && !isset($generationConfig['thinkingConfig'])) {
+        $generationConfig['thinkingConfig'] = ['thinkingBudget' => 0];
+    }
     $data = gt_ai_post(gt_ai_endpoint($cfg), ['x-goog-api-key: ' . $cfg['api_key']], [
         'contents' => [['parts' => [['text' => $prompt]]]],
         'generationConfig' => $generationConfig,

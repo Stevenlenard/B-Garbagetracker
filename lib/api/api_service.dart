@@ -91,6 +91,11 @@ class ApiService {
     return await _dio.get('get_locations.php');
   }
 
+  /// Admin: AI-suggested actions from the open resident complaints (one result for Analytics and the Complaint Center).
+  Future<Response> getAiActions() async {
+    return await _dio.get('get_ai_actions.php');
+  }
+
   Future<Response> getOperationalInsights() async {
     return await _dio.get('get_operational_insights.php');
   }

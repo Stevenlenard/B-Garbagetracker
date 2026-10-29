@@ -5,11 +5,13 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
 import '../widgets/app_data_table.dart';
+import '../services/ai_actions_service.dart';
 import '../services/complaint_center_service.dart';
 import '../services/service_area_service.dart';
 import '../utils/complaint_flow.dart';
 import '../utils/custom_notification.dart';
 import '../widgets/app_date_range_picker.dart';
+import '../widgets/ai_suggested_actions.dart';
 
 const Color _teal = Color(0xFF007A63);
 const Color _tealDark = Color(0xFF00796B);
@@ -927,6 +929,7 @@ class _ComplaintsScreenState extends State<ComplaintsScreen> {
   /// Called after the store confirmed a status change (details already closed).
   void _afterTransition(ComplaintRecord record, TransitionResult r) {
     if (!mounted) return;
+    AiActionsService.invalidate(); // the open complaints changed
     final String who = record.source == ComplaintSource.resident ? 'resident' : 'driver';
     String msg;
     if (!r.changed) {
@@ -1186,6 +1189,7 @@ class _ComplaintDetailsViewState extends State<_ComplaintDetailsView> {
               if (!resident && c.urgency != null) _field('Urgency', c.urgency!.toUpperCase()),
               _field('Submitted', _fmtDate(c.submittedAt)),
               _field('Description', c.description.trim().isEmpty ? '—' : c.description),
+              if (resident && !c.isResolved) AiComplaintSuggestion(complaintId: c.id),
               const SizedBox(height: 4),
               const Text('STATUS HISTORY', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: Colors.grey, letterSpacing: 1)),
               const SizedBox(height: 8),
