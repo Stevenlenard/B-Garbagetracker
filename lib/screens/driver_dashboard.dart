@@ -1743,6 +1743,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
           // _completedCount and _purokStatus are NOT reset here because they are weekly.
           _autoNotifiedPuroks.clear();
           _approachNotifiedPuroks.clear();
+          _servedThisTrip.clear();
         });
       }
 
@@ -2211,20 +2212,22 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       // one 100 m circle per collection area (same as the verified-visit rule on the status and analytics screens)
       double geofenceRadius = 100.0;
 
+      // The weekly record only feeds the collection-status board. The truck has no fixed collection days, so
+      // residents are alerted on every visit: an area is skipped only once THIS trip has reached it.
       final bool completedThisWeek = _purokStatus[key]?['completed'] == true || _purokStatus[legacyKey]?['completed'] == true;
+      final bool servedThisTrip = _servedThisTrip.contains(key);
 
       // --- STAGED APPROACH (15 / 10 / 5 min) ---
-      // Only while collecting, with a fresh fix, for an area still to be collected, and
+      // Only while collecting, with a fresh fix, for an area this trip has not reached yet, and
       // only while the truck is actually getting closer to it.
       // Sustained closing only: never on the first fix, never on a few metres of GPS wander.
       final int nowMs = DateTime.now().millisecondsSinceEpoch;
       _approachDetector.add(key, nowMs, dist);
-      if (!completedThisWeek && !_autoNotifiedPuroks.contains(p['name'].toString()) && (next == null || dist < next.dist)) {
+      if (!servedThisTrip && (next == null || dist < next.dist)) {
         next = (name: p['name'].toString(), key: key, dist: dist, approaching: _approachDetector.isApproaching(key, nowMs));
       }
 
-      // Skip if already completed this week
-      if (completedThisWeek) {
+      if (servedThisTrip) {
         continue;
       }
       
@@ -2250,16 +2253,19 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
         
         // 3. PREVENT FALSE POSITIVES: Require 3 consecutive valid points (approx 6-15 seconds)
         if (_purokConsecutivePoints[key]! >= 2 || _isSimulationMode) {
-          debugPrint("[WEEKLY] Robust detection confirmed for ${p['name']}. Marking COMPLETED.");
+          debugPrint("[WEEKLY] Robust detection confirmed for ${p['name']}.");
+          _servedThisTrip.add(key);
 
-          _database.ref('weekly_collection_progress/$_currentWeekKey/$driverId/areas/$key').update({
-            'completed': true,
-            'completedAt': DateFormat('yyyy-MM-dd hh:mm a').format(DateTime.now()),
-            'timestamp': ServerValue.timestamp,
-            'completionSource': _isSimulationMode ? 'SIMULATION' : 'GPS_PROXIMITY',
-            'sessionId': _sessionId,
-            'truckId': _user?.preferredTruck ?? "Unknown",
-          });
+          if (!completedThisWeek) {
+            _database.ref('weekly_collection_progress/$_currentWeekKey/$driverId/areas/$key').update({
+              'completed': true,
+              'completedAt': DateFormat('yyyy-MM-dd hh:mm a').format(DateTime.now()),
+              'timestamp': ServerValue.timestamp,
+              'completionSource': _isSimulationMode ? 'SIMULATION' : 'GPS_PROXIMITY',
+              'sessionId': _sessionId,
+              'truckId': _user?.preferredTruck ?? "Unknown",
+            });
+          }
 
           _truckPublisher(_user?.preferredTruck ?? "Unknown")?.publish(<String, Object?>{'current_purok': p['name']});
           
@@ -2292,6 +2298,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
   DateTime? _proxPrevAt;
 
   final Set<String> _autoNotifiedPuroks = {};
+  final Set<String> _servedThisTrip = <String>{}; // areas this trip has reached: no more alerts for them until the next trip
   NotificationInbox? _inbox; // this driver's own read/dismiss/clear state
   InboxState _inboxState = InboxState.empty;
   StreamSubscription<InboxState>? _inboxSub;
@@ -2765,6 +2772,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
           // _completedCount and _purokStatus are NOT reset here because they are weekly.
           _autoNotifiedPuroks.clear();
           _approachNotifiedPuroks.clear();
+          _servedThisTrip.clear();
         });
         if (context.mounted) {
           CustomSnackBar.show(context, message: "Trip completed successfully.", isError: false);
