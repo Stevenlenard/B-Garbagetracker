@@ -1896,6 +1896,19 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
         ),
       );
     }
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.iOS) {
+      // iPhone: updates continue with the Home button or a locked screen (background mode "location" in
+      // Info.plist; iOS shows the blue location indicator). iOS ends the app completely when it is swiped away, so
+      // tracking cannot continue after that on an iPhone.
+      return AppleSettings(
+        accuracy: LocationAccuracy.bestForNavigation,
+        distanceFilter: 0,
+        activityType: ActivityType.automotiveNavigation,
+        pauseLocationUpdatesAutomatically: false,
+        allowBackgroundLocationUpdates: true,
+        showBackgroundLocationIndicator: true,
+      );
+    }
     return const LocationSettings(accuracy: LocationAccuracy.bestForNavigation, distanceFilter: 0);
   }
 
