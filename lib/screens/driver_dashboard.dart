@@ -2244,7 +2244,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       }
 
       // --- STAGED APPROACH (15 / 10 / 5 min) ---
-      // Only while collecting, with a fresh fix, for an area this trip has not reached yet, and
+      // Only while collecting, with a fresh fix, for an area the truck is not at yet, and
       // only while the truck is actually getting closer to it.
       // Sustained closing only: never on the first fix, never on a few metres of GPS wander.
       final int nowMs = DateTime.now().millisecondsSinceEpoch;
