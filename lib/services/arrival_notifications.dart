@@ -1,6 +1,7 @@
 import 'rtdb_port.dart';
 
-/// Arrival-stage notifications, written at most ONCE per truck trip, area and stage.
+/// Arrival-stage notifications, written at most ONCE per truck trip, area, visit and stage
+/// (a trip that comes back to an area makes a new visit 2, 3, ... with its own keys).
 ///
 /// The record key is deterministic, so a restart, a resumed trip, a second runtime or
 /// repeated GPS fixes can never create a second copy, while a NEW trip gets new keys and
@@ -8,9 +9,10 @@ import 'rtdb_port.dart';
 class ArrivalNotifications {
   ArrivalNotifications._();
 
-  static String key({required String stage, required String tripId, required String areaKey}) {
+  static String key({required String stage, required String tripId, required String areaKey, int visit = 1}) {
     String clean(String v) => v.replaceAll(RegExp(r'[.$#\[\]/\s]'), '_');
-    return 'arr_${clean(stage)}_${clean(tripId)}_${clean(areaKey)}';
+    // the first visit keeps the original key, so records written before visits were numbered still match
+    return 'arr_${clean(stage)}_${clean(tripId)}_${clean(areaKey)}${visit > 1 ? '_v$visit' : ''}';
   }
 
   /// "On the way" stages more urgent than [stage]: once one of them was sent for a trip and area,
@@ -32,11 +34,12 @@ class ArrivalNotifications {
     required Map<String, Object?> payload,
     required int nowMs,
     List<String> skipIfPublished = const <String>[],
+    int visit = 1,
   }) async {
     for (final String s in skipIfPublished) {
-      if (await db.get('notifications/${key(stage: s, tripId: tripId, areaKey: areaKey)}') != null) return false;
+      if (await db.get('notifications/${key(stage: s, tripId: tripId, areaKey: areaKey, visit: visit)}') != null) return false;
     }
-    final String k = key(stage: stage, tripId: tripId, areaKey: areaKey);
+    final String k = key(stage: stage, tripId: tripId, areaKey: areaKey, visit: visit);
     return db.transaction('notifications/$k', (Object? current) {
       if (current != null) return const TxOutcome.abort();
       return TxOutcome.success(<String, Object?>{
@@ -44,6 +47,7 @@ class ArrivalNotifications {
         'stage': stage,
         'trip_id': tripId,
         'area_key': areaKey,
+        'visit': visit,
         'timestamp': nowMs,
         'isRead': false,
       });

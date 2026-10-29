@@ -1744,6 +1744,8 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
           _autoNotifiedPuroks.clear();
           _approachNotifiedPuroks.clear();
           _servedThisTrip.clear();
+          _areaVisit.clear();
+          _outsideCount.clear();
         });
       }
 
@@ -2213,9 +2215,33 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       double geofenceRadius = 100.0;
 
       // The weekly record only feeds the collection-status board. The truck has no fixed collection days, so
-      // residents are alerted on every visit: an area is skipped only once THIS trip has reached it.
+      // residents are alerted on EVERY visit: an area is skipped only while the truck is still there. Once the truck
+      // has clearly left it (2 fixes in a row more than 200 m away), its next arrival is a new visit with new alerts,
+      // also on the same trip.
       final bool completedThisWeek = _purokStatus[key]?['completed'] == true || _purokStatus[legacyKey]?['completed'] == true;
-      final bool servedThisTrip = _servedThisTrip.contains(key);
+      bool servedThisTrip = _servedThisTrip.contains(key);
+      if (servedThisTrip) {
+        final bool near = AreaPass.touches(
+          lat: pos.latitude,
+          lng: pos.longitude,
+          prevLat: null,
+          prevLng: null,
+          stepSeconds: null,
+          entranceLat: (p['lat'] as num).toDouble(),
+          entranceLng: (p['lng'] as num).toDouble(),
+          endLat: (p['endLat'] as num?)?.toDouble(),
+          endLng: (p['endLng'] as num?)?.toDouble(),
+          radiusM: 200.0,
+        );
+        _outsideCount[key] = near ? 0 : (_outsideCount[key] ?? 0) + 1;
+        if (_outsideCount[key]! >= 2) {
+          _servedThisTrip.remove(key);
+          _autoNotifiedPuroks.remove(p['name'].toString());
+          _areaVisit[key] = (_areaVisit[key] ?? 1) + 1;
+          _outsideCount.remove(key);
+          servedThisTrip = false;
+        }
+      }
 
       // --- STAGED APPROACH (15 / 10 / 5 min) ---
       // Only while collecting, with a fresh fix, for an area this trip has not reached yet, and
@@ -2270,7 +2296,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
           _truckPublisher(_user?.preferredTruck ?? "Unknown")?.publish(<String, Object?>{'current_purok': p['name']});
           
           // --- Automatic Arrival Notifications ---
-          _handleAutoNotifications(p['name'], dist);
+          _handleAutoNotifications(p['name'], dist, visit: _areaVisit[key] ?? 1);
           
           // Reset counter after completion
           _purokConsecutivePoints[key] = 0;
@@ -2298,7 +2324,9 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
   DateTime? _proxPrevAt;
 
   final Set<String> _autoNotifiedPuroks = {};
-  final Set<String> _servedThisTrip = <String>{}; // areas this trip has reached: no more alerts for them until the next trip
+  final Set<String> _servedThisTrip = <String>{}; // areas the truck is at now: no alerts for them until it leaves
+  final Map<String, int> _areaVisit = <String, int>{}; // area key -> visit number on this trip (1, 2, ...)
+  final Map<String, int> _outsideCount = <String, int>{}; // area key -> consecutive fixes far from an area just served
   NotificationInbox? _inbox; // this driver's own read/dismiss/clear state
   InboxState _inboxState = InboxState.empty;
   StreamSubscription<InboxState>? _inboxSub;
@@ -2332,9 +2360,9 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
   final TrackGate _trackGate = TrackGate();
   final SpeedSmoother _speedSmoother = SpeedSmoother();
 
-  /// "Arrived" notification: once per trip and area (deterministic key), so a restart,
-  /// resume or second runtime can never repeat it; a new trip alerts again.
-  void _handleAutoNotifications(String areaName, double distance) async {
+  /// "Arrived" notification: once per visit of an area (deterministic key of trip, area and visit number), so a
+  /// restart, resume or second runtime can never repeat it; a new visit, also on the same trip, alerts again.
+  void _handleAutoNotifications(String areaName, double distance, {int visit = 1}) async {
     if (_autoNotifiedPuroks.contains(areaName)) return;
     final String? tripId = _sessionId;
     if (tripId == null || _isSimulationMode) return;
@@ -2347,6 +2375,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
         stage: 'arrival',
         tripId: tripId,
         areaKey: areaName.replaceAll('/', '_'),
+        visit: visit,
         nowMs: ServerClock.instance.nowMs(),
         payload: <String, Object?>{
           'type': 'auto_arrival',
@@ -2386,15 +2415,17 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     final int? stage = eta.stage;
     if (eta.kind != EtaKind.minutes || stage == null) return;
 
-    // Already arrived there on this trip: no more "on the way" alerts for that area.
+    // The truck is there now: no "on the way" alerts for that area until it has left it.
     if (_autoNotifiedPuroks.contains(areaName)) return;
-    // Never a less urgent stage after a more urgent one (15 min after 10 min would look like the truck went back).
-    final String stageKey = '$_sessionId|$areaKey';
+    final int visit = _areaVisit[areaKey] ?? 1;
+    // Never a less urgent stage after a more urgent one within a visit (15 min after 10 min would look like the
+    // truck went back).
+    final String stageKey = '$_sessionId|$areaKey|$visit';
     final int? sentStage = _approachStageSent[stageKey];
     if (sentStage != null && stage >= sentStage) return;
 
     final String stageName = 'approach_$stage';
-    final String guard = '$_sessionId|$areaKey|$stageName';
+    final String guard = '$_sessionId|$areaKey|$visit|$stageName';
     if (!_publishedArrivalKeys.add(guard)) return; // already handled in this runtime
     _approachStageSent[stageKey] = stage;
 
@@ -2404,6 +2435,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       stage: stageName,
       tripId: _sessionId!,
       areaKey: areaKey,
+      visit: visit,
       nowMs: ServerClock.instance.nowMs(),
       skipIfPublished: ArrivalNotifications.moreUrgentThan(stageName), // also after an app restart
       payload: <String, Object?>{
@@ -2773,6 +2805,8 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
           _autoNotifiedPuroks.clear();
           _approachNotifiedPuroks.clear();
           _servedThisTrip.clear();
+          _areaVisit.clear();
+          _outsideCount.clear();
         });
         if (context.mounted) {
           CustomSnackBar.show(context, message: "Trip completed successfully.", isError: false);

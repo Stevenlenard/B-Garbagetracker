@@ -204,6 +204,14 @@ void main() {
       expect(k, isNot(contains('/')));
       expect(k, isNot(contains(' ')));
     });
+
+    test('a second visit of the same trip to an area gets its own key; the first keeps the old key', () {
+      final first = ArrivalNotifications.key(stage: 'arrival', tripId: 't1', areaKey: 'Purok 2');
+      expect(ArrivalNotifications.key(stage: 'arrival', tripId: 't1', areaKey: 'Purok 2', visit: 1), first);
+      final second = ArrivalNotifications.key(stage: 'arrival', tripId: 't1', areaKey: 'Purok 2', visit: 2);
+      expect(second, isNot(first));
+      expect(second, '${first}_v2');
+    });
   });
 
   group('ETA policy', () {
