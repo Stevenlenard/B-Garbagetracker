@@ -116,6 +116,7 @@ try {
         "success" => true,
         "summary" => $ai_summary,
         "is_ai_generated" => ($ai_cfg['enabled'] && $ai_summary !== $fallback_summary),
+        "ai_provider" => ($ai_summary !== $fallback_summary) ? ($GLOBALS['gt_ai_provider'] ?? null) : null,
         "metrics" => [
             "total_trips" => $total_trips,
             "total_weight_tons" => $total_weight_tons,
