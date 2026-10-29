@@ -867,14 +867,14 @@ class AnalyticsPdfBuilder {
           decoration: pw.BoxDecoration(
               color: zebra, border: pw.Border.all(color: line, width: 0.5), borderRadius: pw.BorderRadius.circular(4)),
           child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: <pw.Widget>[
-            pw.Text('AI-written summary (Google Gemini Flash, generated on the server)',
+            pw.Text('AI-written summary (generated on the server)',
                 style: pw.TextStyle(fontSize: 8.5, fontWeight: pw.FontWeight.bold, color: navy)),
             pw.SizedBox(height: 4),
             pw.Text(ai, style: pw.TextStyle(fontSize: 8.5, color: ink, lineSpacing: 2)),
           ]),
         )
       else
-        _p('The optional AI-written summary (Google Gemini Flash) was not available for this report; the rule-based '
+        _p('The optional AI-written summary was not available for this report; the rule-based '
             'observations above are used.', size: 8, color: muted),
     ];
   }
