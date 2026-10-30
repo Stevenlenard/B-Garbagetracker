@@ -4,13 +4,23 @@ import '../api/api_service.dart';
 
 /// One AI-suggested action, based on one or more open resident complaints.
 class AiAction {
-  const AiAction({required this.purok, required this.priority, required this.action, required this.reason, required this.complaintIds});
+  const AiAction({
+    required this.purok,
+    required this.priority,
+    required this.action,
+    required this.reason,
+    required this.complaintIds,
+    this.steps = const <String>[],
+    this.outcome = '',
+  });
 
   final String purok;
   final String priority; // high | medium | low
   final String action;
   final String reason;
   final List<int> complaintIds;
+  final List<String> steps;
+  final String outcome;
 
   static AiAction? fromJson(Object? j) {
     if (j is! Map) return null;
@@ -26,14 +36,20 @@ class AiAction {
       action: action,
       reason: (j['reason'] ?? '').toString().trim(),
       complaintIds: ids,
+      steps: <String>[
+        for (final Object? x in (j['steps'] is List ? j['steps'] as List : const <Object?>[]))
+          if ('$x'.trim().isNotEmpty) '$x'.trim(),
+      ],
+      outcome: (j['outcome'] ?? '').toString().trim(),
     );
   }
 }
 
 class AiActionsResult {
-  const AiActionsResult({required this.actions, required this.openCount});
+  const AiActionsResult({required this.actions, required this.openCount, this.summary = ''});
 
   final List<AiAction> actions;
+  final String summary;
   final int openCount;
 
   /// The suggestion for one resident complaint (its id as shown in the Complaint Center), if any.
@@ -83,7 +99,8 @@ class AiActionsService {
           if (AiAction.fromJson(a) != null) AiAction.fromJson(a)!,
       ];
       if (actions.isEmpty) return null;
-      return AiActionsResult(actions: actions, openCount: int.tryParse('${data['open_count']}') ?? 0);
+      return AiActionsResult(
+          actions: actions, openCount: int.tryParse('${data['open_count']}') ?? 0, summary: (data['summary'] ?? '').toString().trim());
     } catch (e) {
       debugPrint('AI actions unavailable: $e');
       return null;

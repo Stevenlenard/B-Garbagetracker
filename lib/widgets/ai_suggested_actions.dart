@@ -19,6 +19,14 @@ Color _priorityColor(String p) {
 
 String _ids(List<int> ids) => ids.map((int i) => ComplaintFlow.displayId('$i')).join(', ');
 
+Widget _part(String label, String text) => Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Text.rich(TextSpan(children: <InlineSpan>[
+        TextSpan(text: '$label  ', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w900, color: _teal)),
+        TextSpan(text: text, style: TextStyle(fontSize: 12, color: Colors.grey.shade800, height: 1.4)),
+      ])),
+    );
+
 /// AI-suggested actions from the open resident complaints (Analytics, "Actions" tab).
 /// Shows nothing when no AI answer is available, so only the rule-based recommendations remain.
 class AiSuggestedActionsPanel extends StatefulWidget {
@@ -75,9 +83,20 @@ class _AiSuggestedActionsPanelState extends State<AiSuggestedActionsPanel> {
                   onPressed: () => setState(() => _future = AiActionsService.load(refresh: true)),
                 ),
               ]),
-              Text('From the open resident complaints. Review before acting.',
+              Text('From the open resident complaints and the last 60 days of resolved ones. Review before acting.',
                   style: TextStyle(fontSize: 12, color: Colors.grey.shade600, fontWeight: FontWeight.w500)),
               const SizedBox(height: 12),
+              if ((snap.data?.summary ?? '').isNotEmpty)
+                Container(
+                  width: double.infinity,
+                  margin: const EdgeInsets.only(bottom: 10),
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(color: const Color(0xFFE0F2F1), borderRadius: BorderRadius.circular(14)),
+                  child: Text.rich(TextSpan(children: <InlineSpan>[
+                    const TextSpan(text: 'SITUATION  ', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w900, color: _teal)),
+                    TextSpan(text: snap.data!.summary, style: const TextStyle(fontSize: 12.5, color: _ink, height: 1.45)),
+                  ])),
+                ),
               for (final AiAction a in actions) _ActionCard(a),
             ],
           ),
@@ -119,11 +138,21 @@ class _ActionCard extends StatelessWidget {
           ]),
           const SizedBox(height: 6),
           Text(a.action, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: _ink, height: 1.35)),
-          if (a.reason.isNotEmpty) ...<Widget>[
-            const SizedBox(height: 4),
-            Text(a.reason, style: TextStyle(fontSize: 12, color: Colors.grey.shade700, height: 1.4)),
+          if (a.reason.isNotEmpty) _part('WHY', a.reason),
+          if (a.steps.isNotEmpty) ...<Widget>[
+            const SizedBox(height: 6),
+            const Text('STEPS', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w900, color: _teal)),
+            for (int i = 0; i < a.steps.length; i++)
+              Padding(
+                padding: const EdgeInsets.only(top: 3),
+                child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
+                  SizedBox(width: 18, child: Text('${i + 1}.', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: _teal))),
+                  Expanded(child: Text(a.steps[i], style: TextStyle(fontSize: 12, color: Colors.grey.shade800, height: 1.4))),
+                ]),
+              ),
           ],
-          const SizedBox(height: 6),
+          if (a.outcome.isNotEmpty) _part('EXPECTED RESULT', a.outcome),
+          const SizedBox(height: 8),
           Text('Based on complaint ${_ids(a.complaintIds)}', style: TextStyle(fontSize: 11, color: Colors.grey.shade600, fontWeight: FontWeight.w600)),
         ],
       ),
@@ -166,10 +195,9 @@ class AiComplaintSuggestion extends StatelessWidget {
               ]),
               const SizedBox(height: 6),
               Text(a.action, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: _ink, height: 1.35)),
-              if (a.reason.isNotEmpty) ...<Widget>[
-                const SizedBox(height: 4),
-                Text(a.reason, style: TextStyle(fontSize: 12, color: Colors.grey.shade700, height: 1.4)),
-              ],
+              if (a.reason.isNotEmpty) _part('WHY', a.reason),
+              for (int i = 0; i < a.steps.length; i++) _part(i == 0 ? 'STEPS  1.' : '${i + 1}.', a.steps[i]),
+              if (a.outcome.isNotEmpty) _part('EXPECTED RESULT', a.outcome),
               if (a.complaintIds.length > 1) ...<Widget>[
                 const SizedBox(height: 6),
                 Text('Also covers ${_ids(a.complaintIds.where((int i) => '$i' != complaintId).toList())}',
