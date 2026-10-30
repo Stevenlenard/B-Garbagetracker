@@ -97,6 +97,11 @@ class ApiService {
     return await _dio.get('get_ai_actions.php', options: Options(receiveTimeout: const Duration(seconds: 40)));
   }
 
+  /// Admin: plain-language AI reading of the predictive models' evaluation numbers ({lang, arrival, load}).
+  Future<Response> explainPredictiveModels(Map<String, dynamic> body) async {
+    return await _dio.post('get_ai_model_explain.php', data: body, options: Options(receiveTimeout: const Duration(seconds: 40)));
+  }
+
   Future<Response> getOperationalInsights() async {
     return await _dio.get('get_operational_insights.php');
   }

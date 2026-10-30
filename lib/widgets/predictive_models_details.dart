@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
 import '../utils/predictive_models.dart';
+import 'ai_model_explanation.dart';
 
 /// Details of the predictive models. Every number, label, chart and sentence below is computed from the recorded data
 /// each time it opens; only the explanations of the methods are fixed text.
@@ -55,6 +56,41 @@ class PredictiveModelsDetails extends StatelessWidget {
             ? ' It explains ${(m.r2! * 100).round()} percent of the variation of the actual arrival times.'
             : ' On these test trips it does not yet beat simply predicting the average arrival time.');
     return 'On ${regression.trips - _trainTrips()} test trip(s) the prediction is off by ${minutes(m.mae)} on average (RMSE ${minutes(m.rmse)}).$fit$compare';
+  }
+
+  /// The arrival-time figures shown in this dialog, as sent to the AI explanation (numbers only; missing ones left out).
+  Map<String, num> _arrivalNumbers() {
+    final ErrorMetrics m = regression.regression, b = regression.baseline;
+    return <String, num>{
+      'recorded_trips': regression.trips,
+      'samples': regression.samples,
+      'test_samples': m.n,
+      if (m.mae != null) 'mae_min': m.mae!,
+      if (m.rmse != null) 'rmse_min': m.rmse!,
+      if (m.r2 != null) 'r2': m.r2!,
+      if (regression.fit != null) 'intercept_min': regression.fit!.intercept,
+      if (regression.fit != null) 'slope_min_per_km': regression.fit!.slope,
+      if (b.mae != null) 'live_rule_mae_min': b.mae!,
+      if (b.rmse != null) 'live_rule_rmse_min': b.rmse!,
+      if (b.r2 != null) 'live_rule_r2': b.r2!,
+      'resident_estimates_checked': live.n,
+      if (live.mae != null) 'resident_estimates_mae_min': live.mae!,
+    };
+  }
+
+  /// The collected-load figures shown in this dialog, as sent to the AI explanation.
+  Map<String, num> _loadNumbers() {
+    final ErrorMetrics m = forecast.metrics;
+    return <String, num>{
+      'window_days': forecast.window,
+      'days_in_period': forecast.series.length,
+      'days_with_loads': forecast.series.where((double v) => v > 0).length,
+      'checked_days': m.n,
+      if (m.mae != null) 'mae_kg': m.mae!,
+      if (m.rmse != null) 'rmse_kg': m.rmse!,
+      if (m.r2 != null) 'r2': m.r2!,
+      if (forecast.nextForecast != null) 'next_day_forecast_kg': forecast.nextForecast!,
+    };
   }
 
   int _trainTrips() {
@@ -110,6 +146,8 @@ class PredictiveModelsDetails extends StatelessWidget {
               ),
               IconButton(onPressed: () => Navigator.pop(context), icon: const Icon(Icons.close_rounded)),
             ]),
+            const SizedBox(height: 20),
+            AiModelExplanation(arrival: _arrivalNumbers(), load: _loadNumbers()),
             const SizedBox(height: 20),
 
             // ------------------------------------------------ 1. arrival time
