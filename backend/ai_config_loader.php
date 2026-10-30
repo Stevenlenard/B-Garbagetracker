@@ -1,16 +1,17 @@
 <?php
 /**
- * Server-side AI configuration: Gemini first, Groq as the backup. Contains NO secret.
+ * Server-side AI configuration: Gemini first, then Groq, then OpenRouter. Contains NO secret.
  *
  * AI is DISABLED unless enabled = true and at least one provider has both a key and a model.
- * When Gemini fails (quota used up, error, daily cap reached), the same request goes to Groq.
+ * When a provider fails (quota used up, error, daily cap reached), the same request goes to the next one.
  *
  * Sources (first found wins):
  *  1. Environment variables: GT_AI_ENABLED (true/1), GT_GEMINI_API_KEY, GT_GEMINI_MODEL,
- *     GT_GROQ_API_KEY, GT_GROQ_MODEL.
+ *     GT_GROQ_API_KEY, GT_GROQ_MODEL, GT_OPENROUTER_API_KEY, GT_OPENROUTER_MODEL.
  *  2. A private PHP file OUTSIDE the public web root, never in git:
  *       <site folder>/gt_private/ai_config.php   (one level above public_html)
- *     returning ['enabled' => false, 'api_key' => '', 'model' => '', 'groq_api_key' => '', 'groq_model' => ''].
+ *     returning ['enabled' => false, 'api_key' => '', 'model' => '', 'groq_api_key' => '', 'groq_model' => '',
+ *                'openrouter_api_key' => '', 'openrouter_model' => ''].
  *     See deploy_prep/hostinger/gt_private/ai_config.example.php.
  *
  * The key is never echoed, logged or returned to clients.
@@ -32,6 +33,8 @@ function gt_ai_config(): array
     $model = getenv('GT_GEMINI_MODEL');
     $groqKey = getenv('GT_GROQ_API_KEY');
     $groqModel = getenv('GT_GROQ_MODEL');
+    $orKey = getenv('GT_OPENROUTER_API_KEY');
+    $orModel = getenv('GT_OPENROUTER_MODEL');
     $source = 'environment';
 
     if (($key === false || $key === '') && ($groqKey === false || $groqKey === '')) {
@@ -45,6 +48,8 @@ function gt_ai_config(): array
                 $model = $file['model'] ?? '';
                 $groqKey = $file['groq_api_key'] ?? '';
                 $groqModel = $file['groq_model'] ?? '';
+                $orKey = $file['openrouter_api_key'] ?? '';
+                $orModel = $file['openrouter_model'] ?? '';
                 $source = 'private file';
             }
         }
@@ -57,14 +62,20 @@ function gt_ai_config(): array
     $groqModel = is_string($groqModel) ? trim($groqModel) : '';
     $gemini = $on && $key !== '' && $model !== '' && preg_match('/^[a-z0-9.\-]+$/', $model) === 1;
     $groq = $on && $groqKey !== '' && $groqModel !== '' && preg_match('/^[a-z0-9.\-\/]+$/', $groqModel) === 1;
+    $orKey = is_string($orKey) ? trim($orKey) : '';
+    $orModel = is_string($orModel) ? trim($orModel) : '';
+    $openrouter = $on && $orKey !== '' && $orModel !== '' && preg_match('/^[a-z0-9.\-\/:]+$/', $orModel) === 1;
     $cfg = [
-        'enabled' => $gemini || $groq,
+        'enabled' => $gemini || $groq || $openrouter,
         'gemini' => $gemini,
         'groq' => $groq,
+        'openrouter' => $openrouter,
         'api_key' => $key,
         'model' => $model,
         'groq_api_key' => $groqKey,
         'groq_model' => $groqModel,
+        'openrouter_api_key' => $orKey,
+        'openrouter_model' => $orModel,
         'source' => $source,
     ];
     return $cfg;
@@ -89,6 +100,8 @@ const GT_AI_FAIL_PAUSE = 600;      // 10 min without asking again after a failed
 const GT_AI_DAILY_CAP = 15;        // real Gemini requests per day, under the free tier's daily limit
 const GT_AI_GROQ_DAILY_CAP = 100;  // real Groq requests per day (backup only)
 const GT_AI_GROQ_ENDPOINT = 'https://api.groq.com/openai/v1/chat/completions';
+const GT_AI_OPENROUTER_DAILY_CAP = 40;  // real OpenRouter requests per day (its free models allow 50 a day)
+const GT_AI_OPENROUTER_ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
 
 /**
  * One bounded call. Returns the text or null. Never throws, never exposes the key or the raw provider response.
@@ -125,6 +138,11 @@ function gt_ai_generate(array $cfg, string $prompt, array $generationConfig, int
         $text = gt_ai_call_groq($cfg, $prompt, $generationConfig, $timeoutSeconds);
         if ($text === null) gt_ai_pause($dir, 'state_groq.json');
         else $provider = 'groq';
+    }
+    if ($text === null && !empty($cfg['openrouter']) && gt_ai_take_slot($dir, 'state_openrouter.json', GT_AI_OPENROUTER_DAILY_CAP)) {
+        $text = gt_ai_call_openrouter($cfg, $prompt, $generationConfig, $timeoutSeconds);
+        if ($text === null) gt_ai_pause($dir, 'state_openrouter.json');
+        else $provider = 'openrouter';
     }
     if ($text === null) return null;
     $GLOBALS['gt_ai_provider'] = $provider;
@@ -195,20 +213,31 @@ function gt_ai_call_gemini(array $cfg, string $prompt, array $generationConfig, 
     return $text === '' ? null : $text;
 }
 
-/** Groq speaks the OpenAI chat format; the Gemini generation settings are mapped onto it. */
 function gt_ai_call_groq(array $cfg, string $prompt, array $generationConfig, int $timeoutSeconds): ?string
 {
-    $body = ['model' => $cfg['groq_model'], 'messages' => [['role' => 'user', 'content' => $prompt]]];
+    return gt_ai_call_chat(GT_AI_GROQ_ENDPOINT, $cfg['groq_api_key'], $cfg['groq_model'], [], $prompt, $generationConfig, $timeoutSeconds, 'Groq');
+}
+
+function gt_ai_call_openrouter(array $cfg, string $prompt, array $generationConfig, int $timeoutSeconds): ?string
+{
+    return gt_ai_call_chat(GT_AI_OPENROUTER_ENDPOINT, $cfg['openrouter_api_key'], $cfg['openrouter_model'], ['X-Title: GarbageTracker'],
+        $prompt, $generationConfig, $timeoutSeconds, 'OpenRouter');
+}
+
+/** Groq and OpenRouter speak the OpenAI chat format; the Gemini generation settings are mapped onto it. */
+function gt_ai_call_chat(string $url, string $key, string $model, array $headers, string $prompt, array $generationConfig, int $timeoutSeconds, string $name): ?string
+{
+    $body = ['model' => $model, 'messages' => [['role' => 'user', 'content' => $prompt]]];
     if (isset($generationConfig['temperature'])) $body['temperature'] = $generationConfig['temperature'];
     if (isset($generationConfig['maxOutputTokens'])) $body['max_tokens'] = $generationConfig['maxOutputTokens'];
-    if (strpos($cfg['groq_model'], 'gpt-oss') !== false) {
+    if (strpos($model, 'gpt-oss') !== false) {
         // reasoning models: keep the thinking short and out of the answer, and leave room for it in the token limit
         $body['reasoning_effort'] = 'low';
         $body['include_reasoning'] = false;
         if (isset($body['max_tokens'])) $body['max_tokens'] += 1024;
     }
     if (($generationConfig['responseMimeType'] ?? '') === 'application/json') $body['response_format'] = ['type' => 'json_object'];
-    $data = gt_ai_post(GT_AI_GROQ_ENDPOINT, ['Authorization: Bearer ' . $cfg['groq_api_key']], $body, $timeoutSeconds, 'Groq');
+    $data = gt_ai_post($url, array_merge(['Authorization: Bearer ' . $key], $headers), $body, $timeoutSeconds, $name);
     $text = $data['choices'][0]['message']['content'] ?? '';
     $text = is_string($text) ? trim($text) : '';
     return $text === '' ? null : $text;
