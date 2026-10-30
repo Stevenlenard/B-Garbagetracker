@@ -292,7 +292,12 @@ class _AssignTruckSheetState extends State<_AssignTruckSheet> {
                       maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12.5, color: Color(0xFF6B7280), fontWeight: FontWeight.w500)),
                 ]),
               ),
-              const SizedBox(width: 8),
+              IconButton(
+                key: ValueKey<String>('truck-plate-edit-${t.id}'),
+                tooltip: 'Edit plate number',
+                onPressed: _saving ? null : () => _editPlate(t),
+                icon: const Icon(Icons.edit_rounded, size: 18, color: _tealDark),
+              ),
               if (current)
                 _badge('Current', const Color(0xFFD1FAE5), const Color(0xFF047857))
               else if (taken)
@@ -304,6 +309,61 @@ class _AssignTruckSheetState extends State<_AssignTruckSheet> {
         ),
       ),
     );
+  }
+
+  /// The admin sets a truck's plate number. It is written to the truck registry (read by every app) and to the
+  /// truck's live node when it has one, so the maps show it at once.
+  Future<void> _editPlate(TruckChoice t) async {
+    final TextEditingController ctl = TextEditingController(text: t.plate);
+    String? err;
+    final String? plate = await showDialog<String>(
+      context: context,
+      builder: (BuildContext ctx) => StatefulBuilder(
+        builder: (BuildContext ctx, StateSetter set) => AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+          title: Text('Plate number of ${t.id}', style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 18)),
+          content: TextField(
+            key: const ValueKey<String>('truck-plate-field'),
+            controller: ctl,
+            autofocus: true,
+            textCapitalization: TextCapitalization.characters,
+            maxLength: 15,
+            decoration: InputDecoration(hintText: 'e.g. ABC 1234', errorText: err),
+          ),
+          actions: <Widget>[
+            TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('Cancel')),
+            FilledButton(
+              style: FilledButton.styleFrom(backgroundColor: _teal),
+              onPressed: () {
+                final String v = ctl.text.trim().toUpperCase().replaceAll(RegExp(r'\s+'), ' ');
+                if (!RegExp(r'^[A-Z0-9][A-Z0-9 \-]{1,14}$').hasMatch(v)) {
+                  set(() => err = 'Use letters, numbers, spaces or dashes (2 to 15 characters).');
+                  return;
+                }
+                Navigator.of(ctx).pop(v);
+              },
+              child: const Text('Save'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (plate == null || plate == t.plate) return;
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    try {
+      final FirebaseDatabase db = FirebaseDatabase.instance;
+      await db.ref('trucks/${t.id}').update(<String, Object?>{'plateNumber': plate, 'updatedAt': ServerValue.timestamp});
+      final DataSnapshot live = await db.ref('truck_locations/${t.id}').get();
+      if (live.exists) await db.ref('truck_locations/${t.id}').update(<String, Object?>{'plate_number': plate});
+      await _load();
+    } catch (_) {
+      if (mounted) setState(() => _error = 'Could not save the plate number. Check your connection and try again.');
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
   }
 
   Widget _badge(String text, Color bg, Color fg) => Container(
