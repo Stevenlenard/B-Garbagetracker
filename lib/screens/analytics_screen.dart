@@ -42,6 +42,7 @@ import '../services/driver_route_history_service.dart';
 import 'route_history_screen.dart';
 import '../widgets/app_date_range_picker.dart';
 import '../widgets/predictive_models_card.dart';
+import '../services/ai_actions_service.dart';
 import '../widgets/ai_suggested_actions.dart';
 import '../utils/trip_archive.dart';
 
@@ -3302,6 +3303,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
               purokNames: _purokNames,
               geminiSummary: _geminiSummary,
               recommendations: _recommendations,
+              checks: AnalyticsNarrative.recommendedChecks(_narrativeInput()),
               isAiLoading: _isAiLoading,
               onRefresh: () => _refreshAllStats(manual: true),
             ),
@@ -3330,6 +3332,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
               purokNames: _purokNames,
               geminiSummary: _geminiSummary,
               recommendations: _recommendations,
+              checks: AnalyticsNarrative.recommendedChecks(_narrativeInput()),
               isAiLoading: _isAiLoading,
               onRefresh: () => _refreshAllStats(manual: true),
             ),
@@ -3358,6 +3361,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
               purokNames: _purokNames,
               geminiSummary: _geminiSummary,
               recommendations: _recommendations,
+              checks: AnalyticsNarrative.recommendedChecks(_narrativeInput()),
               isAiLoading: _isAiLoading,
               onRefresh: () => _refreshAllStats(manual: true),
             ),
@@ -5653,6 +5657,7 @@ class _OperationalInsightsModal extends StatefulWidget {
   final List<String> purokNames;
   final String? geminiSummary;
   final String? recommendations;
+  final List<NarrativeCheck> checks;
   final bool isAiLoading;
   final Future<void> Function() onRefresh;
 
@@ -5669,6 +5674,7 @@ class _OperationalInsightsModal extends StatefulWidget {
     required this.purokNames,
     this.geminiSummary,
     this.recommendations,
+    this.checks = const <NarrativeCheck>[],
     required this.isAiLoading,
     required this.onRefresh,
   });
@@ -5755,15 +5761,18 @@ class _OperationalInsightsModalState extends State<_OperationalInsightsModal> wi
                                 style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: Colors.grey.shade700),
                               ),
                             ),
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFFE0F2F1),
-                                borderRadius: BorderRadius.circular(6),
-                              ),
-                              child: const Text(
-                                "AI-generated • Review recommended",
-                                style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: Color(0xFF00897B)),
+                            FutureBuilder<AiActionsResult?>(
+                              future: AiActionsService.load(),
+                              builder: (context, snap) => Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFE0F2F1),
+                                  borderRadius: BorderRadius.circular(6),
+                                ),
+                                child: Text(
+                                  snap.data != null ? "AI-assisted • Review recommended" : "Data-based • Review recommended",
+                                  style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: Color(0xFF00897B)),
+                                ),
                               ),
                             ),
                           ],
@@ -6385,87 +6394,52 @@ class _OperationalInsightsModalState extends State<_OperationalInsightsModal> wi
     );
   }
 
+  /// Rule-based recommendations from the figures on this screen: the areas with the most complaints, areas with
+  /// no verified visit, then the dashboard's own checks (pending complaints, GPS gaps, missing weights). Every card
+  /// states the number it rests on; nothing is invented to fill the list.
   List<Map<String, dynamic>> _getDynamicRecommendations() {
     final List<Map<String, dynamic>> recs = [];
+    final Color high = Colors.red, medium = Colors.amber.shade800, normal = const Color(0xFF00897B);
+    String n(int v, String one) => '$v $one${v == 1 ? '' : 's'}';
 
-    // 1. Check for high complaint areas in widget.complaintData
-    String highComplaintArea = "";
-    int highComplaints = 0;
-    widget.complaintData.forEach((area, complaints) {
-      if (complaints > highComplaints) {
-        highComplaints = complaints;
-        highComplaintArea = area;
-      }
-    });
-
-    if (highComplaints > 0 && highComplaintArea.isNotEmpty) {
+    final List<MapEntry<String, int>> complaintAreas = widget.complaintData.entries.where((e) => e.value > 0).toList()
+      ..sort((x, y) => y.value.compareTo(x.value));
+    for (final MapEntry<String, int> e in complaintAreas.take(2)) {
+      final int visits = widget.visitData[e.key] ?? 0;
       recs.add({
-        "title": "Address service backlog in $highComplaintArea",
-        "evidence": "Analytics detected $highComplaints resident feedback reports in $highComplaintArea sector. Review collection logs.",
-        "priority": highComplaints > 2 ? "Priority: High" : "Priority: Medium",
-        "color": highComplaints > 2 ? Colors.red : Colors.amber.shade800,
+        "title": "Check the complaints from ${e.key}",
+        "evidence": "${n(e.value, 'resident complaint')} and ${n(visits, 'verified collection visit')} in this period. "
+            "Read what was reported, compare it with the area's collection log, and assign or resolve it.",
+        "priority": e.value > 2 ? "Priority: High" : "Priority: Medium",
+        "color": e.value > 2 ? high : medium,
       });
     }
 
-    // 2. Check for zero or low visit areas
-    List<String> lowVisitAreas = [];
-    widget.visitData.forEach((area, visits) {
-      if (visits == 0 && area != "San Nicolas") {
-        lowVisitAreas.add(area);
-      }
-    });
-
-    if (lowVisitAreas.isNotEmpty) {
+    final List<String> noVisit = widget.visitData.entries.where((e) => e.value == 0).map((e) => e.key).toList();
+    if (noVisit.isNotEmpty) {
       recs.add({
-        "title": "Verify coverage for ${lowVisitAreas.first}",
-        "evidence": "Zero recorded collection visits during the selected period. Confirm if service was missed or pending.",
+        "title": noVisit.length == 1 ? "Confirm collection in ${noVisit.first}" : "Confirm collection in ${noVisit.length} areas",
+        "evidence": "${noVisit.take(3).join(', ')}${noVisit.length > 3 ? ' and others' : ''}: no verified visit in this period. "
+            "A missing visit does not prove the area was missed; ask the assigned driver.",
         "priority": "Priority: Medium",
-        "color": Colors.amber.shade800,
+        "color": medium,
       });
     }
 
-    // 3. If AI recommendations are provided and not default, parse or append them
-    if (widget.recommendations != null &&
-        widget.recommendations!.isNotEmpty &&
-        !widget.recommendations!.contains("Analyzing fleet")) {
-      final lines = widget.recommendations!
-          .split(RegExp(r'\n|[*-]|\d+\.\s+'))
-          .map((e) => e.trim())
-          .where((e) => e.length > 10)
-          .toList();
-
-      for (int i = 0; i < lines.length && i < 3; i++) {
-        String line = lines[i];
-        if (!recs.any((r) => r['title']!.toString().toLowerCase().contains(line.substring(0, math.min(10, line.length)).toLowerCase()))) {
-          recs.add({
-            "title": line.length > 60 ? "${line.substring(0, 57)}..." : line,
-            "evidence": "AI-generated advisory recommendation based on current operational telemetry.",
-            "priority": i == 0 ? "Priority: High" : (i == 1 ? "Priority: Medium" : "Priority: Normal"),
-            "color": i == 0 ? Colors.red : (i == 1 ? Colors.amber.shade800 : const Color(0xFF00897B)),
-          });
-        }
-      }
-    }
-
-    // Ensure we always have at least 3 recommendations
-    if (recs.length < 3) {
+    for (final NarrativeCheck c in widget.checks) {
+      final String t = c.title.toLowerCase();
+      if (recs.any((r) => r['title'].toString().toLowerCase() == t)) continue;
+      if (t.startsWith('confirm collection') && noVisit.isNotEmpty) continue; // same advice as above
+      final bool complaints = t.contains('complaint');
+      final bool calm = t.startsWith('no action') || t.startsWith('keep') || t.startsWith('monitor');
       recs.add({
-        "title": "Optimize morning route intervals",
-        "evidence": "Reduce idle wait times during transit between distant puroks across ${widget.selectedArea}.",
-        "priority": "Priority: Medium",
-        "color": Colors.amber.shade800,
+        "title": c.title,
+        "evidence": c.subtitle,
+        "priority": complaints ? "Priority: High" : (calm ? "Priority: Normal" : "Priority: Medium"),
+        "color": complaints ? high : (calm ? normal : medium),
       });
     }
-    if (recs.length < 3) {
-      recs.add({
-        "title": "Conduct weekly driver briefings",
-        "evidence": "Reinforce punctuality and complete coverage verification for all assigned units.",
-        "priority": "Priority: Normal",
-        "color": const Color(0xFF00897B),
-      });
-    }
-
-    return recs.take(4).toList();
+    return recs.take(5).toList();
   }
 
   Widget _buildActionsTab() {
@@ -6481,7 +6455,7 @@ class _OperationalInsightsModalState extends State<_OperationalInsightsModal> wi
               children: [
                 Icon(Icons.checklist_rounded, size: 18, color: Color(0xFF00897B)),
                 SizedBox(width: 8),
-                Text("Advisory Recommendations", style: TextStyle(fontWeight: FontWeight.w900, fontSize: 15, color: Color(0xFF1A1A1A))),
+                Text("Data-based checks", style: TextStyle(fontWeight: FontWeight.w900, fontSize: 15, color: Color(0xFF1A1A1A))),
               ],
             ),
             if (widget.isAiLoading)
@@ -6493,7 +6467,7 @@ class _OperationalInsightsModalState extends State<_OperationalInsightsModal> wi
           ],
         ),
         const SizedBox(height: 4),
-        Text("Recommendations for ${widget.selectedArea}.", style: TextStyle(fontSize: 12, color: Colors.grey.shade600, fontWeight: FontWeight.w500)),
+        Text("From the visits, complaints and trips recorded for ${widget.selectedArea} in this period.", style: TextStyle(fontSize: 12, color: Colors.grey.shade600, fontWeight: FontWeight.w500)),
         const SizedBox(height: 16),
         AiSuggestedActionsPanel(area: widget.selectedArea),
         ...recommendationsList.asMap().entries.map((entry) {
