@@ -3480,6 +3480,13 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
         const SizedBox(height: 16),
         _buildScheduledRoutesCard(),
         _buildPredictionCard("Recommendations", [
+          // Same shared AI result as the Operational Insights and Complaint Center (one request, cached).
+          AiSuggestedActionsPanel(area: _selectedArea),
+          const Text(
+            "DATA-BASED CHECKS",
+            style: TextStyle(fontSize: 11, color: Color(0xFF6B21A8), fontWeight: FontWeight.w900, letterSpacing: 0.5),
+          ),
+          const SizedBox(height: 6),
           Text(
             _recommendations,
             style: const TextStyle(
