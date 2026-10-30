@@ -896,20 +896,42 @@ class _RouteHistoryScreenState extends State<RouteHistoryScreen> with TickerProv
       final List<List<double>> collectingCoords = firstFull < 0 ? fullCoords : fullCoords.sublist(0, vertex(firstFull) + 1);
       final List<List<double>> fullStretch =
           firstFull < 0 ? const <List<double>>[] : fullCoords.sublist(firstFull > 0 ? vertex(firstFull - 1) : 0);
+      // A jump no vehicle could make (a bad fix, or a GPS outage) is not travel: the line is broken there instead of
+      // drawing a straight stroke across the map. Ranges are vertex indices of fullCoords.
+      final List<List<int>> cuts = <List<int>>[
+        for (int i = 1; i < cleanDisplayPoints.length; i++)
+          if (cleanDisplayPoints[i].isGapStart) <int>[vertex(i - 1), vertex(i)],
+      ];
+      List<List<List<double>>> pieces(int from, int to) {
+        final List<List<List<double>>> out = <List<List<double>>>[];
+        int cur = from;
+        for (final List<int> c in cuts) {
+          if (c[0] < cur || c[1] > to) continue;
+          if (c[0] > cur) out.add(fullCoords.sublist(cur, c[0] + 1));
+          cur = c[1];
+        }
+        if (to > cur) out.add(fullCoords.sublist(cur, to + 1));
+        return out;
+      }
+      final List<List<List<double>>> collectingPieces =
+          collectingCoords.length >= 2 ? pieces(0, collectingCoords.length - 1) : const <List<List<double>>>[];
+      final List<List<List<double>>> fullPieces = fullStretch.length >= 2
+          ? pieces(fullCoords.length - fullStretch.length, fullCoords.length - 1)
+          : const <List<List<double>>>[];
       // A single recorded point is not a route: draw no line rather than an invalid one.
       final fullFeature = {
         "type": "FeatureCollection",
         "features": [
-          if (collectingCoords.length >= 2)
+          if (collectingPieces.isNotEmpty)
             {
               "type": "Feature",
-              "geometry": {"type": "LineString", "coordinates": collectingCoords},
+              "geometry": {"type": "MultiLineString", "coordinates": collectingPieces},
               "properties": {"full": false}
             },
-          if (fullStretch.length >= 2)
+          if (fullPieces.isNotEmpty)
             {
               "type": "Feature",
-              "geometry": {"type": "LineString", "coordinates": fullStretch},
+              "geometry": {"type": "MultiLineString", "coordinates": fullPieces},
               "properties": {"full": true}
             },
         ]

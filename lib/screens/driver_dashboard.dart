@@ -1760,6 +1760,21 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       _collectionFrozen = awaitingUnload;
       _collectionRecord = frozen;
       _postFullDistance = 0.0;
+      // A resumed trip continues from its last stored position. The first fix after reopening the app can be a
+      // rough network position kilometres away (a 10.5 km jump on 29 Oct): measured against the stored position and
+      // time, such a fix fails the jump checks, and the truck stays where it was until a plausible fix arrives.
+      Position shownPos = startPos;
+      DateTime shownAt = DateTime.now();
+      Position? stored;
+      if (resumed != null) {
+        stored = _storedTripPosition(resumed);
+        _lastRecordedRoutePosition = stored;
+        _lastRecordedRouteTime = stored?.timestamp;
+        if (stored != null && _isImpossibleJump(stored, startPos)) {
+          shownPos = stored;
+          shownAt = stored.timestamp;
+        }
+      }
       final String liveStatus = awaitingUnload ? 'FULL' : 'ACTIVE';
       // Route assignment: link this trip on the server (token identity). Fire-and-forget:
       // a missing assignment or an unconfigured server never affects tracking.
@@ -1770,11 +1785,11 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       // Authoritative local state immediately (UI, optimizer).
       if (mounted) {
         setState(() {
-          _currentPosition = startPos;
+          _currentPosition = shownPos;
           _status = liveStatus;
           _startTime = timeStr;
           _distance = startDistance;
-          _lastGpsUpdateTime = DateTime.now();
+          _lastGpsUpdateTime = shownAt;
           _gpsSignalLost = false;
           // _completedCount and _purokStatus are NOT reset here because they are weekly.
           _autoNotifiedPuroks.clear();
@@ -1804,13 +1819,13 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
         'plate_number': _truckPlateNumber,
         'start_time': timeStr,
         'server_start_time': serverStart,
-        'latitude': startPos.latitude,
-        'longitude': startPos.longitude,
+        'latitude': shownPos.latitude,
+        'longitude': shownPos.longitude,
         'distance': startDistance,
         'speed': 0.0,
         'avg_speed': 0.0,
         'efficiency': 0.0,
-        'accuracy': startPos.accuracy,
+        'accuracy': shownPos.accuracy,
         'gps_at': ServerValue.timestamp,
         'lastSeen': ServerValue.timestamp,
         'updatedAt': DateTime.now().toIso8601String(),
@@ -1827,10 +1842,10 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
         // Trigger initial optimization
         _tryAutoOptimizeRoute(resumed != null ? "RESUME" : "NEW_TRIP");
 
-        // Reset recorded route position tracking
-        _lastRecordedRoutePosition = resumed != null ? null : startPos;
-        _lastRecordedRouteTime = resumed != null ? null : DateTime.now();
+        // Reset recorded route position tracking (a resumed trip keeps the stored position set above)
         if (resumed == null) {
+          _lastRecordedRoutePosition = startPos;
+          _lastRecordedRouteTime = DateTime.now();
           _tripRoutePoints.clear();
           // CRITICAL: First route point must be EXACTLY the start point
           _appendRoutePoint(startPos, "ACTIVE", "GREEN");
@@ -2191,6 +2206,31 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
   }
 
   /// After a restart the last recorded point is read back from the trip's stored route.
+  /// The last position a trip stored (last_lat/last_lng at last_seen), or null when it has none.
+  static Position? _storedTripPosition(Map trip) {
+    final Object? lat = trip['last_lat'], lng = trip['last_lng'], seen = trip['last_seen'];
+    if (lat is! num || lng is! num || lat == 0 || lng == 0) return null;
+    return Position(
+      latitude: lat.toDouble(),
+      longitude: lng.toDouble(),
+      timestamp: seen is num ? DateTime.fromMillisecondsSinceEpoch(seen.toInt()) : DateTime.now(),
+      altitude: 0,
+      accuracy: 0,
+      heading: 0,
+      speed: 0,
+      speedAccuracy: 0,
+      altitudeAccuracy: 0,
+      headingAccuracy: 0,
+    );
+  }
+
+  /// A move from [from] to [to] no vehicle could make: over 500 m at more than 144 km/h.
+  static bool _isImpossibleJump(Position from, Position to) {
+    final double d = Geolocator.distanceBetween(from.latitude, from.longitude, to.latitude, to.longitude);
+    final int secs = math.max(1, to.timestamp.difference(from.timestamp).inSeconds);
+    return d > 500 && d / secs > 40;
+  }
+
   void _ensureLastRecordedRoutePosition(DateTime now) {
     if (_lastRecordedRoutePosition != null || _tripRoutePoints.isEmpty) return;
     final Map lastP = _tripRoutePoints.last;
