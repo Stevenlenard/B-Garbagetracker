@@ -66,7 +66,7 @@ try {
         "\"action\":\"one short imperative sentence in English\",\"reason\":\"one short sentence citing what the complaints say\",\"complaint_ids\":[ids]}]}. " .
         "Complaints: " . json_encode(array_values($open), JSON_UNESCAPED_UNICODE);
 
-    $text = gt_ai_generate($ai_cfg, $prompt, ['responseMimeType' => 'application/json', 'temperature' => 0.3, 'maxOutputTokens' => 1200], 20);
+    $text = gt_ai_generate($ai_cfg, $prompt, ['responseMimeType' => 'application/json', 'temperature' => 0.3, 'maxOutputTokens' => 1200], 12);
     $data = $text !== null ? json_decode(preg_replace('/^```(?:json)?\s*|\s*```$/', '', trim($text)), true) : null;
 
     $actions = [];

@@ -93,7 +93,8 @@ class ApiService {
 
   /// Admin: AI-suggested actions from the open resident complaints (one result for Analytics and the Complaint Center).
   Future<Response> getAiActions() async {
-    return await _dio.get('get_ai_actions.php');
+    // The server may try a second AI provider when the first fails, so this one call waits longer than the rest.
+    return await _dio.get('get_ai_actions.php', options: Options(receiveTimeout: const Duration(seconds: 40)));
   }
 
   Future<Response> getOperationalInsights() async {

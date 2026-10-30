@@ -6396,22 +6396,26 @@ class _OperationalInsightsModalState extends State<_OperationalInsightsModal> wi
 
   /// Rule-based recommendations from the figures on this screen: the areas with the most complaints, areas with
   /// no verified visit, then the dashboard's own checks (pending complaints, GPS gaps, missing weights). Every card
-  /// states the number it rests on; nothing is invented to fill the list.
+  /// says why (the number it rests on) and what to do (the step and the screen); nothing is invented to fill the list.
   List<Map<String, dynamic>> _getDynamicRecommendations() {
     final List<Map<String, dynamic>> recs = [];
     final Color high = Colors.red, medium = Colors.amber.shade800, normal = const Color(0xFF00897B);
     String n(int v, String one) => '$v $one${v == 1 ? '' : 's'}';
+    final String period =
+        "${DateFormat('MMM dd').format(widget.selectedDateRange.start)} - ${DateFormat('MMM dd').format(widget.selectedDateRange.end)}";
 
     final List<MapEntry<String, int>> complaintAreas = widget.complaintData.entries.where((e) => e.value > 0).toList()
       ..sort((x, y) => y.value.compareTo(x.value));
     for (final MapEntry<String, int> e in complaintAreas.take(2)) {
       final int visits = widget.visitData[e.key] ?? 0;
       recs.add({
-        "title": "Check the complaints from ${e.key}",
-        "evidence": "${n(e.value, 'resident complaint')} and ${n(visits, 'verified collection visit')} in this period. "
-            "Read what was reported, compare it with the area's collection log, and assign or resolve it.",
-        "priority": e.value > 2 ? "Priority: High" : "Priority: Medium",
-        "color": e.value > 2 ? high : medium,
+        "title": "Act on the complaints from ${e.key}",
+        "why": "${e.key} has ${n(e.value, 'resident complaint')} and ${n(visits, 'verified collection visit')} in $period."
+            "${visits == 0 ? ' No visit was verified there, so the complaint may point to a missed collection.' : ''}",
+        "todo": "Open Complaint Management, read what the resident reported, check Route History for ${e.key} on that date, "
+            "then set the complaint to In Progress or Resolved with a note to the resident.",
+        "priority": e.value > 2 || visits == 0 ? "Priority: High" : "Priority: Medium",
+        "color": e.value > 2 || visits == 0 ? high : medium,
       });
     }
 
@@ -6419,8 +6423,9 @@ class _OperationalInsightsModalState extends State<_OperationalInsightsModal> wi
     if (noVisit.isNotEmpty) {
       recs.add({
         "title": noVisit.length == 1 ? "Confirm collection in ${noVisit.first}" : "Confirm collection in ${noVisit.length} areas",
-        "evidence": "${noVisit.take(3).join(', ')}${noVisit.length > 3 ? ' and others' : ''}: no verified visit in this period. "
-            "A missing visit does not prove the area was missed; ask the assigned driver.",
+        "why": "No verified visit was recorded in ${noVisit.take(3).join(', ')}${noVisit.length > 3 ? ' and ${noVisit.length - 3} more' : ''} in $period.",
+        "todo": "Check Route History for these areas and ask the assigned driver whether they were collected. "
+            "A missing visit can also mean the driver's GPS was off, so confirm before recording it as missed.",
         "priority": "Priority: Medium",
         "color": medium,
       });
@@ -6432,9 +6437,28 @@ class _OperationalInsightsModalState extends State<_OperationalInsightsModal> wi
       if (t.startsWith('confirm collection') && noVisit.isNotEmpty) continue; // same advice as above
       final bool complaints = t.contains('complaint');
       final bool calm = t.startsWith('no action') || t.startsWith('keep') || t.startsWith('monitor');
+      String why = c.subtitle, todo = '';
+      if (t.startsWith('review') && complaints) {
+        why = "${c.title.replaceFirst('Review ', '')} in $period ${t.contains(' 1 ') ? 'has' : 'have'} not been acted on yet.";
+        todo = "Open Complaint Management, read each pending complaint, and set it to In Progress or Resolved with a note to the resident.";
+      } else if (t.startsWith('follow up')) {
+        why = "${c.title.replaceFirst('Follow up ', '').replaceFirst(' in progress', '')} ${t.contains(' 1 ') ? 'is' : 'are'} still marked In Progress.";
+        todo = "Confirm with the driver or staff that the work is finished, then mark each one Resolved so the resident is notified.";
+      } else if (t.startsWith('check gps')) {
+        todo = "Remind the drivers to keep Location on at High accuracy and to allow the app to run in the background during trips.";
+      } else if (t.startsWith('record scale')) {
+        todo = "Enter the measured weight in Load History after each trip so the totals and forecasts use real data.";
+      } else if (t.startsWith('verify collection')) {
+        todo = "Check Route History for the period and ask the drivers whether they started a trip in the app.";
+      } else if (t.startsWith('reload')) {
+        todo = "Check the internet connection, then choose the period again.";
+      } else if (calm) {
+        todo = "No step is needed now; review this screen again after the next collection.";
+      }
       recs.add({
         "title": c.title,
-        "evidence": c.subtitle,
+        "why": why,
+        "todo": todo,
         "priority": complaints ? "Priority: High" : (calm ? "Priority: Normal" : "Priority: Medium"),
         "color": complaints ? high : (calm ? normal : medium),
       });
@@ -6478,7 +6502,8 @@ class _OperationalInsightsModalState extends State<_OperationalInsightsModal> wi
             child: _actionRecommendationCard(
               index.toString().padLeft(2, '0'),
               rec['title'].toString(),
-              rec['evidence'].toString(),
+              rec['why'].toString(),
+              rec['todo'].toString(),
               rec['priority'].toString(),
               rec['color'] as Color,
             ),
@@ -6488,7 +6513,14 @@ class _OperationalInsightsModalState extends State<_OperationalInsightsModal> wi
     );
   }
 
-  Widget _actionRecommendationCard(String num, String title, String evidence, String priority, Color priorityColor) {
+  Widget _actionRecommendationCard(String num, String title, String why, String todo, String priority, Color priorityColor) {
+    Widget part(String label, String text) => Padding(
+          padding: const EdgeInsets.only(top: 6),
+          child: Text.rich(TextSpan(children: <InlineSpan>[
+            TextSpan(text: "$label  ", style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w900, color: Color(0xFF00796B))),
+            TextSpan(text: text, style: TextStyle(fontSize: 12, color: Colors.grey.shade800, fontWeight: FontWeight.w500, height: 1.4)),
+          ])),
+        );
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
@@ -6527,8 +6559,8 @@ class _OperationalInsightsModalState extends State<_OperationalInsightsModal> wi
                     ),
                   ],
                 ),
-                const SizedBox(height: 4),
-                Text(evidence, style: TextStyle(fontSize: 12, color: Colors.grey.shade700, fontWeight: FontWeight.w500, height: 1.4)),
+                if (why.isNotEmpty) part("WHY", why),
+                if (todo.isNotEmpty) part("WHAT TO DO", todo),
               ],
             ),
           ),
