@@ -397,12 +397,15 @@ class TripResumePolicy {
     if (trip['isFinished'] == true || trip['finishTime'] != null || trip['end_time'] != null) {
       return RecoveredTrip.none;
     }
-    if (trip['is_simulation'] == true || trip['isSimulation'] == true || TripArchive.isArchived(trip)) return RecoveredTrip.none;
+    if (trip['is_simulation'] == true || trip['isSimulation'] == true) return RecoveredTrip.none;
     if (trip['driver_id']?.toString() != driverId) return RecoveredTrip.none;
     final Object? rec = trip['collection'];
     final bool finalized = rec is Map && rec['finalized_at_ms'] != null;
     final String rs = (trip['route_status'] ?? '').toString().toUpperCase();
+    // A FULL session that never moved is archived (kept out of history and loads), but the
+    // truck is still FULL until unloading is confirmed: it is restored as FULL, not replaced.
     if (finalized || trip['collection_finalized'] == true) return RecoveredTrip.awaitingUnload;
+    if (TripArchive.isArchived(trip)) return RecoveredTrip.none;
     if (rs == 'ACTIVE' || rs == 'IDLE' || rs == 'PAUSED') return RecoveredTrip.collecting;
     return RecoveredTrip.none;
   }
@@ -411,16 +414,25 @@ class TripResumePolicy {
   static String? pickNewest(Map<String, Object?> candidates, {required String driverId, int? nowMs}) {
     String? best;
     int bestStamp = -1;
+    int newestAny = -1;
     candidates.forEach((id, trip) {
-      if (classify(trip, driverId: driverId, nowMs: nowMs) == RecoveredTrip.none) return;
-      final Map t = trip as Map;
-      final Object? raw = t['server_start_time'] ?? t['timestamp'];
+      if (trip is! Map || trip['driver_id']?.toString() != driverId) return;
+      if (trip['is_simulation'] == true || trip['isSimulation'] == true) return;
+      final Object? raw = trip['server_start_time'] ?? trip['timestamp'];
       final int stamp = raw is num ? raw.toInt() : 0;
+      if (stamp > newestAny) newestAny = stamp;
+      if (classify(trip, driverId: driverId, nowMs: nowMs) == RecoveredTrip.none) return;
       if (stamp > bestStamp) {
         bestStamp = stamp;
         best = id;
       }
     });
+    // A FULL session left behind by a later trip of this driver (older APKs started a new trip
+    // instead of restoring it) was superseded: the truck is not FULL anymore.
+    if (best != null && newestAny > bestStamp &&
+        classify(candidates[best], driverId: driverId, nowMs: nowMs) == RecoveredTrip.awaitingUnload) {
+      return null;
+    }
     return best;
   }
 }

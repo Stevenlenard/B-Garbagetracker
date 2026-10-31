@@ -291,6 +291,28 @@ void main() {
       expect(g.tripId, isNull);
     });
 
+    test('a FULL session archived for no movement is still restored as FULL', () async {
+      final (db, g) = await started();
+      await CollectionFinalizer.finalize(db: db, guard: g, tripId: 'trip-1', record: frozenRecord());
+      await db.update('driver_routes/trip-1', <String, Object?>{'archived': true, 'archived_reason': 'no_movement'});
+      final trip = db.read('driver_routes/trip-1');
+      expect(TripResumePolicy.classify(trip, driverId: '7', nowMs: kNow), RecoveredTrip.awaitingUnload);
+      expect(TripResumePolicy.classify(<String, Object?>{...(trip as Map).cast<String, Object?>(), 'collection': null, 'collection_finalized': null},
+          driverId: '7', nowMs: kNow), RecoveredTrip.none);
+    });
+
+    test('an unfinished FULL session is not restored once a later trip exists', () {
+      final Map<String, Object?> oldFull = <String, Object?>{
+        'driver_id': '7', 'server_start_time': kNow - 3000, 'route_status': 'FULL', 'archived': true,
+        'collection': <String, Object?>{'finalized_at_ms': kNow - 2995},
+      };
+      final Map<String, Object?> later = <String, Object?>{
+        'driver_id': '7', 'server_start_time': kNow - 1000, 'route_status': 'COMPLETED', 'isFinished': true,
+      };
+      expect(TripResumePolicy.pickNewest(<String, Object?>{'a': oldFull}, driverId: '7', nowMs: kNow), 'a');
+      expect(TripResumePolicy.pickNewest(<String, Object?>{'a': oldFull, 'b': later}, driverId: '7', nowMs: kNow), isNull);
+    });
+
     test('reconnect while FULL restores FULL; it is never reopened or recreated', () async {
       final (db, g) = await started();
       await CollectionFinalizer.finalize(db: db, guard: g, tripId: 'trip-1', record: frozenRecord());
