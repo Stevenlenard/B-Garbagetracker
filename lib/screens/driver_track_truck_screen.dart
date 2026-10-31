@@ -1080,7 +1080,8 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> with Ti
     final List<Map> rawPoints = [];
     if (!widget.isHistorical && _lastLocalPos != null) {
       // the line reaches the driver's own live position (no trailing gap until the next saved point)
-      points = RouteGeometry.withLiveTail(points, _lastLocalPos!.latitude, _lastLocalPos!.longitude);
+      points = RouteGeometry.withLiveTail(points, _lastLocalPos!.latitude, _lastLocalPos!.longitude,
+          accuracyM: _lastLocalPos!.accuracy);
     }
     
     // Only include start point if points is empty OR start point is within 300m of points.first

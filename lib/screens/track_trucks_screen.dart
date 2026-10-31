@@ -564,7 +564,8 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> with TickerProvid
             (t) => t != null && t['isOnline'] == true && (t['truck_id'] ?? '').toString() == tid,
             orElse: () => null);
         final List<Map> pts = RouteGeometry.withLiveTail(
-            recorded, (live?['latitude'] as num?)?.toDouble(), (live?['longitude'] as num?)?.toDouble());
+            recorded, (live?['latitude'] as num?)?.toDouble(), (live?['longitude'] as num?)?.toDouble(),
+            accuracyM: (live?['accuracy'] as num?)?.toDouble());
         final bool selected = _highlightedTruckId != null && TruckIdentity.normalize(_highlightedTruckId!) == TruckIdentity.normalize(tid);
         final bool dim = _highlightedTruckId != null && !selected;
         for (final Map<String, dynamic> f in RouteGeometry.lineFeatures(pts)) {

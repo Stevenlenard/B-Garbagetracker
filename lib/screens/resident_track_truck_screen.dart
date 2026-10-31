@@ -740,7 +740,8 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
         (t) => t != null && t['isOnline'] == true && (t['truck_id'] ?? '').toString() == truckId,
         orElse: () => null);
     final List<Map<String, dynamic>> features = RouteGeometry.lineFeatures(RouteGeometry.withLiveTail(
-        points, (live?['latitude'] as num?)?.toDouble(), (live?['longitude'] as num?)?.toDouble()));
+        points, (live?['latitude'] as num?)?.toDouble(), (live?['longitude'] as num?)?.toDouble(),
+        accuracyM: (live?['accuracy'] as num?)?.toDouble()));
     final String sourceId = "route-source-$truckId";
     final featureCollection = {"type": "FeatureCollection", "features": features};
     try {
@@ -806,15 +807,28 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
       marginLeft: 20.0,
     ));
 
-    _updateTruckMarkers();
-    // Route lines are layers of the old style: draw them again after a Map | Satellite switch.
-    _lastRoutePoints.forEach((tid, pts) {
-      if (_comparingTrucks.contains(tid)) _updateRoutePolyline(tid, pts);
-    });
+    _redrawOverlays();
+    // Right after a Map | Satellite switch the new style can still refuse sources and layers (the
+    // first redraw then fails quietly and a parked truck sends no new data to trigger another one):
+    // draw again shortly after, so the trucks, the resident and the routes never stay missing.
+    for (final int ms in const <int>[600, 1800]) {
+      Future<void>.delayed(Duration(milliseconds: ms), () {
+        if (mounted) _redrawOverlays();
+      });
+    }
     if (!_cameraPlaced) {
       _cameraPlaced = true;
       _recenterToBalintawak();
     }
+  }
+
+  /// Trucks, the resident marker and the route lines are layers of the current style:
+  /// a style switch removes them, so they are drawn again on the new style.
+  void _redrawOverlays() {
+    _updateTruckMarkers();
+    _lastRoutePoints.forEach((tid, pts) {
+      if (_comparingTrucks.contains(tid)) _updateRoutePolyline(tid, pts);
+    });
   }
 
   bool _cameraPlaced = false;

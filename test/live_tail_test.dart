@@ -17,4 +17,11 @@ void main() {
     expect(RouteGeometry.withLiveTail(pts, null, null).length, 2);
     expect(RouteGeometry.withLiveTail(pts, 13.95051, 121.1600).length, 2);
   });
+
+  test('a parked truck whose live fix wanders within GPS noise draws no tail (no zigzag or flicker)', () {
+    final pts = <Map>[pt(13.9500, 121.1600, 0), pt(13.9505, 121.1600, 5000)];
+    expect(RouteGeometry.withLiveTail(pts, 13.95056, 121.1600).length, 2); // ~7 m
+    expect(RouteGeometry.withLiveTail(pts, 13.95065, 121.1600, accuracyM: 25).length, 2); // ~17 m, fix +/-25 m
+    expect(RouteGeometry.withLiveTail(pts, 13.95065, 121.1600, accuracyM: 8).length, 3); // ~17 m, fix +/-8 m
+  });
 }

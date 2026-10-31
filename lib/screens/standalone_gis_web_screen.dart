@@ -636,7 +636,8 @@ class _StandaloneGisWebScreenState extends State<StandaloneGisWebScreen> with Ti
             (t) => t != null && (t['truck_id'] ?? '').toString() == tid,
             orElse: () => null);
         final List<Map> pts = RouteGeometry.withLiveTail(
-            recorded, (live?['latitude'] as num?)?.toDouble(), (live?['longitude'] as num?)?.toDouble());
+            recorded, (live?['latitude'] as num?)?.toDouble(), (live?['longitude'] as num?)?.toDouble(),
+            accuracyM: (live?['accuracy'] as num?)?.toDouble());
         for (final Map<String, dynamic> f in RouteGeometry.lineFeatures(pts)) {
           (f['properties'] as Map<String, dynamic>)['truckColor'] =
               RouteGeometry.isFullStretch(f) ? RouteGeometry.fullHex : TruckIdentity.hex(tid);
