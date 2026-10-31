@@ -760,7 +760,10 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
        debugPrint("ERROR: No user found in SessionManager");
        return;
     }
-    
+    // Phone alerts for THIS account (a driver): the listener started at app launch may still use the last
+    // identity saved on the phone (a resident tested on it got the residents' "on the way" alerts here).
+    NotificationService.startListening(_user!);
+
     final String driverIdStr = _user!.userId.toString();
 
     // 2. Resolve authoritative current truck assignment
@@ -2299,7 +2302,10 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       final String key = p['id'].toString();
       final String legacyKey = p['name'].toString().replaceAll('/', '_');
       
-      double dist = Geolocator.distanceBetween(pos.latitude, pos.longitude, p['lat'], p['lng']);
+      // Road areas (Ayala Highway, T.M. Kalaw Street, ...) are a stretch of road: the distance is to the nearest point
+      // of that stretch, not to its first point. A truck coming from the far end was measured to the other end
+      // (Ayala Highway, 31 Oct), so it never became the next area and its residents got no "on the way" alert.
+      double dist = _distanceToArea(pos, p);
       // one 100 m circle per collection area (same as the verified-visit rule on the status and analytics screens)
       double geofenceRadius = 100.0;
 
@@ -2407,6 +2413,21 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     }
     _proxPrev = pos;
     _proxPrevAt = DateTime.now();
+  }
+
+  /// Metres from [pos] to a collection area: to its point, or for a road area (with an end point) to the nearest
+  /// point of the road between its two points.
+  static double _distanceToArea(Position pos, Map<String, dynamic> p) {
+    final double aLat = (p['lat'] as num).toDouble(), aLng = (p['lng'] as num).toDouble();
+    final double? bLat = (p['endLat'] as num?)?.toDouble(), bLng = (p['endLng'] as num?)?.toDouble();
+    if (bLat == null || bLng == null) return Geolocator.distanceBetween(pos.latitude, pos.longitude, aLat, aLng);
+    // local flat projection (metres per degree) is exact enough over a few kilometres
+    final double k = math.cos(aLat * math.pi / 180.0);
+    final double dx = (bLng - aLng) * k, dy = bLat - aLat;
+    final double px = (pos.longitude - aLng) * k, py = pos.latitude - aLat;
+    final double len2 = dx * dx + dy * dy;
+    final double t = len2 == 0 ? 0 : ((px * dx + py * dy) / len2).clamp(0.0, 1.0).toDouble();
+    return Geolocator.distanceBetween(pos.latitude, pos.longitude, aLat + t * dy, aLng + t * (bLng - aLng));
   }
 
   Position? _proxPrev;

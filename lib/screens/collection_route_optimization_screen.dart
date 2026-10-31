@@ -415,7 +415,9 @@ class _CollectionRouteOptimizationScreenState extends State<CollectionRouteOptim
     };
     _visits = v.visits;
     // Arrival estimates: each "on the way" alert against the verified (green) arrival, as in Analytics.
-    _etaVisits = VerifiedEta.visits(d.notifications, trips: d.trips, areas: d.areas, nowMs: _statusNowMs);
+    // Every alert of the day with its outcome (the area history shows what residents were told, also when the trip
+    // ended before the truck got there); Analytics keeps counting the valid ones only.
+    _etaVisits = VerifiedEta.allVisits(d.notifications, trips: d.trips, areas: d.areas, nowMs: _statusNowMs);
     _activity = CollectionStatus.activityFromWeeklyProgress(
         d.weeklyProgress, (String k) => byKey[k] ?? byKey[ServiceAreaService.canonicalizeAreaName(k) ?? ''],
         includeSimulated: !_viewOnly);
@@ -1386,7 +1388,11 @@ class _CollectionRouteOptimizationScreenState extends State<CollectionRouteOptim
             '${predicted != null ? ' (expected ${clock(predicted)})' : ''}';
         final String result = v.isEvaluated && v.arrivalMs != null
             ? 'Arrived ${clock(v.arrivalMs!)} · ${diff(v.signedErrorMin!)}'
-            : 'Awaiting arrival';
+            : switch (v.status) {
+                EtaVisitStatus.withdrawn => 'Trip ended before the truck reached this area',
+                EtaVisitStatus.noArrival => 'No verified arrival was recorded',
+                _ => 'Awaiting arrival',
+              };
         final Color color = !v.isEvaluated
             ? _muted
             : (v.absErrorMin! <= 5 ? const Color(0xFF2E7D32) : const Color(0xFFEF6C00));

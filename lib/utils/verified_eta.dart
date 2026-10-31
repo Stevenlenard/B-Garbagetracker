@@ -61,11 +61,25 @@ class VerifiedEta {
     required int nowMs,
     Set<String>? closedTripIds,
   }) {
+    return allVisits(rawNotifications, trips: trips, areas: areas, nowMs: nowMs, closedTripIds: closedTripIds)
+        .where((EtaVisit v) => v.status == EtaVisitStatus.evaluated || v.status == EtaVisitStatus.awaiting)
+        .toList();
+  }
+
+  /// Every "on the way" alert with its outcome, including those the truck never followed with a verified arrival
+  /// (trip ended first, or no arrival recorded): the per-area history shows what residents were told.
+  static List<EtaVisit> allVisits(
+    Object? rawNotifications, {
+    required Map trips,
+    required List<AreaGeofence> areas,
+    required int nowMs,
+    Set<String>? closedTripIds,
+  }) {
     return EtaEvaluation.build(
       withVerifiedArrivals(rawNotifications, trips: trips, areas: areas),
       nowMs: nowMs,
       canonicalize: (String raw) => ServiceAreaService.canonicalizeAreaName(raw) ?? raw,
       closedTripIds: closedTripIds ?? VerifiedEta.closedTripIds(trips),
-    ).where((EtaVisit v) => v.status == EtaVisitStatus.evaluated || v.status == EtaVisitStatus.awaiting).toList();
+    ).where((EtaVisit v) => v.status != EtaVisitStatus.noEstimate).toList();
   }
 }
