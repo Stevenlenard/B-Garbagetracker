@@ -420,7 +420,16 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
   /// Notifications this resident may see. TRUCK_PROXIMITY is the legacy resident-generated
   /// broadcast (it produced "0 minutes away" duplicates); the driver app's staged
   /// approach/arrival records replace it.
-  bool _isResidentRelevant(Map val) => ResidentAlertRules.isFor(val, residentId: _user?.userId, purok: _user?.purok);
+  /// A new account starts with an empty inbox: notifications sent before the account was made are left out.
+  bool _isResidentRelevant(Map val) {
+    final int? since = _user?.createdAtMs;
+    if (since != null) {
+      final Object? t = val['timestamp'];
+      final int ts = t is num ? t.toInt() : int.tryParse('${t ?? ''}') ?? 0;
+      if (ts < since) return false;
+    }
+    return ResidentAlertRules.isFor(val, residentId: _user?.userId, purok: _user?.purok);
+  }
 
   void _ensureInbox() {
     if (_inbox != null || _user == null) return;

@@ -17,6 +17,9 @@ class UserData {
   final String accountStatus;
   final String? createdAt;
 
+  /// When the account was made (server time, ms); a resident sees only the notifications sent after it.
+  final int? createdAtMs;
+
   UserData({
     this.userId = 0,
     this.username = '',
@@ -33,6 +36,7 @@ class UserData {
     this.approvalStatus = 'approved',
     this.accountStatus = 'active',
     this.createdAt,
+    this.createdAtMs,
   });
 
   factory UserData.fromJson(Map<String, dynamic> json) {
@@ -52,6 +56,7 @@ class UserData {
       approvalStatus: json['approval_status']?.toString() ?? 'approved',
       accountStatus: json['account_status']?.toString() ?? 'active',
       createdAt: json['created_at']?.toString(),
+      createdAtMs: num.tryParse('${json['created_at_ms'] ?? ''}')?.toInt(),
     );
   }
 
@@ -72,6 +77,7 @@ class UserData {
       'approval_status': approvalStatus,
       'account_status': accountStatus,
       'created_at': createdAt,
+      'created_at_ms': createdAtMs,
     };
   }
 
@@ -103,6 +109,7 @@ class UserData {
     String? approvalStatus,
     String? accountStatus,
     String? createdAt,
+    int? createdAtMs,
   }) {
     return UserData(
       userId: userId ?? this.userId,
@@ -120,6 +127,7 @@ class UserData {
       approvalStatus: approvalStatus ?? this.approvalStatus,
       accountStatus: accountStatus ?? this.accountStatus,
       createdAt: createdAt ?? this.createdAt,
+      createdAtMs: createdAtMs ?? this.createdAtMs,
     );
   }
 }

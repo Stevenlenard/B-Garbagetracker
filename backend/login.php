@@ -217,7 +217,8 @@ if (!empty($identifier) && !empty($password)) {
         }
 
         // 2. Search sa 'residents' table
-        $query = "SELECT resident_id as user_id, username, name, email, phone, purok, complete_address, 'resident' as role, password_hash, is_archived FROM residents WHERE username = ? OR email = ?";
+        // created_at_ms: the app shows a resident only the notifications sent after the account was made
+        $query = "SELECT resident_id as user_id, username, name, email, phone, purok, complete_address, 'resident' as role, password_hash, is_archived, UNIX_TIMESTAMP(created_at) * 1000 AS created_at_ms FROM residents WHERE username = ? OR email = ?";
         $stmt = $conn->prepare($query);
         $stmt->execute([$identifier, $identifier]);
         $resident = $stmt->fetch(PDO::FETCH_ASSOC);

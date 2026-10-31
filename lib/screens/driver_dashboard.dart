@@ -2344,7 +2344,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       // Sustained closing only: never on the first fix, never on a few metres of GPS wander.
       final int nowMs = DateTime.now().millisecondsSinceEpoch;
       _approachDetector.add(key, nowMs, dist);
-      if (!servedThisTrip && (next == null || dist < next.dist)) {
+      if (!servedThisTrip && _isAlertableArea(p) && (next == null || dist < next.dist)) {
         next = (name: p['name'].toString(), key: key, dist: dist, approaching: _approachDetector.isApproaching(key, nowMs));
       }
 
@@ -2390,8 +2390,8 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
 
           _truckPublisher(_user?.preferredTruck ?? "Unknown")?.publish(<String, Object?>{'current_purok': p['name']});
           
-          // --- Automatic Arrival Notifications ---
-          _handleAutoNotifications(p['name'], dist, visit: _areaVisit[key] ?? 1);
+          // --- Automatic Arrival Notifications --- (assigned areas only when the driver has an assignment today)
+          if (_isAlertableArea(p)) _handleAutoNotifications(p['name'], dist, visit: _areaVisit[key] ?? 1);
           
           // Reset counter after completion
           _purokConsecutivePoints[key] = 0;
@@ -4678,7 +4678,31 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
           ? r.value!.items.where((RouteAssignment a) => a.driverId == me && a.status != AssignmentStatus.cancelled).toList()
           : const <RouteAssignment>[];
       _todayAssignment = mine.isEmpty ? null : mine.first;
+      // Residents are alerted only for the areas of today's assignments (all of them when a driver has several);
+      // an area the truck merely passes on the way is not alerted. No assignment: every area, as before.
+      _assignedAreaNames = mine.isEmpty
+          ? null
+          : (<String>{
+              for (final RouteAssignment a in mine)
+                for (final AssignmentArea x in a.areas) ...<String>[_areaToken(x.key), _areaToken(x.name)],
+            }..remove(''));
     });
+  }
+
+  /// Area names/ids of today's assignments (canonical, lower case), or null when the driver has none today.
+  Set<String>? _assignedAreaNames;
+
+  static String _areaToken(String raw) {
+    final String t = raw.trim();
+    if (t.isEmpty) return '';
+    return (ServiceAreaService.canonicalizeAreaName(t) ?? t).toLowerCase();
+  }
+
+  /// True when residents of [p] may be alerted on this trip: no assignment today, or [p] is an assigned area.
+  bool _isAlertableArea(Map<String, dynamic> p) {
+    final Set<String>? assigned = _assignedAreaNames;
+    if (assigned == null) return true;
+    return assigned.contains(_areaToken(p['id']?.toString() ?? '')) || assigned.contains(_areaToken(p['name']?.toString() ?? ''));
   }
 
   Future<void> _linkTripToAssignment(String tripId, String truckId, int startedAtMs) async {
