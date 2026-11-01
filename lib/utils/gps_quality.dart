@@ -133,6 +133,29 @@ class RoutePointPolicy {
   }
 }
 
+/// Which recorded fixes of a finished trip are used for its route line and statistics.
+///
+/// Good fixes (accuracy 50 m or better) are preferred. A trip recorded entirely under poor signal (indoors, narrow
+/// streets, weak GPS: the recorder keeps only a fix every 90 s there) would be left with fewer than two of them and
+/// show NO line although the route was recorded, so the fixes up to [fallbackAccuracyM] (the live maps' limit) are then
+/// used instead. Nothing is ever deleted: the raw points stay in the database.
+class RoutePointSelection {
+  RoutePointSelection._();
+
+  static const double preferredAccuracyM = 50;
+  static const double fallbackAccuracyM = 100;
+
+  static List<GpsPoint> usable(Iterable<GpsPoint> all) {
+    final List<GpsPoint> valid = all.where((p) => p.latitude != 0.0 && p.longitude != 0.0).toList();
+    List<GpsPoint> within(double limit) =>
+        valid.where((p) => p.accuracyM == 0.0 || p.accuracyM <= limit).toList()..sort((a, b) => a.timestamp.compareTo(b.timestamp));
+    final List<GpsPoint> good = within(preferredAccuracyM);
+    if (good.length >= 2) return good;
+    final List<GpsPoint> fallback = within(fallbackAccuracyM);
+    return fallback.length >= 2 ? fallback : good;
+  }
+}
+
 /// Collapses stationary GPS wander in an ALREADY RECORDED route, for display and statistics.
 ///
 /// Points that stay within the noise radius of the last anchor keep their time but take the anchor's

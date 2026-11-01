@@ -1237,13 +1237,16 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> with TickerProvid
       _isUpdatingMarkers = true;
 
       final String sourceId = "trucks-admin-live-source";
-      final List<Map<String, dynamic>> features = _trucks
-          .where((t) => t['isOnline'] == true && (t['latitude'] ?? 0) != 0 && (t['longitude'] ?? 0) != 0)
-          .map((truck) {
+      // Live trucks plus the last known position of a truck that just stopped reporting during its trip.
+      final List<Map<String, dynamic>> features = <Map>[
+        ..._trucks.where((t) => t['isOnline'] == true && (t['latitude'] ?? 0) != 0 && (t['longitude'] ?? 0) != 0),
+        ...FleetStatus.staleMarkers(_trucks),
+      ].map((truck) {
+        final bool isStale = truck['isOnline'] != true;
         final double lat = (truck['latitude'] ?? 0.0).toDouble();
         final double lng = (truck['longitude'] ?? 0.0).toDouble();
         final String tid = (truck['truck_id'] ?? truck['truckNumber'] ?? 'Truck').toString();
-        final String status = (truck['status'] ?? "ACTIVE").toString().toUpperCase();
+        final String status = isStale ? 'STALE' : (truck['status'] ?? "ACTIVE").toString().toUpperCase();
         return {
           "type": "Feature",
           "geometry": {"type": "Point", "coordinates": [lng, lat]},
@@ -1251,9 +1254,12 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> with TickerProvid
             "truckId": tid,
             "status": status,
             ...TruckIdentity.markerProps(tid, status),
+            if (isStale) "statusColor": "#9E9E9E",
             "driverName": (truck['driver_name'] ?? '').toString(),
             "tripId": (truck['current_session'] ?? '').toString(),
-            "label": MarkerLabels.forNode(truck, truckId: tid),
+            "label": isStale
+                ? '$tid · ${(truck['driver_name'] ?? '').toString().trim().isEmpty ? 'Driver' : truck['driver_name']}\n${FleetStatus.lastSeenLabel(truck)}'
+                : MarkerLabels.forNode(truck, truckId: tid),
           }
         };
       }).toList();
@@ -1273,6 +1279,7 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> with TickerProvid
         "PAUSED", mapColor(Colors.orange),
         "STOP", mapColor(Colors.red),
         "FULL", mapColor(Colors.red),
+        "STALE", mapColor(Colors.grey),
         "COMPLETED", mapColor(Colors.blue),
         "FINISHED", mapColor(Colors.blue),
         mapColor(Colors.green)

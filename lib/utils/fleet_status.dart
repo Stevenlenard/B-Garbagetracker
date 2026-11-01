@@ -14,6 +14,10 @@ class FleetStatus {
   /// moderate device clock skew.
   static const int freshnessWindowMs = 180000;
 
+  /// A truck that stops reporting during an open trip (tunnel, dead zone, app in the background) keeps its last
+  /// known marker on the maps for this long, shown as stale, instead of vanishing the moment it stops being live.
+  static const int staleMarkerWindowMs = 1800000;
+
   /// Driver sessions expire 12 hours after login (mirrors the driver app).
   static const int sessionLimitMs = 43200000;
 
@@ -122,6 +126,52 @@ class FleetStatus {
     if (!isFresh(lastSeen, now)) return false;
     final int login = parseTimestampMs(node['login_time'] ?? node['loginTime']);
     return isSessionValid(login, now);
+  }
+
+  /// Trucks to draw as "last known position" markers: not live any more, but with a valid position, an open trip
+  /// (in service, not OFFLINE/COMPLETED/FINISHED) and a last report within [staleMarkerWindowMs]. A driver that
+  /// has a live node never also gets a stale one (the older node of the same driver is not a second truck).
+  /// [trucks] are merged nodes (`isOnline` already decided, `latitude`/`longitude` numeric).
+  static List<Map> staleMarkers(Iterable<Map> trucks, {int? nowMs}) {
+    final int now = nowMs ?? ServerClock.instance.nowMs();
+    String driverOf(Map t) => (t['driver_id'] ?? t['driverId'] ?? '').toString();
+    final Set<String> liveDrivers = <String>{
+      for (final Map t in trucks)
+        if (t['isOnline'] == true && driverOf(t).isNotEmpty && driverOf(t) != 'null') driverOf(t),
+    };
+    final Map<String, Map> newestPerDriver = <String, Map>{};
+    final List<Map> out = <Map>[];
+    for (final Map t in trucks) {
+      if (t['isOnline'] == true) continue;
+      final double lat = (t['latitude'] is num) ? (t['latitude'] as num).toDouble() : 0.0;
+      final double lng = (t['longitude'] is num) ? (t['longitude'] as num).toDouble() : 0.0;
+      if (lat == 0.0 || lng == 0.0) continue;
+      if (isInactiveStatus(normalizeStatus(t['status']))) continue;
+      if (t['trip_active'] != true) continue;
+      final int seen = parseTimestampMs(t['lastSeen'] ?? t['last_seen']);
+      if (seen == 0 || now - seen > staleMarkerWindowMs) continue;
+      final String d = driverOf(t);
+      if (d.isNotEmpty && d != 'null') {
+        if (liveDrivers.contains(d)) continue;
+        final Map? prev = newestPerDriver[d];
+        if (prev != null) {
+          if (parseTimestampMs(prev['lastSeen'] ?? prev['last_seen']) >= seen) continue;
+          out.remove(prev);
+        }
+        newestPerDriver[d] = t;
+      }
+      out.add(t);
+    }
+    return out;
+  }
+
+  /// "Last seen 4 min ago" for a stale marker.
+  static String lastSeenLabel(Map t, {int? nowMs}) {
+    final int now = nowMs ?? ServerClock.instance.nowMs();
+    final int seen = parseTimestampMs(t['lastSeen'] ?? t['last_seen']);
+    if (seen == 0) return 'Last known position';
+    final int min = ((now - seen) / 60000).floor();
+    return min < 1 ? 'Last seen just now' : 'Last seen $min min ago';
   }
 
   /// Driver connectivity: owner-aware online flag AND a fresh `lastSeen`.

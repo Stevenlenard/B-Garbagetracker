@@ -52,15 +52,11 @@ class DriverRouteHistoryService {
 
       final List<GpsPoint> points = <GpsPoint>[];
       if (value['route'] is Map) {
+        final List<GpsPoint> recorded = <GpsPoint>[];
         (value['route'] as Map).forEach((_, pVal) {
-          if (pVal is Map) {
-            final GpsPoint pt = GpsPoint.fromJson(Map<String, dynamic>.from(pVal));
-            if (pt.latitude != 0.0 && pt.longitude != 0.0 && (pt.accuracyM == 0.0 || pt.accuracyM <= 50.0)) {
-              points.add(pt);
-            }
-          }
+          if (pVal is Map) recorded.add(GpsPoint.fromJson(Map<String, dynamic>.from(pVal)));
         });
-        points.sort((a, b) => a.timestamp.compareTo(b.timestamp));
+        points.addAll(RoutePointSelection.usable(recorded));
         final List<GpsPoint> settled = RouteJitter.collapse(points);
         points
           ..clear()
@@ -174,16 +170,12 @@ class DriverRouteHistoryService {
             final List<GpsPoint> points = [];
             if (value['route'] is Map) {
               final Map routeMap = value['route'] as Map;
+              final List<GpsPoint> recorded = <GpsPoint>[];
               routeMap.forEach((_, pVal) {
-                if (pVal is Map) {
-                  final pt = GpsPoint.fromJson(Map<String, dynamic>.from(pVal));
-                  // Exclude invalid coordinates (0,0) or accuracy > 50m
-                  if (pt.latitude != 0.0 && pt.longitude != 0.0 && (pt.accuracyM == 0.0 || pt.accuracyM <= 50.0)) {
-                    points.add(pt);
-                  }
-                }
+                if (pVal is Map) recorded.add(GpsPoint.fromJson(Map<String, dynamic>.from(pVal)));
               });
-              points.sort((a, b) => a.timestamp.compareTo(b.timestamp));
+              // Invalid (0,0) fixes are dropped; poor-accuracy fixes only when the trip has enough good ones.
+              points.addAll(RoutePointSelection.usable(recorded));
               final List<GpsPoint> settled = RouteJitter.collapse(points);
               points
                 ..clear()
