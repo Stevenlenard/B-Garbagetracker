@@ -896,11 +896,16 @@ class _RouteHistoryScreenState extends State<RouteHistoryScreen> with TickerProv
       final List<List<double>> collectingCoords = firstFull < 0 ? fullCoords : fullCoords.sublist(0, vertex(firstFull) + 1);
       final List<List<double>> fullStretch =
           firstFull < 0 ? const <List<double>>[] : fullCoords.sublist(firstFull > 0 ? vertex(firstFull - 1) : 0);
-      // A jump no vehicle could make (a bad fix, or a GPS outage) is not travel: the line is broken there instead of
-      // drawing a straight stroke across the map. Ranges are vertex indices of fullCoords.
+      // The line is cut only where the connection is not a solid one (same rules as the live maps, RouteLinkPolicy): a
+      // move no vehicle could make starts a new stretch with nothing drawn between, and a long recording gap that is
+      // still possible keeps the route and is joined by a faint dashed link (below). Ranges are vertex indices of fullCoords.
       final List<List<int>> cuts = <List<int>>[
         for (int i = 1; i < cleanDisplayPoints.length; i++)
-          if (cleanDisplayPoints[i].isGapStart) <int>[vertex(i - 1), vertex(i)],
+          if (cleanDisplayPoints[i].isGapStart || cleanDisplayPoints[i].uncertainLink) <int>[vertex(i - 1), vertex(i)],
+      ];
+      final List<List<List<double>>> uncertainLinks = <List<List<double>>>[
+        for (int i = 1; i < cleanDisplayPoints.length; i++)
+          if (cleanDisplayPoints[i].uncertainLink) <List<double>>[fullCoords[vertex(i - 1)], fullCoords[vertex(i)]],
       ];
       List<List<List<double>>> pieces(int from, int to) {
         final List<List<List<double>>> out = <List<List<double>>>[];
@@ -957,6 +962,32 @@ class _RouteHistoryScreenState extends State<RouteHistoryScreen> with TickerProv
           await style.setStyleLayerProperty(
               fullRouteLayerId, "line-color", ["case", ["==", ["get", "full"], true], RouteGeometry.fullHex, TruckIdentity.hex(trip.truckId)]);
         }
+      }
+
+      // Faint dashed links over long recording gaps: the stretch in between was not recorded, nothing is made up.
+      const String uncertainSourceId = "uncertain-route-source";
+      const String uncertainLayerId = "uncertain-route-layer";
+      final String uncertainData = jsonEncode({
+        "type": "FeatureCollection",
+        "features": [
+          for (final List<List<double>> l in uncertainLinks)
+            {"type": "Feature", "geometry": {"type": "LineString", "coordinates": l}, "properties": {}},
+        ],
+      });
+      if (await style.styleSourceExists(uncertainSourceId)) {
+        await style.setStyleSourceProperty(uncertainSourceId, "data", uncertainData);
+      } else {
+        await style.addSource(GeoJsonSource(id: uncertainSourceId, data: uncertainData));
+        await style.addLayer(LineLayer(
+          id: uncertainLayerId,
+          sourceId: uncertainSourceId,
+          lineColor: TruckIdentity.argb(trip.truckId),
+          lineWidth: 4.0,
+          lineOpacity: 0.55,
+          lineCap: LineCap.BUTT,
+          lineJoin: LineJoin.ROUND,
+          lineDasharray: <double>[1.5, 2.0],
+        ));
       }
 
       _updateReplayMapPosition();

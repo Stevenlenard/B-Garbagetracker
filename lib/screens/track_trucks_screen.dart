@@ -574,7 +574,7 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> with TickerProvid
           // The route is drawn in its truck's colour; status segments are not a colour.
           props['truckColor'] = RouteGeometry.isFullStretch(f) ? RouteGeometry.fullHex : TruckIdentity.hex(tid);
           props['width'] = selected ? '9' : '5';
-          props['opacity'] = dim ? '0.35' : '0.9';
+          props['opacity'] = (dim ? 0.35 : 0.9) * (props[RouteGeometry.linkKey] == 'uncertain' ? 0.4 : 1.0);
           props['sortKey'] = selected ? '10' : '0';
           features.add(f);
         }

@@ -1127,6 +1127,7 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> with Ti
         'longitude': _lastLocalPos!.longitude,
         'status': _currentStatus,
         'color': _currentStatus == "IDLE" ? "YELLOW" : (_currentStatus == "FULL" ? "PINK" : "GREEN"),
+        'live_tail': true, // the live position itself: never judged as a jump
         'timestamp': DateTime.now().millisecondsSinceEpoch
       });
     }
@@ -1134,107 +1135,11 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> with Ti
     // Sort by timestamp asc
     rawPoints.sort((a, b) => parseTs(a['timestamp']).compareTo(parseTs(b['timestamp'])));
 
-    // Validate coordinates and filter impossible noise jumps
-    final List<Map> validPoints = [];
-    for (int i = 0; i < rawPoints.length; i++) {
-      final p = rawPoints[i];
-      final double lat = (p['lat'] ?? p['latitude'] ?? 0.0).toDouble();
-      final double lng = (p['lng'] ?? p['longitude'] ?? 0.0).toDouble();
-      final double accuracy = (p['accuracy'] ?? 0.0).toDouble();
-      final int ts = parseTs(p['timestamp']);
-
-      if (lat < -90 || lat > 90 || lng < -180 || lng > 180 || (lat == 0 && lng == 0)) {
-        continue;
-      }
-
-      if (accuracy > 100.0) {
-        debugPrint("[MAP ROUTE] Skipping point due to low accuracy: ${accuracy}m");
-        continue;
-      }
-
-      if (validPoints.isNotEmpty) {
-        final prev = validPoints.last;
-        final double prevLat = (prev['lat'] ?? prev['latitude'] ?? 0.0).toDouble();
-        final double prevLng = (prev['lng'] ?? prev['longitude'] ?? 0.0).toDouble();
-        final int prevTs = parseTs(prev['timestamp']);
-
-        final double d = geo.Geolocator.distanceBetween(prevLat, prevLng, lat, lng);
-        final double dtSec = (ts > 0 && prevTs > 0) ? ((ts - prevTs) / 1000.0) : 0.0;
-
-        // Skip exact duplicate consecutive points (< 0.5 meters)
-        if (d < 0.5) continue;
-        if (p['live_tail'] != true) {
-
-        // Reject impossible GPS jump (implied speed > 120 km/h or > 400m in < 10s)
-        if (dtSec > 0) {
-          final double speedKmH = (d / dtSec) * 3.6;
-          if (speedKmH > 120.0 && d > 100.0) {
-            debugPrint("[MAP ROUTE] Skipping outlier jump: ${d.toStringAsFixed(1)}m in ${dtSec.toStringAsFixed(1)}s (speed: ${speedKmH.toStringAsFixed(1)} km/h)");
-            continue;
-          }
-          if (d > 400.0 && dtSec < 10.0) {
-            debugPrint("[MAP ROUTE] Skipping sudden jump: ${d.toStringAsFixed(1)}m in ${dtSec.toStringAsFixed(1)}s");
-            continue;
-          }
-        }
-        }
-      }
-
-      validPoints.add(p);
-    }
-
-    debugPrint("[MAP ROUTE] Rendering actual route with ${validPoints.length} valid GPS points for session ${widget.currentSessionId}");
-
+    // The same rules as every other map (RouteGeometry): bad fixes dropped, positions smoothed, one continuous line
+    // while tracking is normal, a faint dashed link over a long recording gap, a new stretch only after a relocation.
     final String sourceId = "driver-route-source";
-    final List<Map<String, dynamic>> features = [];
-
-    if (validPoints.length >= 2) {
-      List<List<double>> currentSegmentCoords = [];
-      String currentColor = (validPoints[0]['color'] ?? 'GREEN').toString().toUpperCase();
-
-      double firstLat = (validPoints[0]['lat'] ?? validPoints[0]['latitude'] ?? 0.0).toDouble();
-      double firstLng = (validPoints[0]['lng'] ?? validPoints[0]['longitude'] ?? 0.0).toDouble();
-      currentSegmentCoords.add([firstLng, firstLat]);
-
-      for (int i = 1; i < validPoints.length; i++) {
-        final curr = validPoints[i];
-
-        final double currLat = (curr['lat'] ?? curr['latitude'] ?? 0.0).toDouble();
-        final double currLng = (curr['lng'] ?? curr['longitude'] ?? 0.0).toDouble();
-
-        String color = (curr['color'] ?? 'GREEN').toString().toUpperCase();
-
-        // The route line is never cut: a pause or a GPS drop is drawn as a straight connection.
-        if (color != currentColor) {
-          currentSegmentCoords.add([currLng, currLat]);
-          if (currentSegmentCoords.length >= 2) {
-            features.add({
-              "type": "Feature",
-              "geometry": {
-                "type": "LineString",
-                "coordinates": List<List<double>>.from(currentSegmentCoords)
-              },
-              "properties": {"color": currentColor}
-            });
-          }
-          currentColor = color;
-          currentSegmentCoords = [[currLng, currLat]];
-        } else {
-          currentSegmentCoords.add([currLng, currLat]);
-        }
-      }
-
-      if (currentSegmentCoords.length >= 2) {
-        features.add({
-          "type": "Feature",
-          "geometry": {
-            "type": "LineString",
-            "coordinates": List<List<double>>.from(currentSegmentCoords)
-          },
-          "properties": {"color": currentColor}
-        });
-      }
-    }
+    final List<Map<String, dynamic>> features = RouteGeometry.lineFeatures(rawPoints);
+    debugPrint("[MAP ROUTE] Rendering route with ${features.length} line piece(s) for session ${widget.currentSessionId}");
 
     final featureCollection = {"type": "FeatureCollection", "features": features};
 
@@ -1260,6 +1165,7 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> with Ti
             "BLACK", "#212121", 
             "#4CAF50"
           ]);
+          await style.setStyleLayerProperty("driver-route-layer", "line-opacity", RouteGeometry.opacityExpr(1.0));
         }
         if (mounted) setState(() => _routeSourceCreated = true);
       } else { 

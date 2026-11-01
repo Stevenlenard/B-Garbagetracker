@@ -5,6 +5,7 @@ import '../api/api_service.dart';
 import '../models/driver_trip.dart';
 import '../utils/gps_quality.dart';
 import '../utils/gps_smoothing.dart';
+import '../utils/route_link.dart';
 import '../models/user.dart';
 import '../utils/history_playback.dart';
 import '../utils/trip_archive.dart';
@@ -381,9 +382,24 @@ class DriverRouteHistoryService {
   /// Points to DRAW for a trip: unusable fixes and short GPS spikes dropped, positions smoothed by the Kalman filter
   /// ([GpsSmoothing]), then standing-still jitter removed ([filterStationaryGpsJitter]). Display only:
   /// distance, stops, visits and analytics use the recorded points.
+  ///
+  /// How the points connect is decided here, with the same [RouteLinkPolicy] as the live maps: unreachable bad fixes are
+  /// dropped (the line goes on from the last good fix), a long recording gap keeps the earlier route and gets a dashed
+  /// link ([GpsPoint.uncertainLink]), and only a real relocation starts a new stretch ([GpsPoint.isGapStart]). The marks
+  /// stored on the points are not used: they are recomputed here from the points that are actually drawn.
   static List<GpsPoint> smoothForDisplay(List<GpsPoint> inputPoints) {
-    final List<GpsPoint> valid =
-        inputPoints.where((p) => !(p.latitude == 0.0 && p.longitude == 0.0) && p.accuracyM <= 100.0).toList();
+    final List<GpsPoint> candidates = inputPoints
+        .where((p) => !(p.latitude == 0.0 && p.longitude == 0.0) && p.accuracyM <= 100.0)
+        .toList()
+      ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
+    final List<LinkedFix> linked = RouteLinkPolicy.link(<RouteFix>[
+      for (final GpsPoint p in candidates) RouteFix(p.latitude, p.longitude, p.timestamp.millisecondsSinceEpoch, p.accuracyM),
+    ]);
+    final List<GpsPoint> valid = <GpsPoint>[
+      for (final LinkedFix l in linked)
+        candidates[l.index].copyWith(isGapStart: l.link == RouteLink.broken, uncertainLink: l.link == RouteLink.uncertain),
+    ];
+    bool linkedPoint(int i) => valid[i].isGapStart || valid[i].uncertainLink;
     GpsSample sample(GpsPoint p) => GpsSample(
           lat: p.latitude,
           lng: p.longitude,
@@ -391,8 +407,10 @@ class DriverRouteHistoryService {
           timestampMs: p.timestamp.millisecondsSinceEpoch,
           speedMps: p.speedKmh / 3.6,
         );
-    final List<GpsPoint> usable = <GpsPoint>[for (final int i in GpsSmoothing.withoutSpikes(valid.map(sample).toList())) valid[i]];
-    if (usable.length <= 2) return filterStationaryGpsJitter(inputPoints);
+    final List<GpsPoint> usable = <GpsPoint>[
+      for (final int i in GpsSmoothing.withoutSpikes(valid.map(sample).toList(), keep: linkedPoint)) valid[i],
+    ];
+    if (usable.length <= 2) return usable;
     final List<List<double>> smooth = GpsSmoothing.kalman(usable.map(sample).toList());
     final List<GpsPoint> smoothed = <GpsPoint>[
       for (int i = 0; i < usable.length; i++)
@@ -405,6 +423,7 @@ class DriverRouteHistoryService {
           status: usable[i].status,
           timestamp: usable[i].timestamp,
           isGapStart: usable[i].isGapStart,
+          uncertainLink: usable[i].uncertainLink,
         ),
     ];
     return filterStationaryGpsJitter(smoothed);
@@ -434,7 +453,7 @@ class DriverRouteHistoryService {
       ) * 1000;
 
       // Keep points that represent actual travel movement (>= 7.0m or speed >= 3.5 km/h) or gap starts
-      if (distM >= 7.0 || p.speedKmh >= 3.5 || p.isGapStart) {
+      if (distM >= 7.0 || p.speedKmh >= 3.5 || p.isGapStart || p.uncertainLink) {
         filtered.add(p);
         lastAnchor = p;
       }
@@ -447,14 +466,14 @@ class DriverRouteHistoryService {
     return filtered.isNotEmpty ? filtered : inputPoints;
   }
 
-  /// A route line is cut only when GPS was missing for minutes, or the position jumped farther than any vehicle
-  /// could travel in that time. A short signal drop at normal speed (30 s at 36 km/h is 330 m) is travel, so the
-  /// line stays connected instead of breaking at every weak-signal moment.
-  static bool isRouteBreak(int dtSec, double distM) {
-    if (dtSec > 180) return true;
-    if (distM <= 300.0) return false;
-    return dtSec <= 0 || distM / dtSec > 40.0; // 40 m/s = 144 km/h
-  }
+  /// How two consecutive recorded points connect ([RouteLinkPolicy]): a plausible move is one solid line, also after a
+  /// short GPS delay; a plausible move after minutes without a recording is an uncertain (dashed) link; only a move no
+  /// vehicle could make, or a gap far too long to bridge, breaks the line. A parked truck never breaks it.
+  static RouteLink routeLink(int dtSec, double distM, {double accuracyA = 0, double accuracyB = 0}) =>
+      RouteLinkPolicy.classify(dtSec: dtSec, distM: distM, accuracyA: accuracyA, accuracyB: accuracyB);
+
+  /// true when the line is cut between the two points (an impossible move or an unbridgeable gap).
+  static bool isRouteBreak(int dtSec, double distM) => routeLink(dtSec, distM) == RouteLink.broken;
 
   /// Analyzes trip GPS points, detects data gaps, stops, and compiles event timeline.
   static DriverTrip analyzeTrip(DriverTrip trip) {
@@ -500,15 +519,18 @@ class DriverRouteHistoryService {
           prevP.latitude, prevP.longitude, curr.latitude, curr.longitude,
         ) * 1000;
 
-        if (isRouteBreak(dtSec, distM)) {
+        final RouteLink link = routeLink(dtSec, distM, accuracyA: prevP.accuracyM, accuracyB: curr.accuracyM);
+        if (link != RouteLink.solid) {
           gaps.add(DataGap(
             startTime: prevP.timestamp,
             endTime: curr.timestamp,
             gapDurationSeconds: dtSec,
             distanceJumpMeters: distM,
-            reason: dtSec > 180 ? "Missing GPS signal interval (${(dtSec/60).toStringAsFixed(1)}m)" : "Large location jump (${distM.toStringAsFixed(0)}m)",
+            reason: dtSec > RouteLinkPolicy.normalGapSec
+                ? "Missing GPS signal interval (${(dtSec/60).toStringAsFixed(1)}m)"
+                : "Large location jump (${distM.toStringAsFixed(0)}m)",
           ));
-          processedPoints.add(curr.copyWith(isGapStart: true));
+          processedPoints.add(curr.copyWith(isGapStart: link == RouteLink.broken, uncertainLink: link == RouteLink.uncertain));
         } else {
           processedPoints.add(curr);
         }

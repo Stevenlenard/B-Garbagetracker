@@ -169,7 +169,7 @@ class RouteJitter {
     final List<GpsPoint> out = <GpsPoint>[];
     GpsPoint? anchor;
     for (final GpsPoint p in points) {
-      if (anchor == null || p.isGapStart) {
+      if (anchor == null || p.isGapStart || p.uncertainLink) {
         out.add(p);
         anchor = p;
         continue;

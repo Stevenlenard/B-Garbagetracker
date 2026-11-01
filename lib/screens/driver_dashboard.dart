@@ -1138,8 +1138,13 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
 
   /// Sends one stored point. It leaves the phone's storage once Firebase confirms it, or when it can
   /// never be written (trip finished, another trip, ownership lost); a failed attempt keeps it for a retry.
-  Future<void> _sendQueuedPoint(QueuedPoint q, {Map<String, Object?>? meta}) async {
-    if (q.tripId != _sessionId || !_pointsInFlight.add(q.key)) return;
+  /// true while the last attempt to send a route point failed (no connection): the points are kept on the phone.
+  bool _routeSendDown = false;
+
+  /// Sends one stored point; it leaves the phone's queue only after Firebase confirmed it. Returns false when the send
+  /// failed (a temporary interruption), so the caller can tell the connection is down.
+  Future<bool> _sendQueuedPoint(QueuedPoint q, {Map<String, Object?>? meta}) async {
+    if (q.tripId != _sessionId || !_pointsInFlight.add(q.key)) return true;
     try {
       final TripWriteResult? res = await _writeTrip(
         point: q.point,
@@ -1147,7 +1152,9 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
         allowWhileFinishing: q.allowWhileFinishing,
         pointKey: q.key,
       );
-      if (res != null && !res.failed) await _pointQueue.remove(q.key);
+      final bool ok = res != null && !res.failed;
+      if (ok) await _pointQueue.remove(q.key);
+      return ok || res == null;
     } finally {
       _pointsInFlight.remove(q.key);
     }
@@ -2652,7 +2659,15 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     } catch (e) {
       debugPrint("[ROUTE TRACKING] Could not store the point on the phone: $e");
     }
-    await _sendQueuedPoint(q, meta: meta);
+    final bool sent = await _sendQueuedPoint(q, meta: meta);
+    if (!sent) {
+      _routeSendDown = true; // kept on the phone, nothing is lost or drawn differently meanwhile
+    } else if (_routeSendDown) {
+      // The connection is back: the points stored meanwhile go out now, oldest first (each keeps the time it was
+      // recorded, so the maps place them in driving order and the route has no hole).
+      _routeSendDown = false;
+      unawaited(_flushQueuedPoints());
+    }
   }
 
   void _startIdleDetection() {

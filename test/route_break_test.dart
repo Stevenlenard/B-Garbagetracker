@@ -8,8 +8,9 @@ void main() {
     expect(DriverRouteHistoryService.isRouteBreak(51, 158), isFalse); // 08:48:28
   });
 
-  test('a real outage or an impossible jump still cuts the line', () {
-    expect(DriverRouteHistoryService.isRouteBreak(200, 10), isTrue); // more than 3 minutes without GPS
+  test('an impossible jump still cuts the line; a long recording gap no longer does', () {
+    expect(DriverRouteHistoryService.isRouteBreak(200, 10), isFalse); // parked: nothing to connect
+    expect(DriverRouteHistoryService.isRouteBreak(240, 700), isFalse); // 4 minutes, possible: a dashed link, not a cut
     expect(DriverRouteHistoryService.isRouteBreak(5, 400), isTrue); // 80 m/s
     expect(DriverRouteHistoryService.isRouteBreak(0, 350), isTrue);
     expect(DriverRouteHistoryService.isRouteBreak(5, 40), isFalse);

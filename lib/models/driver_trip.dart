@@ -9,7 +9,14 @@ class GpsPoint {
   final double accuracyM;
   final String status;
   final DateTime timestamp;
+
+  /// This point starts a NEW stretch: the truck was somewhere it could not have driven from the previous point
+  /// (moved untracked); the earlier route stays and no connection is drawn.
   final bool isGapStart;
+
+  /// This point follows a long recording gap that is still physically possible: the connection to the previous point is
+  /// drawn as a faint dashed link (nothing in between is made up).
+  final bool uncertainLink;
 
   GpsPoint({
     required this.latitude,
@@ -20,6 +27,7 @@ class GpsPoint {
     this.status = "ACTIVE",
     required this.timestamp,
     this.isGapStart = false,
+    this.uncertainLink = false,
   });
 
   factory GpsPoint.fromJson(Map<String, dynamic> json) {
@@ -49,6 +57,7 @@ class GpsPoint {
       status: st,
       timestamp: ts,
       isGapStart: json['isGapStart'] == true,
+      uncertainLink: json['uncertainLink'] == true,
     );
   }
 
@@ -62,6 +71,7 @@ class GpsPoint {
       'status': status,
       'recorded_at': timestamp.toIso8601String(),
       'isGapStart': isGapStart,
+      'uncertainLink': uncertainLink,
     };
   }
 
@@ -74,6 +84,7 @@ class GpsPoint {
     String? status,
     DateTime? timestamp,
     bool? isGapStart,
+    bool? uncertainLink,
   }) {
     return GpsPoint(
       latitude: latitude ?? this.latitude,
@@ -84,6 +95,7 @@ class GpsPoint {
       status: status ?? this.status,
       timestamp: timestamp ?? this.timestamp,
       isGapStart: isGapStart ?? this.isGapStart,
+      uncertainLink: uncertainLink ?? this.uncertainLink,
     );
   }
 }

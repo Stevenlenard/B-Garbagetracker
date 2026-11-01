@@ -662,6 +662,7 @@ class _StandaloneGisWebScreenState extends State<StandaloneGisWebScreen> with Ti
           await style.addLayer(layer);
         }
         await style.setStyleLayerProperty("web-routes-layer", "line-color", ["get", "truckColor"]);
+        await style.setStyleLayerProperty("web-routes-layer", "line-opacity", RouteGeometry.opacityExpr(0.9));
       } else {
         await style.setStyleSourceProperty("web-routes-source", "data", data);
       }
