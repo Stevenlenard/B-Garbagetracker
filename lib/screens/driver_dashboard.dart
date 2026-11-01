@@ -2418,7 +2418,8 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       // Shown while the truck closes in, and kept while it is stopped on the way (collecting on the street): the
       // countdown then simply runs on instead of disappearing at every stop. Alerts need the approach itself.
       if (n.approaching || (_speed < 3.0 && _areaEta?.areaKey == n.key)) shared = _shareAreaEta(n.name, n.key, eta);
-      if (n.approaching) _maybeNotifyApproach(n.name, n.key, eta);
+      // the alert states the published estimate itself (same minutes, same stage)
+      if (n.approaching && shared != null) _maybeNotifyApproach(n.name, n.key, shared);
     }
     _areaEta = shared;
     _proxPrev = pos;
@@ -2541,15 +2542,21 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     final int now = ServerClock.instance.nowMs();
     return AreaEta.stabilize(
         _areaEta,
-        AreaEta(area: areaName, areaKey: areaKey, minutes: eta.minutes!, arriveAtMs: now + seconds * 1000, computedAtMs: now));
+        AreaEta(
+            area: areaName,
+            areaKey: areaKey,
+            minutes: eta.minutes!,
+            arriveAtMs: now + seconds * 1000,
+            computedAtMs: now,
+            tripId: _sessionId!));
   }
 
-  void _maybeNotifyApproach(String areaName, String areaKey, EtaResult eta) {
+  void _maybeNotifyApproach(String areaName, String areaKey, AreaEta eta) {
     if (_isSimulationMode || _sessionId == null) return;
     if (_collectionFrozen || _gpsSignalLost) return;
 
-    final int? stage = eta.stage;
-    if (eta.kind != EtaKind.minutes || stage == null) return;
+    final int? stage = EtaPolicy.stageFor(eta.minutes);
+    if (stage == null) return;
 
     // The truck is there now: no "on the way" alerts for that area until it has left it.
     if (_autoNotifiedPuroks.contains(areaName)) return;

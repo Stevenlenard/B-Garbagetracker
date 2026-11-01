@@ -1,4 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'dart:io';
+
 import 'package:garbage_tracking_app/utils/area_eta.dart';
 import 'package:garbage_tracking_app/utils/trip_eta.dart';
 
@@ -86,8 +88,8 @@ void main() {
     test('a new estimate within 20 s keeps the published arrival moment', () {
       expect(AreaEta.stabilize(e(now + 360000), e(now + 372000)).arriveAtMs, now + 360000);
     });
-    test('a real change replaces it', () {
-      expect(AreaEta.stabilize(e(now + 360000), e(now + 420000)).arriveAtMs, now + 420000);
+    test('a real change is followed, at a bounded rate', () {
+      expect(AreaEta.stabilize(e(now + 360000), e(now + 420000)).arriveAtMs, now + 360000 + AreaEta.minShiftMs);
     });
     test('another area, or none before, takes the new estimate as is', () {
       expect(AreaEta.stabilize(e(now + 360000), e(now + 365000, key: 'riverside')).arriveAtMs, now + 365000);
@@ -117,6 +119,133 @@ void main() {
 
     test('nothing at all: nothing is guessed', () {
       expect(TripEta.forTruck(node(withEta: false), null, nowMs: now), isNull);
+    });
+  });
+
+  group('steady, never unrealistic', () {
+    AreaEta e(int arriveAt, int computedAt, {String key = 'brixton_homes', String trip = 'trip-1'}) => AreaEta(
+        area: 'Brixton Homes', areaKey: key, minutes: 6, arriveAtMs: arriveAt, computedAtMs: computedAt, tripId: trip);
+
+    test('a sudden swing of the raw estimate is followed at a bounded rate, not as a jump', () {
+      // published: 6 min away; one fix later the raw estimate says 30 min
+      AreaEta published = e(now + 360000, now);
+      final AreaEta raw = e(now + 2 * 1000 + 1800000, now + 2000);
+      published = AreaEta.stabilize(published, raw);
+      expect(published.arriveAtMs - (now + 360000), lessThanOrEqualTo(AreaEta.minShiftMs));
+      // given a minute of fixes it has followed
+      for (int s = 4; s <= 120; s += 2) {
+        published = AreaEta.stabilize(published, e(now + s * 1000 + 1800000, now + s * 1000));
+      }
+      expect((published.arriveAtMs - (now + 120000 + 1800000)).abs(), lessThan(AreaEta.keepWithinMs));
+    });
+
+    test('a sudden drop is bounded the same way', () {
+      final AreaEta p = AreaEta.stabilize(e(now + 900000, now), e(now + 2000 + 60000, now + 2000));
+      expect(p.arriveAtMs, greaterThanOrEqualTo(now + 900000 - AreaEta.minShiftMs));
+    });
+
+    test('a stopped truck: the estimate is renewed, so the countdown stays put instead of running out', () {
+      // a truck standing still keeps the same remaining time (6 min) at every fix
+      AreaEta published = e(now + 360000, now);
+      for (int s = 2; s <= 300; s += 2) {
+        published = AreaEta.stabilize(published, e(now + s * 1000 + 360000, now + s * 1000));
+      }
+      final int left = published.secondsLeft(now + 300000);
+      expect(left, inInclusiveRange(340, 380)); // ~6 min, not counted down to 1
+    });
+
+    test('minutes follow the steady arrival time', () {
+      final AreaEta p = AreaEta.stabilize(e(now + 360000, now), e(now + 363000, now + 1000));
+      expect(p.minutes, 6);
+    });
+
+    test('another area or another trip starts fresh', () {
+      expect(AreaEta.stabilize(e(now + 360000, now), e(now + 900000, now + 2000, trip: 'trip-2')).arriveAtMs, now + 900000);
+      expect(AreaEta.stabilize(e(now + 360000, now), e(now + 900000, now + 2000, key: 'riverside')).arriveAtMs, now + 900000);
+    });
+  });
+
+  group('countdown and arrival', () {
+    test('reaching zero is not "arrived"', () {
+      expect(AreaEta.countdown(0), '< 1 min');
+      expect(AreaEta.countdown(-120), '< 1 min');
+      expect(AreaEta.countdown(30), '< 1 min');
+      expect(AreaEta.countdown(31), '0:31');
+      expect(AreaEta.countdown(125), '2:05');
+      for (final int s in <int>[-500, 0, 5, 30, 31, 600]) {
+        expect(AreaEta.countdown(s).toLowerCase().contains('arriv'), isFalse, reason: '$s');
+      }
+    });
+
+    test('an overdue estimate that is no longer renewed disappears with the GPS, it is never kept', () {
+      expect(AreaEta.fromNode(node(arriveInMs: -400000, computedAgoMs: 190000), nowMs: now), isNull);
+    });
+  });
+
+  group('trucks and trips cannot overwrite or leak into each other', () {
+    test('the estimate lives on its own truck node', () {
+      final Map<String, Object?> truckA = node(area: 'Brixton Homes');
+      final Map<String, Object?> truckB = node(area: 'Riverside', arriveInMs: 12 * 60000);
+      expect(AreaEta.fromNode(truckA, nowMs: now)!.area, 'Brixton Homes');
+      expect(AreaEta.fromNode(truckB, nowMs: now)!.area, 'Riverside');
+      expect(AreaEta.fromNode(truckA, nowMs: now)!.minutesLeft(now), 6);
+      expect(AreaEta.fromNode(truckB, nowMs: now)!.minutesLeft(now), 12);
+    });
+
+    test('an estimate left by an earlier trip of the same truck is not shown for the new trip', () {
+      final Map<String, Object?> n = node();
+      (n[AreaEta.field] as Map<String, Object?>)['trip_id'] = 'old-trip';
+      n['current_session'] = 'new-trip';
+      expect(AreaEta.fromNode(n, nowMs: now), isNull);
+      n['current_session'] = 'old-trip';
+      expect(AreaEta.fromNode(n, nowMs: now), isNotNull);
+    });
+
+    test('a record without a trip id (older app) is still read', () {
+      final Map<String, Object?> n = node();
+      (n[AreaEta.field] as Map<String, Object?>).remove('trip_id');
+      expect(AreaEta.fromNode(n, nowMs: now), isNotNull);
+    });
+  });
+
+  group('every screen consumes the same record', () {
+    String src(String f) => File(f).readAsStringSync();
+
+    test('resident dashboard, fleet cards and Collection Route Optimization read AreaEta and compute nothing', () {
+      for (final String f in <String>[
+        'lib/screens/resident_dashboard.dart',
+        'lib/utils/trip_eta.dart',
+        'lib/screens/collection_route_optimization_screen.dart',
+      ]) {
+        final String s = src(f);
+        expect(s.contains('AreaEta.fromNode'), isTrue, reason: f);
+        expect(s.contains('EtaPolicy.evaluate'), isFalse, reason: f);
+      }
+      for (final String f in <String>[
+        'lib/screens/admin_dashboard.dart',
+        'lib/screens/track_trucks_screen.dart',
+        'lib/screens/resident_track_truck_screen.dart',
+      ]) {
+        final String s = src(f);
+        expect(s.contains('TripEta.forTruck'), isTrue, reason: f);
+        expect(s.contains('EtaPolicy.evaluate'), isFalse, reason: f);
+      }
+    });
+
+    test('the driver computes it once: the alert is built from the published record', () {
+      final String d = src('lib/screens/driver_dashboard.dart');
+      expect(RegExp(r'EtaPolicy\.evaluate\(').allMatches(d).length, 1);
+      expect(d.contains('_maybeNotifyApproach(n.name, n.key, shared)'), isTrue);
+      expect(d.contains('AreaEta.field: _areaEta?.toJson()'), isTrue);
+    });
+
+    test('the resident dashboard takes no phone location into the estimate', () {
+      final String r = src('lib/screens/resident_dashboard.dart');
+      final int from = r.indexOf('void _recomputeResidentFleet');
+      final int to = r.indexOf('_fetchTotalDriversFromUserManagement', from);
+      final String body = r.substring(from, to);
+      expect(body.contains('_currentPosition'), isFalse);
+      expect(body.contains('distanceBetween'), isFalse);
     });
   });
 }

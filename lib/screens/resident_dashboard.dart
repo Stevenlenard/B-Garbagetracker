@@ -7,7 +7,6 @@ import '../services/notification_inbox.dart';
 import '../utils/relative_time.dart';
 import '../utils/complaint_flow.dart';
 import '../utils/area_eta.dart';
-import '../utils/eta_policy.dart';
 import '../utils/fleet_status.dart';
 import 'dart:async';
 import 'dart:ui';
@@ -103,8 +102,8 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
 
   String _countdownLabel() {
     final int left = ((_etaTargetMs! - ServerClock.instance.nowMs()) / 1000).round();
-    if (left <= 30) return '< 1 min';
-    final String mmss = '${left ~/ 60}:${(left % 60).toString().padLeft(2, '0')}';
+    final String mmss = AreaEta.countdown(left);
+    if (left <= 30) return mmss;
     return _etaTrend == 'faster' ? '~$mmss ↓' : (_etaTrend == 'slower' ? '~$mmss ↑' : '~$mmss');
   }
   String _currentTime = "";

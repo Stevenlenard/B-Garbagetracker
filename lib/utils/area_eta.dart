@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'eta_policy.dart';
 import 'fleet_status.dart';
 import 'resident_alert_rules.dart';
@@ -17,6 +19,7 @@ class AreaEta {
     required this.minutes,
     required this.arriveAtMs,
     required this.computedAtMs,
+    this.tripId = '',
     this.method = EtaPolicy.method,
   });
 
@@ -38,6 +41,9 @@ class AreaEta {
 
   /// When the driver app computed it (server clock, epoch ms).
   final int computedAtMs;
+
+  /// The trip the estimate belongs to: an estimate left on the truck node by an earlier trip is never shown.
+  final String tripId;
   final String method;
 
   Map<String, Object?> toJson() => <String, Object?>{
@@ -46,6 +52,7 @@ class AreaEta {
         'minutes': minutes,
         'arrive_at_ms': arriveAtMs,
         'computed_at_ms': computedAtMs,
+        'trip_id': tripId,
         'method': method,
       };
 
@@ -59,20 +66,41 @@ class AreaEta {
 
   bool isForPurok(String? purok) => ResidentAlertRules.samePurok(area, purok);
 
-  /// The estimate of a new fix, unless it only differs from [previous] (same area) by GPS noise.
+  /// The published arrival moves by at most this per second of real time (and at least [minShiftMs] per update), so a
+  /// sudden swing of the raw estimate (speed sensor glitch, a stop, a new speed window) reaches the residents as a
+  /// steady correction within a minute instead of a jump.
+  static const double maxShiftPerSecond = 2.0;
+  static const int minShiftMs = 30000;
+
+  /// The estimate of a new fix, made steady against the one already published for the same area and trip:
+  /// GPS noise (under [keepWithinMs]) keeps the published arrival, and a larger change is followed at a bounded rate.
   static AreaEta stabilize(AreaEta? previous, AreaEta next) {
-    if (previous == null || previous.areaKey != next.areaKey) return next;
-    if ((next.arriveAtMs - previous.arriveAtMs).abs() < keepWithinMs) {
-      return AreaEta(
-        area: next.area,
-        areaKey: next.areaKey,
-        minutes: next.minutes,
-        arriveAtMs: previous.arriveAtMs,
-        computedAtMs: next.computedAtMs,
-        method: next.method,
-      );
+    if (previous == null || previous.areaKey != next.areaKey || previous.tripId != next.tripId) return next;
+    final int diff = next.arriveAtMs - previous.arriveAtMs;
+    int arrive = next.arriveAtMs;
+    if (diff.abs() < keepWithinMs) {
+      arrive = previous.arriveAtMs;
+    } else {
+      final int elapsed = (next.computedAtMs - previous.computedAtMs).clamp(0, 600000).toInt();
+      final int maxShift = math.max(minShiftMs, (elapsed * maxShiftPerSecond).round());
+      arrive = previous.arriveAtMs + diff.clamp(-maxShift, maxShift).toInt();
     }
-    return next;
+    return AreaEta(
+      area: next.area,
+      areaKey: next.areaKey,
+      minutes: math.max(1, ((arrive - next.computedAtMs) / 60000).ceil()),
+      arriveAtMs: arrive,
+      computedAtMs: next.computedAtMs,
+      tripId: next.tripId,
+      method: next.method,
+    );
+  }
+
+  /// Countdown text for [secondsLeft]. Reaching zero is NOT an arrival (only the GPS-confirmed visit is): it says
+  /// "< 1 min" for as long as the truck keeps being due, and the estimate itself is renewed or withdrawn by the driver.
+  static String countdown(int secondsLeft) {
+    if (secondsLeft <= 30) return '< 1 min';
+    return '${secondsLeft ~/ 60}:${(secondsLeft % 60).toString().padLeft(2, '0')}';
   }
 
   static int? _int(Object? v) => v is num ? v.toInt() : int.tryParse('${v ?? ''}');
@@ -93,12 +121,17 @@ class AreaEta {
     final String area = (raw['area'] ?? '').toString().trim();
     if (arrive == null || computed == null || minutes == null || area.isEmpty) return null;
     if (nowMs - computed > EtaPolicy.gpsFreshMs) return null;
+    // Another trip on the same truck: the estimate of the trip that ended is not this trip's.
+    final String tripId = (raw['trip_id'] ?? '').toString();
+    final String session = (node['current_session'] ?? '').toString();
+    if (tripId.isNotEmpty && session.isNotEmpty && session != 'null' && tripId != session) return null;
     return AreaEta(
       area: area,
       areaKey: (raw['area_key'] ?? area).toString(),
       minutes: minutes,
       arriveAtMs: arrive,
       computedAtMs: computed,
+      tripId: tripId,
       method: (raw['method'] ?? EtaPolicy.method).toString(),
     );
   }

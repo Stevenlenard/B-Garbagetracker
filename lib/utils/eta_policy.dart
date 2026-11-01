@@ -70,7 +70,20 @@ class EtaModel {
 
   static const EtaModel defaults = EtaModel(5.78, 1.79, samples: 20);
 
-  double minutesFor(double straightKm) => intercept + slope * straightKm;
+  /// The intercept is the time a collecting truck loses on its way (streets served, stops, detours). Applied as a
+  /// constant it put a floor of 6-8 minutes under EVERY estimate, also for a truck at the edge of the area, and the
+  /// 5-minute alert could never be sent. Recorded trips show why that is wrong: of the 62 samples taken closer than
+  /// 500 m, half arrived within 2 minutes (and a few passed by and came back much later). The delay is therefore applied
+  /// in proportion to the distance still to drive, in full from [fullOverheadKm] on; the fitted coefficients and the
+  /// regression itself are unchanged.
+  ///
+  /// Replay of the 20 recorded trips (188 samples, each trip predicted by a fit that excludes it, estimate = the larger
+  /// of this and distance / speed): mean error 7.6 -> 6.9 min overall, 6.2 -> 4.1 min closer than 500 m, unchanged
+  /// farther away (8.25 min). A small sample: it is re-measured by Analytics as trips are recorded.
+  static const double fullOverheadKm = 0.5;
+
+  double minutesFor(double straightKm) =>
+      intercept * (straightKm / fullOverheadKm).clamp(0.0, 1.0).toDouble() + slope * straightKm;
 
   /// A stored fit, or null when it is missing or not plausible (then [defaults] stays in use).
   static EtaModel? fromJson(Object? v) {
