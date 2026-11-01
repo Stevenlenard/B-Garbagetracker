@@ -3186,7 +3186,7 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> with TickerProvid
 
     // ETA: the latest "on the way" alert of this trip for an area not reached yet, counted down (never guessed).
     final int nowMs = DateTime.now().millisecondsSinceEpoch;
-    final TripEta? tripEta = isActive ? TripEta.latest(_etaNotifications, truck['current_session']?.toString(), nowMs: nowMs) : null;
+    final TripEta? tripEta = isActive ? TripEta.forTruck(truck, _etaNotifications, nowMs: nowMs) : null;
     final String eta = tripEta == null ? "--" : (tripEta.minutesLeft <= 0 ? "due now" : "${tripEta.minutesLeft} min");
     final String startText = isActive && (truck['start_time'] ?? '').toString().isNotEmpty ? truck['start_time'].toString() : '--:--';
     final int seenMs = FleetStatus.parseTimestampMs(truck['lastSeen'] ?? truck['last_seen']);
@@ -3352,7 +3352,7 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> with TickerProvid
             Padding(
               padding: const EdgeInsets.only(top: 6),
               child: Text(
-                "Next area: ${tripEta.area} · alert sent ${DateFormat('h:mm a').format(EtaEvaluation.manila(tripEta.sentMs))}",
+                "Next area: ${tripEta.area} · ${tripEta.sourceText} ${DateFormat('h:mm a').format(EtaEvaluation.manila(tripEta.sentMs))}",
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(fontSize: 10, color: Colors.grey, fontWeight: FontWeight.w700),

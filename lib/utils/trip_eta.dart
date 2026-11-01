@@ -1,9 +1,26 @@
+import 'area_eta.dart';
 import 'eta_evaluation.dart';
 
 /// The arrival estimate a fleet card shows: the latest "on the way" alert of the truck's current
 /// trip for an area the truck has not reached yet, counted down from the moment it was sent.
 class TripEta {
-  const TripEta({required this.area, required this.minutesLeft, required this.sentMs, required this.etaMinutes});
+  const TripEta({required this.area, required this.minutesLeft, required this.sentMs, required this.etaMinutes, this.live = false});
+
+  /// true: the truck's published estimate (AreaEta), the same one the alerts, the residents and Collection Route
+  /// Optimization use. false: the last alert, for a driver app that does not publish one yet.
+  final bool live;
+
+  /// "estimate updated" / "alert sent", for the line under the card's ETA.
+  String get sourceText => live ? 'updated' : 'alert sent';
+
+  /// The truck's published estimate when it has one; otherwise the latest alert of its trip.
+  static TripEta? forTruck(Map truck, Object? notifications, {required int nowMs}) {
+    final AreaEta? e = AreaEta.fromNode(truck, nowMs: nowMs);
+    if (e != null) {
+      return TripEta(area: e.area, minutesLeft: e.minutesLeft(nowMs), sentMs: e.computedAtMs, etaMinutes: e.minutes, live: true);
+    }
+    return latest(notifications, truck['current_session']?.toString(), nowMs: nowMs);
+  }
 
   final String area;
 

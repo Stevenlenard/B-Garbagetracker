@@ -293,7 +293,9 @@ void main() {
       expect(resident.contains("'type': 'TRUCK_PROXIMITY'"), isFalse);
       expect(resident.contains('Truck is Arriving!'), isFalse);
       expect(resident.contains('PredictionEngine.estimateArrivalTime'), isFalse);
-      expect(resident.contains('EtaPolicy.evaluate'), isTrue);
+      // it shows the truck's published estimate for its own area (AreaEta) and computes nothing itself
+      expect(resident.contains('AreaEta.fromNode'), isTrue);
+      expect(resident.contains('EtaPolicy.evaluate'), isFalse);
     });
 
     test('the driver approach alert uses the policy and the once-only write, not a fixed 15 km/h', () {

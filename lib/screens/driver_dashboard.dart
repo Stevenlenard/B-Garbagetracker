@@ -6,6 +6,7 @@ import '../services/notification_service.dart';
 import '../widgets/logout_choice_dialog.dart';
 import '../utils/relative_time.dart';
 import '../services/notification_inbox.dart';
+import '../utils/area_eta.dart';
 import '../utils/eta_policy.dart';
 import '../utils/approach_tracking.dart';
 import '../utils/load_history.dart';
@@ -2144,6 +2145,8 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       'avg_speed': avgSpeed,
       // ETAs use the recent travel speed (stops included), not the speed while moving.
       if (recentSpeed != null) 'eta_speed': recentSpeed,
+      // the one arrival estimate of the next area (every screen reads this; null removes it)
+      AreaEta.field: _areaEta?.toJson(),
       'heading': pos.heading,
       'accuracy': pos.accuracy,
       'fix_time': pos.timestamp.millisecondsSinceEpoch, // when the receiver took the fix
@@ -2282,6 +2285,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     }
     // A FULL truck (or a paused one) is not collecting: passing an area neither marks it nor alerts its residents.
     if (_collectionFrozen || _status.toUpperCase() != 'ACTIVE') {
+      _areaEta = null;
       _proxPrev = pos;
       _proxPrevAt = DateTime.now();
       return;
@@ -2408,9 +2412,15 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     // told "8 min" while the truck still served Brixton Homes, and it arrived 23 min later); they get their alert
     // once they are the next area.
     final n = next;
-    if (n != null && n.approaching && n.dist > 100.0) {
-      _maybeNotifyApproach(n.name, n.key, n.dist, 100.0, pos);
+    AreaEta? shared;
+    if (n != null && n.dist > 100.0) {
+      final EtaResult eta = _etaToArea(n.dist, 100.0);
+      // Shown while the truck closes in, and kept while it is stopped on the way (collecting on the street): the
+      // countdown then simply runs on instead of disappearing at every stop. Alerts need the approach itself.
+      if (n.approaching || (_speed < 3.0 && _areaEta?.areaKey == n.key)) shared = _shareAreaEta(n.name, n.key, eta);
+      if (n.approaching) _maybeNotifyApproach(n.name, n.key, eta);
     }
+    _areaEta = shared;
     _proxPrev = pos;
     _proxPrevAt = DateTime.now();
   }
@@ -2509,19 +2519,35 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
   /// "On the way" notification at the 15 / 10 / 5 minute stage. The ETA comes from the
   /// road-adjusted distance and the truck's recent travel speed (stops included); when it
   /// cannot be justified (not ACTIVE, stale GPS, unknown speed) nothing is sent.
-  void _maybeNotifyApproach(String areaName, String areaKey, double distM, double radiusM, Position pos) {
+  /// THE estimate for an area, from the truck's distance to the edge of the area's circle: used for the alerts and
+  /// published for every other screen (AreaEta). One computation, so they can never disagree.
+  EtaResult _etaToArea(double distM, double radiusM) => EtaPolicy.evaluate(
+        status: _status,
+        gpsAgeMs: 0, // this very fix was just accepted
+        distanceKm: EtaPolicy.roadDistanceKm((distM - radiusM) / 1000.0),
+        straightKm: (distM - radiusM) / 1000.0,
+        speedKmh: _recentTravelSpeed.kmhAt(DateTime.now().millisecondsSinceEpoch),
+        averageSpeedKmh: _lastAvgSpeedKmh,
+        arrivalRadiusM: 0,
+      );
+
+  /// The estimate published with the truck's location (null clears it).
+  AreaEta? _areaEta;
+
+  AreaEta? _shareAreaEta(String areaName, String areaKey, EtaResult eta) {
+    final int? seconds = eta.seconds;
+    if (_isSimulationMode || _sessionId == null || _collectionFrozen || _gpsSignalLost) return null;
+    if (eta.kind != EtaKind.minutes || eta.minutes == null || seconds == null) return null;
+    final int now = ServerClock.instance.nowMs();
+    return AreaEta.stabilize(
+        _areaEta,
+        AreaEta(area: areaName, areaKey: areaKey, minutes: eta.minutes!, arriveAtMs: now + seconds * 1000, computedAtMs: now));
+  }
+
+  void _maybeNotifyApproach(String areaName, String areaKey, EtaResult eta) {
     if (_isSimulationMode || _sessionId == null) return;
     if (_collectionFrozen || _gpsSignalLost) return;
 
-    final EtaResult eta = EtaPolicy.evaluate(
-      status: _status,
-      gpsAgeMs: 0, // this very fix was just accepted
-      distanceKm: EtaPolicy.roadDistanceKm((distM - radiusM) / 1000.0),
-      straightKm: (distM - radiusM) / 1000.0,
-      speedKmh: _recentTravelSpeed.kmhAt(DateTime.now().millisecondsSinceEpoch),
-      averageSpeedKmh: _lastAvgSpeedKmh,
-      arrivalRadiusM: 0,
-    );
     final int? stage = eta.stage;
     if (eta.kind != EtaKind.minutes || stage == null) return;
 

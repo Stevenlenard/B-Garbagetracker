@@ -6,6 +6,7 @@ import '../services/rtdb_port.dart';
 import '../services/notification_inbox.dart';
 import '../utils/relative_time.dart';
 import '../utils/complaint_flow.dart';
+import '../utils/area_eta.dart';
 import '../utils/eta_policy.dart';
 import '../utils/fleet_status.dart';
 import 'dart:async';
@@ -78,18 +79,18 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
   String? _etaTrend; // 'faster' / 'slower' than the previous estimate
   Timer? _etaTicker;
 
-  void _anchorEta(EtaResult? best) {
-    final int now = ServerClock.instance.nowMs();
-    if (best == null || best.kind != EtaKind.minutes || best.seconds == null) {
+  /// Counts down to [target], the arrival time published for this resident's area (the same moment on every device).
+  /// Setting the same arrival again changes nothing, so the 15 s freshness check cannot restart the countdown.
+  void _anchorEta(int? target) {
+    if (target == null) {
       _etaTargetMs = null;
       _etaTrend = null;
       _etaTicker?.cancel();
       _etaTicker = null;
       return;
     }
-    final int target = now + best.seconds! * 1000;
     final int? previous = _etaTargetMs;
-    if (previous != null) {
+    if (previous != null && previous != target) {
       final int diff = target - previous; // later arrival than the countdown expected -> slower
       _etaTrend = diff < -20000 ? 'faster' : (diff > 20000 ? 'slower' : _etaTrend);
     }
@@ -480,33 +481,26 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
         // ETA/cards use the collection fleet (a COMPLETED truck is not collecting).
         final List<Map<dynamic, dynamic>> onlineTrucks = fleet.fleetTrucks.map((LiveTruck t) => t.node).toList();
         final int activeCount = fleet.activeFleets;
-        // ETA only from a truck that is COLLECTING with fresh GPS, from its real speed.
-        // Otherwise "ETA unavailable": never "0 min" and never an invented number. Arrival
-        // alerts are the driver app's job (once per trip, area and stage); the resident app
-        // no longer broadcasts its own.
-        EtaResult? best;
+        // ETA = the truck's published estimate for THIS resident's area (AreaEta): measured from the truck to the area's
+        // circle, so every resident of the area, near or far from the truck, sees the same time, and it is the same time
+        // as the alerts, the fleet cards and Collection Route Optimization. Nothing is computed on the phone. Without a
+        // current estimate: "ETA unavailable", never "0 min" and never an invented number.
         final int nowMs = ServerClock.instance.nowMs();
-        int rank(EtaResult r) => r.kind == EtaKind.arrived ? -1 : (r.minutes ?? 1 << 30);
+        AreaEta? mine; // the estimate for my area
+        AreaEta? other; // the truck is heading to another area first
         for (final Map<dynamic, dynamic> val in onlineTrucks) {
-          if (_currentPosition == null) break;
-          final double? lat = double.tryParse('${val['latitude']}');
-          final double? lng = double.tryParse('${val['longitude']}');
-          if (lat == null || lng == null || (lat == 0.0 && lng == 0.0)) continue;
-          final double distKm = geo.Geolocator.distanceBetween(_currentPosition!.latitude, _currentPosition!.longitude, lat, lng) / 1000.0;
-          final EtaResult r = EtaPolicy.evaluate(
-            status: FleetStatus.collectionState(val),
-            gpsAgeMs: FleetStatus.gpsAgeMs(val, nowMs: nowMs),
-            distanceKm: EtaPolicy.roadDistanceKm(distKm),
-            straightKm: distKm,
-            speedKmh: double.tryParse('${val['eta_speed']}') ?? double.tryParse('${val['speed']}'),
-            averageSpeedKmh: double.tryParse('${val['avg_speed']}'),
-          );
-          if (best == null || (r.isAvailable && (!best.isAvailable || rank(r) < rank(best)))) best = r;
+          final AreaEta? e = AreaEta.fromNode(val, nowMs: nowMs);
+          if (e == null) continue;
+          if (e.isForPurok(_user?.purok)) {
+            if (mine == null || e.arriveAtMs < mine.arriveAtMs) mine = e;
+          } else if (other == null || e.arriveAtMs < other.arriveAtMs) {
+            other = e;
+          }
         }
-        _anchorEta(activeCount == 0 ? null : best);
+        _anchorEta(activeCount == 0 ? null : mine?.arriveAtMs);
         final String etaDisplay = activeCount == 0
             ? "--"
-            : (_etaTargetMs != null ? _countdownLabel() : (best?.label ?? "ETA unavailable"));
+            : (_etaTargetMs != null ? _countdownLabel() : (other != null ? "Next: ${other.area}" : "ETA unavailable"));
         if (mounted) setState(() { _activeTrucks = activeCount; _etaText = etaDisplay; });
         if (telemetryClock != null) {
           WidgetsBinding.instance.addPostFrameCallback((_) {

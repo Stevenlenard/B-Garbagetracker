@@ -13,6 +13,7 @@ import '../chatbot/fleet_snapshot.dart';
 import '../services/service_area_service.dart';
 import '../utils/collection_status.dart';
 import '../utils/collection_visits.dart';
+import '../utils/area_eta.dart';
 import '../utils/eta_evaluation.dart';
 import '../utils/verified_eta.dart';
 import '../utils/history_playback.dart';
@@ -32,7 +33,11 @@ class CollectionData {
     this.areasFromDefaults = false,
     this.areaIdToName = const <String, String>{},
     this.notifications,
+    this.truckLocations,
   });
+
+  /// `truck_locations` (live): the arrival estimate each truck publishes for its next area (AreaEta).
+  final Object? truckLocations;
 
   /// `puroks` record id -> area name (weekly-progress records may be keyed by id).
   final Map<String, String> areaIdToName;
@@ -78,6 +83,8 @@ class FirebaseCollectionDataSource implements CollectionDataSource {
     StreamSubscription<DatabaseEvent>? weekly;
     StreamSubscription<DatabaseEvent>? notifs;
     Object? notifValue;
+    Object? locValue;
+    StreamSubscription<DatabaseEvent>? locs;
     Map simMap = const <Object?, Object?>{};
     List<AreaGeofence>? areas;
     final Map<String, String> ids = <String, String>{};
@@ -97,7 +104,7 @@ class FirebaseCollectionDataSource implements CollectionDataSource {
                 for (final MapEntry<Object?, Object?> e in simMap.entries)
                   if (e.value is Map) 'sim:${e.key}': <Object?, Object?>{...(e.value as Map), 'is_simulation': true},
               };
-        c.add(CollectionData(areas: areas!, trips: merged, weeklyProgress: weeklyValue, areasFromDefaults: defaults, areaIdToName: ids, notifications: notifValue));
+        c.add(CollectionData(areas: areas!, trips: merged, weeklyProgress: weeklyValue, areasFromDefaults: defaults, areaIdToName: ids, notifications: notifValue, truckLocations: locValue));
       }
     }
 
@@ -145,12 +152,17 @@ class FirebaseCollectionDataSource implements CollectionDataSource {
           notifValue = e.snapshot.value;
           emit();
         }, onError: (_) {});
+        locs = _database.ref('truck_locations').onValue.listen((DatabaseEvent e) {
+          locValue = e.snapshot.value;
+          emit();
+        }, onError: (_) {});
       },
       onCancel: () async {
         await trips?.cancel();
         await simTrips?.cancel();
         await weekly?.cancel();
         await notifs?.cancel();
+        await locs?.cancel();
       },
     );
     return c.stream;
@@ -232,6 +244,7 @@ class _CollectionRouteOptimizationScreenState extends State<CollectionRouteOptim
   DateTime? _lastDataAt;
   List<CollectionVisit> _visits = const <CollectionVisit>[];
   List<EtaVisit> _etaVisits = const <EtaVisit>[];
+  List<AreaEta> _liveEtas = const <AreaEta>[];
   Map<String, List<AreaActivity>> _activity = const <String, List<AreaActivity>>{};
   List<AreaCollectionStatus> _statuses = const <AreaCollectionStatus>[];
   PathAnalysis? _paths;
@@ -418,6 +431,15 @@ class _CollectionRouteOptimizationScreenState extends State<CollectionRouteOptim
     // Every alert of the day with its outcome (the area history shows what residents were told, also when the trip
     // ended before the truck got there); Analytics keeps counting the valid ones only.
     _etaVisits = VerifiedEta.allVisits(d.notifications, trips: d.trips, areas: d.areas, nowMs: _statusNowMs);
+    // The estimate each truck publishes right now (the same one the residents and the fleet cards show).
+    final List<AreaEta> liveEtas = <AreaEta>[];
+    if (_isToday && d.truckLocations is Map) {
+      for (final Object? n in (d.truckLocations as Map).values) {
+        final AreaEta? e = n is Map ? AreaEta.fromNode(n, nowMs: _statusNowMs) : null;
+        if (e != null) liveEtas.add(e);
+      }
+    }
+    _liveEtas = liveEtas;
     _activity = CollectionStatus.activityFromWeeklyProgress(
         d.weeklyProgress, (String k) => byKey[k] ?? byKey[ServiceAreaService.canonicalizeAreaName(k) ?? ''],
         includeSimulated: !_viewOnly);
@@ -1374,8 +1396,29 @@ class _CollectionRouteOptimizationScreenState extends State<CollectionRouteOptim
       return '${m.abs().toStringAsFixed(1)} min ${m > 0 ? 'late' : 'early'}';
     }
 
+    // The truck's current estimate for this area: the one estimate its residents get.
+    final List<AreaEta> now = _liveEtas.where((AreaEta e) => e.isForPurok(area)).toList()
+      ..sort((AreaEta a, AreaEta b) => a.arriveAtMs.compareTo(b.arriveAtMs));
     return <Widget>[
       const SizedBox(height: 8),
+      if (now.isNotEmpty) ...<Widget>[
+        Container(
+          key: const ValueKey<String>('live-eta'),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          decoration: BoxDecoration(color: const Color(0xFFE0F2F1), borderRadius: BorderRadius.circular(10)),
+          child: Row(children: <Widget>[
+            const Icon(Icons.local_shipping_rounded, size: 15, color: Color(0xFF00796B)),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'Truck on the way: ETA ${now.first.minutesLeft(_statusNowMs)} min · arrives about ${clock(now.first.arriveAtMs)}',
+                style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w800, color: Color(0xFF00796B)),
+              ),
+            ),
+          ]),
+        ),
+        const SizedBox(height: 8),
+      ],
       Text('Arrival estimates (${_isToday ? 'today' : DateFormat('MMM d').format(day)})',
           style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 12.5, color: _ink)),
       const SizedBox(height: 4),

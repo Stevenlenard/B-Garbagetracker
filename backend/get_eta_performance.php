@@ -10,6 +10,13 @@ require_once 'db_config.php';
 require_once 'auth_token.php';
 $gtAuth = gt_guard(['admin']); // Bundle 1: login + role required
 
+// RETIRED. This endpoint filled in arrival times and errors with placeholder values (a share of the trip time, a fixed
+// 15 minutes, an index-based difference), which are not measurements. ETA performance is measured in the app from the
+// recorded alerts and the GPS-confirmed arrivals (lib/utils/eta_evaluation.dart); nothing calls this file.
+http_response_code(410);
+echo json_encode(['success' => false, 'message' => 'Retired: ETA performance is computed from recorded alerts and GPS-confirmed arrivals.']);
+exit;
+
 $area = $_GET['area'] ?? 'All areas';
 $start_date = $_GET['start_date'] ?? null;
 $end_date = $_GET['end_date'] ?? null;
