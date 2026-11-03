@@ -199,11 +199,12 @@ void main() {
       expect(find.textContaining('62,150'), findsOneWidget);
       expect(find.textContaining('Not verified'), findsOneWidget);
       expect(find.textContaining('OpenStreetMap way/407890456'), findsOneWidget);
-      // an area without an estimate says what is needed, not "None" / "n/a" rows
-      expect(find.text('To estimate this area'), findsOneWidget);
-      expect(find.text('Limitations'), findsNothing);
-      expect(find.text('Estimation method'), findsNothing);
-      expect(find.text('Waste-generation rate'), findsNothing);
+      // Riverside has a size and the barangay figure exists: it takes its share, with the calculation and what it assumes
+      expect(find.text('Calculation breakdown'), findsOneWidget);
+      expect(find.textContaining('Share ='), findsOneWidget);
+      expect(find.text('Limitations'), findsOneWidget);
+      expect(find.textContaining('same waste per hectare'), findsWidgets);
+      expect(find.text('To estimate this area'), findsNothing);
       // no match
       await tester.enterText(find.byType(TextField), 'zzz');
       await tester.pumpAndSettle();

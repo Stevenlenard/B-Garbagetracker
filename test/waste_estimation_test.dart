@@ -164,6 +164,60 @@ void main() {
     });
   });
 
+  group('area share of the barangay estimate', () {
+    const AreaShareBasis basis = AreaShareBasis(barangayKgPerDay: 4000, totalSizedM2: 400000, sizedCount: 2, barangayBasis: '8,000 people × 0.50 kg/person/day');
+    const EstimationParams noRates = EstimationParams();
+    AreaConfig sized(String n, double m2, {bool verified = true}) => AreaConfig(name: n, size: AreaSize(m2: m2, kind: AreaSizeKind.polygon, source: 'sketch', verified: verified));
+
+    test('each sized area takes its proportion of the barangay figure, and the shares add up to it', () {
+      final AreaEstimate a = WasteEstimation.estimate(sized('A', 100000), noRates, share: basis);
+      final AreaEstimate b = WasteEstimation.estimate(sized('B', 300000), noRates, share: basis);
+      expect(a.method, EstimateMethod.areaShare);
+      expect(a.kgPerDay, closeTo(1000, 1e-9));
+      expect(b.kgPerDay, closeTo(3000, 1e-9));
+      expect(a.kgPerDay! + b.kgPerDay!, closeTo(4000, 1e-9));
+      expect(a.confidence, 'Low');
+      expect(a.breakdown.join(' '), contains('25.0%'));
+      expect(a.limitations.join(' '), contains('same waste per hectare'));
+    });
+
+    test('an unverified size is said to be unverified', () {
+      final AreaEstimate a = WasteEstimation.estimate(sized('A', 100000, verified: false), noRates, share: basis);
+      expect(a.limitations.join(' '), contains('not verified'));
+    });
+
+    test('no size, no share; no barangay figure or fewer than two sized areas, no basis', () {
+      expect(WasteEstimation.estimate(const AreaConfig(name: 'X'), noRates, share: basis).hasNumber, isFalse);
+      expect(WasteEstimation.estimate(sized('A', 100000), noRates).hasNumber, isFalse);
+      const AreaShareBasis one = AreaShareBasis(barangayKgPerDay: 4000, totalSizedM2: 100000, sizedCount: 1, barangayBasis: 'x');
+      const AreaShareBasis zero = AreaShareBasis(barangayKgPerDay: 0, totalSizedM2: 400000, sizedCount: 2, barangayBasis: 'x');
+      expect(one.usable, isFalse);
+      expect(zero.usable, isFalse);
+      expect(WasteEstimation.estimate(sized('A', 100000), noRates, share: one).hasNumber, isFalse);
+    });
+
+    test('an area with its own sourced rate, population or a measured weight does not use the share', () {
+      final AreaEstimate perHa = WasteEstimation.estimate(sized('A', 100000), const EstimationParams(kgPerHectareDay: 30, hectareRateSource: 'doc'), share: basis);
+      expect(perHa.method, EstimateMethod.perHectare);
+      final AreaEstimate perCap = WasteEstimation.estimate(
+          const AreaConfig(name: 'A', population: 1000, populationSource: 'PSA'), const EstimationParams(kgPerCapitaDay: 0.5, rateSource: 'NSWMC'), share: basis);
+      expect(perCap.method, EstimateMethod.perCapita);
+      final AreaEstimate measured = WasteEstimation.estimate(
+          const AreaConfig(name: 'A', size: AreaSize(m2: 100000, kind: AreaSizeKind.polygon, source: 's'), measuredKg: 700), noRates, share: basis);
+      expect(measured.method, EstimateMethod.measured);
+      expect(measured.kgPerDay, 700);
+    });
+
+    test('shares are estimates: they go to the estimated total, not to the measured weights', () {
+      final EstimateSummary s = WasteEstimation.summarize(<AreaEstimate>[
+        WasteEstimation.estimate(sized('A', 100000), noRates, share: basis),
+        WasteEstimation.estimate(sized('B', 300000), noRates, share: basis),
+      ]);
+      expect(s.estimatedKgPerDay, closeTo(4000, 1e-9));
+      expect(s.measuredKg, 0);
+    });
+  });
+
   group('existing analytics are unchanged', () {
     test('the seven-day Moving Average and its metrics give the same numbers', () {
       final List<double> series = <double>[5000, 0, 5000, 0, 10000, 5000, 0, 5000, 5000, 0];

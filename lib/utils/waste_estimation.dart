@@ -14,7 +14,7 @@ enum AreaSizeKind { polygon, manual, none }
 enum EstimateStatus { ok, notConfigured, invalidInput }
 
 /// Basis of the estimate.
-enum EstimateMethod { perCapita, perHectare, measured, none }
+enum EstimateMethod { perCapita, perHectare, areaShare, measured, none }
 
 class AreaSize {
   const AreaSize({required this.m2, required this.kind, this.source = '', this.verified = false, this.note = ''});
@@ -129,6 +129,25 @@ class AreaEstimate {
   bool get isMeasured => method == EstimateMethod.measured;
 }
 
+/// The barangay-wide estimate that is shared among the collection areas by their size (population per area is not
+/// available). Built from the whole-barangay figure and the sizes of the areas that have one.
+class AreaShareBasis {
+  const AreaShareBasis({required this.barangayKgPerDay, required this.totalSizedM2, required this.sizedCount, required this.barangayBasis});
+
+  /// The whole-barangay estimate (kg/day), seasonal multiplier included.
+  final double barangayKgPerDay;
+
+  /// Sum of the usable sizes of the areas that get a share.
+  final double totalSizedM2;
+  final int sizedCount;
+
+  /// One line saying how the barangay figure was obtained (for the breakdown).
+  final String barangayBasis;
+
+  /// The basis exists only with a positive barangay figure and at least two sized areas (one area would simply get all of it).
+  bool get usable => barangayKgPerDay.isFinite && barangayKgPerDay > 0 && totalSizedM2 > 0 && sizedCount >= 2;
+}
+
 class WasteEstimation {
   WasteEstimation._();
 
@@ -199,8 +218,9 @@ class WasteEstimation {
   }
 
   /// Estimate for one area. Preference: a measured weight for exactly this area, then per-capita × verified population,
-  /// then per-hectare × usable size. Never a guessed fallback.
-  static AreaEstimate estimate(AreaConfig area, EstimationParams params) {
+  /// then per-hectare × usable size, then (with a [share] basis) the area's proportion of the barangay estimate by size.
+  /// Never a guessed fallback.
+  static AreaEstimate estimate(AreaConfig area, EstimationParams params, {AreaShareBasis? share}) {
     final double m = params.seasonal.effective;
     final List<String> seasonNote = params.seasonal.applied
         ? <String>['Seasonal multiplier ×${_n(m)} (${params.seasonal.source}${params.seasonal.validated ? '' : '; not validated'})']
@@ -260,6 +280,32 @@ class WasteEstimation {
         confidence: area.size.verified ? 'Medium' : 'Low',
         limitations: <String>[
           'Estimate of waste generated, not verified collected weight.',
+          if (!area.size.verified) 'Area size not verified against the real collection area.',
+        ],
+      );
+    }
+
+    // No population of its own and no per-hectare rate: the area takes its proportion of the barangay estimate, by size.
+    // This assumes the same waste per hectare in every area and that the areas cover the barangay; it says so.
+    if (area.size.usable && share != null && share.usable) {
+      final double fraction = area.size.m2 / share.totalSizedM2;
+      final double kg = share.barangayKgPerDay * fraction;
+      return AreaEstimate(
+        name: area.name,
+        status: EstimateStatus.ok,
+        method: EstimateMethod.areaShare,
+        kgPerDay: kg,
+        size: area.size,
+        multiplierUsed: m,
+        breakdown: <String>[
+          'Barangay estimate ${_n(share.barangayKgPerDay)} kg/day (${share.barangayBasis})',
+          'Share = ${_n(area.size.hectares)} ha ÷ ${_n(share.totalSizedM2 / 10000.0)} ha (${share.sizedCount} sized areas) = ${(fraction * 100).toStringAsFixed(1)}%',
+          '= ${_n(kg)} kg/day',
+        ],
+        confidence: 'Low',
+        limitations: <String>[
+          'Estimate of waste generated, not verified collected weight.',
+          'Shares the barangay figure by area size: assumes the same waste per hectare in every area and that these areas cover the barangay. No population per area is available.',
           if (!area.size.verified) 'Area size not verified against the real collection area.',
         ],
       );

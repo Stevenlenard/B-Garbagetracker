@@ -506,6 +506,8 @@ class _WasteEstimationDetailsState extends State<WasteEstimationDetails> {
         return '${p.kgPerCapitaDay} kg/person/day (${p.rateSource})';
       case EstimateMethod.perHectare:
         return '${p.kgPerHectareDay} kg/ha/day (${p.hectareRateSource})';
+      case EstimateMethod.areaShare:
+        return 'Share of the barangay figure (same waste per hectare in every area)';
       case EstimateMethod.measured:
         return 'Recorded weight (no rate)';
       case EstimateMethod.none:

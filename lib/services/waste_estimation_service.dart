@@ -142,7 +142,20 @@ class WasteEstimationData {
 
     final EstimationParams params = _params(settings);
     final Map<String, AreaConfig> configs = <String, AreaConfig>{for (final WasteAreaRow r in <WasteAreaRow>[...rows, barangay]) r.key: _config(r)};
-    final List<AreaEstimate> estimates = <AreaEstimate>[for (final WasteAreaRow r in rows) WasteEstimation.estimate(configs[r.key]!, params)];
+    final AreaEstimate whole = WasteEstimation.estimate(configs[barangayKey]!, params);
+    // Areas without a population of their own share the barangay figure by size (see AreaShareBasis).
+    AreaShareBasis? share;
+    if (whole.hasNumber && whole.method == EstimateMethod.perCapita) {
+      final List<AreaConfig> sized = <AreaConfig>[for (final WasteAreaRow r in rows) if (configs[r.key]!.size.usable) configs[r.key]!];
+      final AreaConfig bc = configs[barangayKey]!;
+      share = AreaShareBasis(
+        barangayKgPerDay: whole.kgPerDay!,
+        totalSizedM2: sized.fold<double>(0, (double a, AreaConfig c) => a + c.size.m2),
+        sizedCount: sized.length,
+        barangayBasis: '${bc.population} people × ${params.kgPerCapitaDay} kg/person/day${params.seasonal.applied ? ' × ${params.seasonal.effective}' : ''}',
+      );
+    }
+    final List<AreaEstimate> estimates = <AreaEstimate>[for (final WasteAreaRow r in rows) WasteEstimation.estimate(configs[r.key]!, params, share: share)];
     return WasteEstimationData._(
       available: available,
       settings: settings,
@@ -150,7 +163,7 @@ class WasteEstimationData {
       barangay: barangay,
       params: params,
       estimates: estimates,
-      whole: WasteEstimation.estimate(configs[barangayKey]!, params),
+      whole: whole,
       summary: WasteEstimation.summarize(estimates),
       configs: configs,
     );
@@ -211,6 +224,8 @@ class WasteFormat {
         return 'Population × per-person rate';
       case EstimateMethod.perHectare:
         return 'Area (ha) × per-hectare rate';
+      case EstimateMethod.areaShare:
+        return 'Share of the barangay estimate by area size';
       case EstimateMethod.measured:
         return 'Recorded measured weight';
       case EstimateMethod.none:

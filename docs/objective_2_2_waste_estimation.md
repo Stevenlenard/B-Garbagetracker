@@ -76,3 +76,25 @@ Edited: `lib/api/api_service.dart` (two methods), `lib/screens/analytics_screen.
 ## 8. Deployment
 
 Run the migration after a database backup (rollback script provided), upload the two PHP endpoints plus `waste_estimation_lib.php`, build and upload web and APK. Both endpoints use `gt_guard(['admin'])` and prepared statements; save is POST-only and writes only the two new tables.
+
+## 9. Barangay-drawn boundaries and the area share (2026-11-04)
+
+**Boundaries.** The barangay's own outlines of nine collection areas (drawn on a Google Maps satellite image and confirmed by the barangay, as stated by the project owner) replace the placeholder boxes and the OpenStreetMap references as the source of area sizes. The screenshot has no coordinates, so it was positioned by fitting the OpenStreetMap main roads to its yellow roads (an automatic search over scale and offset; the OSM roads then lie on the screenshot's roads), and the white outlines were traced by eye. Expect 30-60 m of position error and about +/-10-15 % on each size. Checks: the Riverside outline is centred 40 m from the OpenStreetMap "Riverside Subdivision"; Central is 55 m from its stored point. The vertices are in `docs/data/balintawak_purok_boundaries_2026-11-04.geojson`; the sizes are applied with `backend/migrations/2026_11_waste_estimation_area_sizes.sql`.
+
+| Area | Size (m²) | Size (ha) |
+|---|---|---|
+| Purok 4 / El Pueblo | 467,498 | 46.75 |
+| Purok 2 | 391,556 | 39.16 |
+| Purok 3 | 391,788 | 39.18 |
+| Brixton Homes | 213,231 | 21.32 |
+| Central (Purok 1) | 268,076 | 26.81 |
+| T.M. Kalaw Street | 270,461 | 27.05 |
+| Riverside | 152,688 | 15.27 |
+| San Nicolas | 272,186 | 27.22 |
+| Purok Paraiso | 195,400 | 19.54 |
+| Ayala Highway | none | the sketch draws no boundary for the road |
+| **Total of the nine** | **2,622,884** | **262.3** |
+
+**Area share.** Without a population per area and without a per-hectare rate, an area with a size takes its proportion of the whole-barangay estimate: share = barangay estimate × (area size ÷ sum of the sized areas). With 19,278 people × 0.50 kg = 9,639 kg/day over 262.3 ha, that is about 36.7 kg per hectare per day, so Purok 4 / El Pueblo is about 1,718 kg/day and Riverside about 561 kg/day. The seasonal multiplier is already in the barangay figure. The shares add up to the barangay figure. This is an estimate with two stated assumptions: the same waste per hectare in every area, and that the collection areas cover the barangay. Confidence is Low. A sourced per-hectare rate or a population for an area takes priority over the share. It is shown as an estimate of waste generated and is never added to the recorded loads (capacity-equivalent 5,000 kg per FULL event) or to measured weights.
+
+**Seasonal and holiday multiplier.** It stays neutral (1.0) because no document gives a Lipa value, and the recorded loads cannot reveal one: they are mostly capacity-equivalent events (5,000 kg per FULL), not weights, and the number of FULL loads depends on assignments, not on how much waste people produced. It is applied automatically as soon as a value with its source is entered and switched on.
