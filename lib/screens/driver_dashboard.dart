@@ -7,6 +7,7 @@ import '../widgets/logout_choice_dialog.dart';
 import '../utils/relative_time.dart';
 import '../services/notification_inbox.dart';
 import '../utils/area_eta.dart';
+import '../utils/route_distance.dart';
 import '../utils/eta_policy.dart';
 import '../utils/approach_tracking.dart';
 import '../utils/load_history.dart';
@@ -5863,6 +5864,37 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     }
   }
 
+  /// Distance of this trip's stored route (km) by [RouteDistance]: the points waiting on the phone are sent first so the
+  /// route is complete; when the stored route cannot be read or is not current, the phone's own figure is kept.
+  Future<double> _measuredRouteKm(String root, String tripId, double deviceKm) async {
+    try {
+      await _flushQueuedPoints();
+      final DataSnapshot snap = await _database.ref('$root/$tripId/route').get().timeout(const Duration(seconds: 10));
+      final Object? v = snap.value;
+      final List<Map> pts = <Map>[
+        if (v is Map) for (final Object? e in v.values) if (e is Map) e,
+        if (v is List) for (final Object? e in v) if (e is Map) e,
+      ];
+      int last = 0;
+      for (final Map p in pts) {
+        final Object? t = p['timestamp'];
+        final int ms = t is num ? t.toInt() : int.tryParse('${t ?? ''}') ?? 0;
+        if (ms > last) last = ms;
+      }
+      final double km = RouteDistance.chooseKm(
+        deviceKm: deviceKm,
+        correctedKm: RouteDistance.correctedKm(pts),
+        fixes: pts.length,
+        lastFixAgeMs: last == 0 ? null : DateTime.now().millisecondsSinceEpoch - last,
+      );
+      debugPrint("[FULL] distance: phone ${deviceKm.toStringAsFixed(3)} km, measured from ${pts.length} stored points ${km.toStringAsFixed(3)} km");
+      return km;
+    } catch (e) {
+      debugPrint("[FULL] could not measure the stored route, keeping the phone's distance: $e");
+      return deviceKm;
+    }
+  }
+
   /// Freezes the collection (duration, distance, route, load) exactly once and
   /// publishes FULL. Idempotent: repeated taps/retries re-apply the stored record.
   /// Returns true when the frozen record exists afterwards.
@@ -5884,12 +5916,16 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       final Position? fix = _currentPosition;
 
       // Freeze locally FIRST so no later GPS fix can extend the metrics.
-      final double frozenDistance = _distance;
+      final double deviceDistance = _distance;
       _collectionFrozen = true;
       _postFullDistance = 0.0;
 
       // Last collection point (the frozen route ends here).
       if (fix != null) await _appendRoutePoint(fix, "FULL", "PINK");
+
+      // The distance saved with the collection is measured from the stored route (stays and GPS wander removed), not
+      // taken from the phone's running total, which also counted wander (7.2 km recorded for 1.2 km on 3 Nov 2026).
+      final double frozenDistance = await _measuredRouteKm(root, tripId, deviceDistance);
 
       final Map<String, Object?> record = CollectionRecord.build(
         startMs: startMs,
@@ -5900,6 +5936,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
         via: via,
         endLat: fix?.latitude,
         endLng: fix?.longitude,
+        deviceDistanceKm: deviceDistance,
       );
       final CollectionFinalResult res = await CollectionFinalizer.finalize(
         db: _rtdb,

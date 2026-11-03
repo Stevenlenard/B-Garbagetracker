@@ -457,6 +457,7 @@ class CollectionRecord {
     required String via,
     double? endLat,
     double? endLng,
+    double? deviceDistanceKm,
   }) {
     final int durationS = nowMs > startMs ? ((nowMs - startMs) / 1000).round() : 0;
     return <String, Object?>{
@@ -464,6 +465,9 @@ class CollectionRecord {
       'started_at_ms': startMs,
       'duration_s': durationS,
       'distance_km': double.parse(distanceKm.toStringAsFixed(3)),
+      // what the phone added up while recording; kept for diagnostics when it differs from the measured distance above
+      if (deviceDistanceKm != null && (deviceDistanceKm - distanceKm).abs() >= 0.001)
+        'distance_km_device': double.parse(deviceDistanceKm.toStringAsFixed(3)),
       'weight_kg': weightKg,
       'weight_type': weightType,
       'finalized_via': via, // FULL | COMPLETED_WITHOUT_FULL
