@@ -6,8 +6,10 @@ import '../services/notification_service.dart';
 import '../widgets/logout_choice_dialog.dart';
 import '../utils/relative_time.dart';
 import '../services/notification_inbox.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../utils/area_eta.dart';
 import '../utils/route_distance.dart';
+import '../utils/stationary_excursion.dart';
 import '../utils/eta_policy.dart';
 import '../utils/approach_tracking.dart';
 import '../utils/load_history.dart';
@@ -2155,6 +2157,8 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       if (recentSpeed != null) 'eta_speed': recentSpeed,
       // the one arrival estimate of the next area (every screen reads this; null removes it)
       AreaEta.field: _areaEta?.toJson(),
+      // the assigned areas still to be collected, nearest first (null removes it)
+      AreaEta.queueField: _routeQueue,
       'heading': pos.heading,
       'accuracy': pos.accuracy,
       'fix_time': pos.timestamp.millisecondsSinceEpoch, // when the receiver took the fix
@@ -2287,13 +2291,30 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     }
   }
 
+  /// Tracks stays of 10+ minutes so that GPS wander around a phone that stayed put (indoors, on a table) cannot alert
+  /// residents, mark areas as collected or publish an ETA. See StayHold.
+  final StayHold _stayHold = StayHold();
+
+  /// The assigned areas still to be collected, nearest first (published for the screens that show the round).
+  List<String>? _routeQueue;
+
   void _checkPurokProximity(Position pos) {
     if (_sessionId == null || _currentWeekKey == null || _user == null) {
+      return;
+    }
+    // A phone that has stayed in one place for 10+ minutes and now "moves" around it is GPS wander, not a departure:
+    // nothing is alerted, marked or published until the truck really leaves (two fixes more than 300 m away).
+    if (!_isSimulationMode && _stayHold.offer(pos.latitude, pos.longitude, pos.timestamp.millisecondsSinceEpoch)) {
+      _areaEta = null;
+      _routeQueue = null;
+      _proxPrev = pos;
+      _proxPrevAt = DateTime.now();
       return;
     }
     // A FULL truck (or a paused one) is not collecting: passing an area neither marks it nor alerts its residents.
     if (_collectionFrozen || _status.toUpperCase() != 'ACTIVE') {
       _areaEta = null;
+      _routeQueue = null;
       _proxPrev = pos;
       _proxPrevAt = DateTime.now();
       return;
@@ -2308,6 +2329,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     final String driverId = _user!.userId.toString();
     // The nearest area still to be collected (see below): the only one that may get an "on the way" alert.
     ({String name, String key, double dist, bool approaching})? next;
+    final List<({String name, double dist})> queue = <({String name, double dist})>[];
 
     for (var p in _purokConfigs) {
       // Canonical id: the weekly records, the maps and the analytics all read areas by id.
@@ -2356,6 +2378,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       // Sustained closing only: never on the first fix, never on a few metres of GPS wander.
       final int nowMs = DateTime.now().millisecondsSinceEpoch;
       _approachDetector.add(key, nowMs, dist);
+      if (!servedThisTrip && _isAlertableArea(p)) queue.add((name: p['name'].toString(), dist: dist));
       if (!servedThisTrip && _isAlertableArea(p) && (next == null || dist < next.dist)) {
         next = (name: p['name'].toString(), key: key, dist: dist, approaching: _approachDetector.isApproaching(key, nowMs));
       }
@@ -2430,6 +2453,8 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       if (n.approaching && shared != null) _maybeNotifyApproach(n.name, n.key, shared);
     }
     _areaEta = shared;
+    queue.sort((a, b) => a.dist.compareTo(b.dist));
+    _routeQueue = queue.isEmpty ? null : <String>[for (final ({String name, double dist}) q in queue) q.name];
     _proxPrev = pos;
     _proxPrevAt = DateTime.now();
   }
@@ -2702,6 +2727,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
 
       // Points stored while offline (or before the app was closed) are sent again.
       unawaited(_flushQueuedPoints());
+      if (!_assignmentOk) unawaited(_loadTodayAssignment()); // the assignment decides who is alerted: ask again
 
       // 12-Hour Automatic Session Expiry Check
       if (_driverLoginTimestamp != null && _driverLoginTimestamp! > 0) {
@@ -4718,24 +4744,70 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     final String today = DateFormat('yyyy-MM-dd').format(DateTime.now());
     final AssignmentResult<AssignmentList> r = await _assignmentService.list(startDate: today, endDate: today);
     if (!mounted) return;
+    final bool featureOff = r.failure == AssignmentFailure.notConfigured || r.failure == AssignmentFailure.notSetUp;
+    // The server could not be asked (network, session): the assignment already known is kept, or the one stored on the
+    // phone for today, and the question is repeated with the heartbeat. A failure never turns alerts on for every area.
+    if (!r.isOk && !featureOff) {
+      _assignmentOk = false;
+      if (_assignedAreaNames == null) {
+        final Set<String>? cached = await _readCachedAssignment(today);
+        if (mounted && cached != null) setState(() => _assignedAreaNames = cached);
+      }
+      if (mounted) {
+        setState(() {
+          _assignmentLoaded = true;
+          _assignmentError = r.message;
+        });
+      }
+      return;
+    }
+    _assignmentOk = true;
+    final int? me = int.tryParse(_user?.userId.toString() ?? '');
+    final List<RouteAssignment> mine = r.isOk
+        ? r.value!.items.where((RouteAssignment a) => a.driverId == me && a.status != AssignmentStatus.cancelled).toList()
+        : const <RouteAssignment>[];
+    // Residents are alerted ONLY for the areas of today's assignments (all of them when a driver has several): an area
+    // the truck merely passes, and every area when the driver has no assignment today, gets no alert.
+    final Set<String>? names = mine.isEmpty
+        ? null
+        : (<String>{
+            for (final RouteAssignment a in mine)
+              for (final AssignmentArea x in a.areas) ...<String>[_areaToken(x.key), _areaToken(x.name)],
+          }..remove(''));
+    unawaited(_writeCachedAssignment(today, names));
     setState(() {
       _assignmentLoaded = true;
-      _assignmentFeatureOff = r.failure == AssignmentFailure.notConfigured || r.failure == AssignmentFailure.notSetUp;
-      _assignmentError = r.isOk || _assignmentFeatureOff ? null : r.message;
-      final int? me = int.tryParse(_user?.userId.toString() ?? '');
-      final List<RouteAssignment> mine = r.isOk
-          ? r.value!.items.where((RouteAssignment a) => a.driverId == me && a.status != AssignmentStatus.cancelled).toList()
-          : const <RouteAssignment>[];
+      _assignmentFeatureOff = featureOff;
+      _assignmentError = null;
       _todayAssignment = mine.isEmpty ? null : mine.first;
-      // Residents are alerted only for the areas of today's assignments (all of them when a driver has several);
-      // an area the truck merely passes on the way is not alerted. No assignment: every area, as before.
-      _assignedAreaNames = mine.isEmpty
-          ? null
-          : (<String>{
-              for (final RouteAssignment a in mine)
-                for (final AssignmentArea x in a.areas) ...<String>[_areaToken(x.key), _areaToken(x.name)],
-            }..remove(''));
+      _assignedAreaNames = names;
     });
+  }
+
+  /// true once the assignment of today was read from the server (or the feature is not set up there).
+  bool _assignmentOk = false;
+
+  String _assignmentCacheKey(String day) => 'assigned_areas_${day}_${_user?.userId}';
+
+  Future<Set<String>?> _readCachedAssignment(String day) async {
+    try {
+      final SharedPreferences prefs = await SharedPreferences.getInstance();
+      final List<String>? v = prefs.getStringList(_assignmentCacheKey(day));
+      return v == null || v.isEmpty ? null : v.toSet();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _writeCachedAssignment(String day, Set<String>? names) async {
+    try {
+      final SharedPreferences prefs = await SharedPreferences.getInstance();
+      if (names == null || names.isEmpty) {
+        await prefs.remove(_assignmentCacheKey(day));
+      } else {
+        await prefs.setStringList(_assignmentCacheKey(day), names.toList());
+      }
+    } catch (_) {}
   }
 
   /// Area names/ids of today's assignments (canonical, lower case), or null when the driver has none today.
@@ -4747,10 +4819,12 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     return (ServiceAreaService.canonicalizeAreaName(t) ?? t).toLowerCase();
   }
 
-  /// True when residents of [p] may be alerted on this trip: no assignment today, or [p] is an assigned area.
+  /// True when residents of [p] may be alerted on this trip: [p] is an area of today's assignment. With no assignment
+  /// (or none read yet) nobody is alerted; only a server without the assignment feature keeps the old all-areas rule.
   bool _isAlertableArea(Map<String, dynamic> p) {
+    if (_assignmentFeatureOff) return true;
     final Set<String>? assigned = _assignedAreaNames;
-    if (assigned == null) return true;
+    if (assigned == null) return false;
     return assigned.contains(_areaToken(p['id']?.toString() ?? '')) || assigned.contains(_areaToken(p['name']?.toString() ?? ''));
   }
 

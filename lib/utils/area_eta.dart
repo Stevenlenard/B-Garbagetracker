@@ -103,6 +103,21 @@ class AreaEta {
     return '${secondsLeft ~/ 60}:${(secondsLeft % 60).toString().padLeft(2, '0')}';
   }
 
+  /// Field of the truck node with the assigned areas still to be collected, nearest first (names).
+  static const String queueField = 'route_queue';
+
+  /// The areas the truck still has to collect today (its assignment, nearest first) while it is collecting with a
+  /// current position; empty otherwise. Lets every screen say where an area stands in the truck's round.
+  static List<String> queueFromNode(Map node, {required int nowMs}) {
+    final Object? raw = node[queueField];
+    if (raw is! List) return const <String>[];
+    final String status = FleetStatus.collectionState(node);
+    if (status != 'ACTIVE' && status != 'COLLECTING') return const <String>[];
+    final int? gpsAge = FleetStatus.gpsAgeMs(node, nowMs: nowMs);
+    if (gpsAge == null || gpsAge < 0 || gpsAge > EtaPolicy.gpsFreshMs) return const <String>[];
+    return <String>[for (final Object? e in raw) if (e != null && e.toString().trim().isNotEmpty) e.toString().trim()];
+  }
+
   static int? _int(Object? v) => v is num ? v.toInt() : int.tryParse('${v ?? ''}');
 
   /// The estimate a truck node carries, or null when there is none to show: no estimate, the truck is not collecting,

@@ -14,6 +14,7 @@ import '../services/service_area_service.dart';
 import '../utils/collection_status.dart';
 import '../utils/collection_visits.dart';
 import '../utils/area_eta.dart';
+import '../utils/resident_alert_rules.dart';
 import '../utils/eta_evaluation.dart';
 import '../utils/verified_eta.dart';
 import '../utils/history_playback.dart';
@@ -245,6 +246,10 @@ class _CollectionRouteOptimizationScreenState extends State<CollectionRouteOptim
   List<CollectionVisit> _visits = const <CollectionVisit>[];
   List<EtaVisit> _etaVisits = const <EtaVisit>[];
   List<AreaEta> _liveEtas = const <AreaEta>[];
+
+  /// Each collecting truck's round right now: the assigned areas still to be collected (nearest first) and the estimate
+  /// for the one it is heading to.
+  List<({List<String> queue, AreaEta? eta})> _liveRounds = const <({List<String> queue, AreaEta? eta})>[];
   Map<String, List<AreaActivity>> _activity = const <String, List<AreaActivity>>{};
   List<AreaCollectionStatus> _statuses = const <AreaCollectionStatus>[];
   PathAnalysis? _paths;
@@ -433,13 +438,18 @@ class _CollectionRouteOptimizationScreenState extends State<CollectionRouteOptim
     _etaVisits = VerifiedEta.allVisits(d.notifications, trips: d.trips, areas: d.areas, nowMs: _statusNowMs);
     // The estimate each truck publishes right now (the same one the residents and the fleet cards show).
     final List<AreaEta> liveEtas = <AreaEta>[];
+    final List<({List<String> queue, AreaEta? eta})> rounds = <({List<String> queue, AreaEta? eta})>[];
     if (_isToday && d.truckLocations is Map) {
       for (final Object? n in (d.truckLocations as Map).values) {
-        final AreaEta? e = n is Map ? AreaEta.fromNode(n, nowMs: _statusNowMs) : null;
+        if (n is! Map) continue;
+        final AreaEta? e = AreaEta.fromNode(n, nowMs: _statusNowMs);
+        final List<String> q = AreaEta.queueFromNode(n, nowMs: _statusNowMs);
         if (e != null) liveEtas.add(e);
+        if (e != null || q.isNotEmpty) rounds.add((queue: q, eta: e));
       }
     }
     _liveEtas = liveEtas;
+    _liveRounds = rounds;
     _activity = CollectionStatus.activityFromWeeklyProgress(
         d.weeklyProgress, (String k) => byKey[k] ?? byKey[ServiceAreaService.canonicalizeAreaName(k) ?? ''],
         includeSimulated: !_viewOnly);
@@ -1401,6 +1411,30 @@ class _CollectionRouteOptimizationScreenState extends State<CollectionRouteOptim
       ..sort((AreaEta a, AreaEta b) => a.arriveAtMs.compareTo(b.arriveAtMs));
     return <Widget>[
       const SizedBox(height: 8),
+      // No estimate for this area yet, but it is on a collecting truck's round: say where it stands, instead of nothing.
+      if (now.isEmpty) ...<Widget>[
+        for (final ({List<String> queue, AreaEta? eta}) r in _liveRounds)
+          if (r.queue.indexWhere((String q) => ResidentAlertRules.samePurok(q, area)) >= 0) ...<Widget>[
+            Container(
+              key: const ValueKey<String>('queue-eta'),
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              decoration: BoxDecoration(color: const Color(0xFFEFF3F8), borderRadius: BorderRadius.circular(10)),
+              child: Row(children: <Widget>[
+                const Icon(Icons.local_shipping_outlined, size: 15, color: Color(0xFF475569)),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'On today\'s round: stop #${r.queue.indexWhere((String q) => ResidentAlertRules.samePurok(q, area)) + 1} of ${r.queue.length}'
+                    '${r.eta != null ? ' · the truck is heading to ${r.eta!.area} first (ETA ${r.eta!.minutesLeft(_statusNowMs)} min)' : ''}. '
+                    'This area\'s ETA appears when the truck is on its way here.',
+                    style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: Color(0xFF475569)),
+                  ),
+                ),
+              ]),
+            ),
+            const SizedBox(height: 8),
+          ],
+      ],
       if (now.isNotEmpty) ...<Widget>[
         Container(
           key: const ValueKey<String>('live-eta'),

@@ -169,3 +169,73 @@ class StationaryExcursions {
   /// Length (m) of the path through [fixes], for before / after comparisons.
   static double pathLengthM(List<StayFix> fixes) => fixes.length < 2 ? 0 : _path(fixes, 0, fixes.length - 1);
 }
+
+/// Online companion of [StationaryExcursions] for the driver app: tells, fix by fix, whether the truck is "held" at a
+/// long stay, so that GPS wander around a phone that has stayed put for 10+ minutes cannot send "on the way" / arrival
+/// alerts, mark areas as collected or publish an ETA (3 Nov 2026: a phone on a table for 3 hours "approached" Central and
+/// Ayala Highway and "arrived" at Ayala).
+///
+/// A stay is 10+ minutes within [StationaryExcursions.stayRadiusM] of one place. While it lasts, and afterwards as long
+/// as the truck stays within [holdRadiusM] of it, fixes are held. Two fixes in a row farther than [holdRadiusM] mean the
+/// truck really left: the hold is released at once (a real departure is 300 m away within a minute or two).
+///
+/// Known limit: an area less than [holdRadiusM] from a place where the truck stayed 10+ minutes is not alerted until the
+/// truck has left that radius (a truck does not normally park for 10 minutes next to an area and then collect it).
+class StayHold {
+  static const double holdRadiusM = 300;
+  static const int releaseAfterFarFixes = 2;
+
+  double _sLat = 0, _sLng = 0;
+  int _n = 0, _startMs = 0, _lastMs = 0, _outliers = 0, _far = 0;
+  StayAnchor? _anchor;
+
+  /// The place of the current stay, or null.
+  StayAnchor? get anchor => _anchor;
+
+  /// Feed every accepted fix in time order; true when the fix must be held (see above).
+  bool offer(double lat, double lng, int tsMs) {
+    if (_n == 0) {
+      _start(lat, lng, tsMs);
+    } else if (StationaryExcursions.distanceM(_sLat / _n, _sLng / _n, lat, lng) <= StationaryExcursions.stayRadiusM) {
+      _sLat += lat;
+      _sLng += lng;
+      _n++;
+      _lastMs = tsMs;
+      _outliers = 0;
+    } else if (++_outliers > 2) {
+      _start(lat, lng, tsMs);
+    }
+    if (_n >= StationaryExcursions.minStayFixes && _lastMs - _startMs >= StationaryExcursions.minStayMs) {
+      _anchor = StayAnchor(_sLat / _n, _sLng / _n);
+    }
+    final StayAnchor? a = _anchor;
+    if (a == null) return false;
+    final double d = StationaryExcursions.distanceM(a.lat, a.lng, lat, lng);
+    if (d > holdRadiusM) {
+      if (++_far >= releaseAfterFarFixes) {
+        _anchor = null;
+        _far = 0;
+        return false;
+      }
+      return false;
+    }
+    _far = 0;
+    return true;
+  }
+
+  void _start(double lat, double lng, int tsMs) {
+    _sLat = lat;
+    _sLng = lng;
+    _n = 1;
+    _startMs = tsMs;
+    _lastMs = tsMs;
+    _outliers = 0;
+  }
+
+  void reset() {
+    _n = 0;
+    _anchor = null;
+    _far = 0;
+    _outliers = 0;
+  }
+}

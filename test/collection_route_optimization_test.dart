@@ -384,6 +384,51 @@ void main() {
       expect(find.textContaining('Driver approach alert; not a verified visit'), findsOneWidget);
     });
 
+    testWidgets('every area of a collecting truck''s round says where it stands: the ETA, or its place in line', (WidgetTester t) async {
+      t.view.physicalSize = const Size(1366, 900);
+      t.view.devicePixelRatio = 1;
+      addTearDown(t.view.reset);
+      final Map<String, Object?> truckNode = <String, Object?>{
+        'status': 'ACTIVE',
+        'isOnline': true,
+        'gps_at': msAt(now) - 5000,
+        'lastSeen': msAt(now) - 5000,
+        'current_session': 't1',
+        'area_eta': <String, Object?>{
+          'area': 'Riverside',
+          'area_key': 'riverside',
+          'minutes': 6,
+          'arrive_at_ms': msAt(now) + 6 * 60000,
+          'computed_at_ms': msAt(now) - 3000,
+          'trip_id': 't1',
+        },
+        'route_queue': <String>['Riverside', 'Paraiso'],
+      };
+      final FakeSource src = FakeSource(CollectionData(
+        areas: areas,
+        trips: const <String, Object?>{},
+        weeklyProgress: null,
+        truckLocations: <String, Object?>{'GT-001': truckNode},
+      ));
+      await t.pumpWidget(MaterialApp(home: CollectionRouteOptimizationScreen(role: 'admin', source: src, clock: () => now, showMap: false)));
+      await t.pump();
+      await t.tap(find.byKey(const ValueKey<String>('area-Riverside')));
+      await t.pump();
+      expect(find.byKey(const ValueKey<String>('live-eta')), findsOneWidget);
+      expect(find.textContaining('Truck on the way: ETA 6 min'), findsOneWidget);
+      expect(find.byKey(const ValueKey<String>('queue-eta')), findsNothing);
+      await t.tap(find.byKey(const ValueKey<String>('area-Paraiso')));
+      await t.pump();
+      expect(find.byKey(const ValueKey<String>('queue-eta')), findsOneWidget);
+      expect(find.textContaining('stop #2 of 2'), findsOneWidget);
+      expect(find.textContaining('heading to Riverside first (ETA 6 min)'), findsOneWidget);
+      // an area that is not on the truck's round gets neither
+      await t.tap(find.byKey(const ValueKey<String>('area-Purok 2')));
+      await t.pump();
+      expect(find.byKey(const ValueKey<String>('queue-eta')), findsNothing);
+      expect(find.byKey(const ValueKey<String>('live-eta')), findsNothing);
+    });
+
     Future<void> pumpWithMap(WidgetTester t, String role, Size size) async {
       t.view.physicalSize = size;
       t.view.devicePixelRatio = 1;
