@@ -12,7 +12,7 @@ import 'dart:math' as math;
 enum EtaKind { minutes, arrived, unavailable }
 
 class EtaResult {
-  const EtaResult.minutes(this.minutes, {this.approximate = true, this.stage, this.seconds})
+  const EtaResult.minutes(this.minutes, {this.approximate = true, this.stage, this.seconds, this.fromModel = false})
       : kind = EtaKind.minutes,
         reason = null;
 
@@ -22,6 +22,7 @@ class EtaResult {
         approximate = false,
         stage = null,
         seconds = null,
+        fromModel = false,
         reason = null;
 
   const EtaResult.unavailable(this.reason)
@@ -29,6 +30,7 @@ class EtaResult {
         minutes = null,
         approximate = false,
         stage = null,
+        fromModel = false,
         seconds = null;
 
   final EtaKind kind;
@@ -40,6 +42,10 @@ class EtaResult {
 
   /// Notification stage reached (15 / 10 / 5 minutes), when it applies.
   final int? stage;
+
+  /// true: no usable travel speed (the truck is stopped on the street), so the estimate is what recorded trips took
+  /// for this distance (EtaModel) instead of distance / speed.
+  final bool fromModel;
   final String? reason;
 
   bool get isAvailable => kind != EtaKind.unavailable;
@@ -107,6 +113,9 @@ class EtaPolicy {
   static const int gpsFreshMs = 180000; // the shared freshness window
   static const double minSpeedKmh = 3.0; // slower than this is "not travelling"
   static const int maxMinutes = 90; // beyond this an estimate is not meaningful
+
+  /// Longest estimate given from the recorded-trip model alone (no travel speed).
+  static const int modelOnlyMaxMinutes = 30;
   static const List<int> stages = <int>[15, 10, 5];
 
   /// Roads are longer than the straight line between two points; a straight-line
@@ -148,7 +157,17 @@ class EtaPolicy {
     } else if (averageSpeedKmh != null && averageSpeedKmh >= minSpeedKmh) {
       speed = averageSpeedKmh;
     }
-    if (speed == null) return const EtaResult.unavailable('The truck speed is not known yet.');
+    if (speed == null) {
+      // A collecting truck stops all the time (41% of the one-minute windows of the recorded trips were slower than
+      // [minSpeedKmh]); dropping the estimate at every stop left residents with "ETA unavailable" and produced no
+      // alerts. Without a travel speed the estimate is what recorded trips took for this distance, as long as that is
+      // within [modelOnlyMaxMinutes]. Callers still decide whether the truck is approaching.
+      if (straightKm == null) return const EtaResult.unavailable('The truck speed is not known yet.');
+      final double byModel = model.minutesFor(straightKm);
+      final int m = byModel <= 1.0 ? 1 : byModel.ceil();
+      if (m > modelOnlyMaxMinutes) return const EtaResult.unavailable('The truck is stopped and still far away.');
+      return EtaResult.minutes(m, approximate: true, stage: stageFor(m), seconds: (byModel * 60).round(), fromModel: true);
+    }
 
     // The larger of: the road distance at the recent travel speed, and the time recorded trips actually took for
     // this straight-line distance (a truck rarely drives straight to an area; replaying the recorded trips, this

@@ -1459,6 +1459,19 @@ class _CollectionRouteOptimizationScreenState extends State<CollectionRouteOptim
       if (list.isEmpty)
         const Text('No "on the way" alert with an estimate was sent for this area on this day.',
             style: TextStyle(fontSize: 12, color: _muted)),
+      if (list.any((EtaVisit v) => v.isEvaluated && v.absErrorMin != null))
+        Padding(
+          key: const ValueKey<String>('eta-mae'),
+          padding: const EdgeInsets.only(bottom: 6),
+          child: Builder(builder: (BuildContext _) {
+            final List<double> errs = <double>[for (final EtaVisit v in list) if (v.isEvaluated && v.absErrorMin != null) v.absErrorMin!.toDouble()];
+            final double mae = errs.reduce((double a, double b) => a + b) / errs.length;
+            return Text(
+              'Average error (MAE): ${mae.toStringAsFixed(1)} min over ${errs.length} arrival${errs.length == 1 ? '' : 's'}',
+              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: _ink),
+            );
+          }),
+        ),
       ...list.take(5).map((EtaVisit v) {
         final int? predicted = v.predictedArrivalMs;
         final String sent = 'Alert sent ${clock(v.sentMs)} · ETA ${v.predictedMinutes} min'
