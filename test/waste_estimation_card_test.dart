@@ -231,8 +231,14 @@ void main() {
       expect(find.text('Area-based estimation (per hectare)'), findsOneWidget);
       expect(find.text('Seasonal multiplier'), findsOneWidget);
       expect(find.text('Geographic boundary sources'), findsOneWidget);
+      // the sections are collapsed except the first; a collapsed one shows a one-line summary and opens on tap
+      expect(find.textContaining('retrieved 2026-11-04'), findsNothing);
+      expect(find.textContaining('sizes available'), findsOneWidget);
+      await tapText(tester, 'Geographic boundary sources');
       expect(find.textContaining('retrieved 2026-11-04'), findsOneWidget);
       expect(find.text('Calculation methodology'), findsOneWidget);
+      await tapText(tester, 'Calculation methodology');
+      expect(find.textContaining('Otherwise: population × kg per person per day'), findsOneWidget);
       await tester.ensureVisible(find.text('Edit parameters'));
       expect(find.text('Edit parameters'), findsOneWidget);
     });
@@ -250,6 +256,19 @@ void main() {
       expect(tester.takeException(), isNull);
     });
   }
+
+  testWidgets('a narrow dialog (a window narrowed after opening) keeps a one-line header and room for the content', (WidgetTester tester) async {
+    await pump(tester, sizes[2], seeded);
+    await openDetails(tester);
+    tester.view.physicalSize = const Size(420, 700);
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    // whatever route is on screen, the content area is most of the screen, not squeezed under a tall header
+    final Rect body = tester.getRect(find.byType(SingleChildScrollView).last);
+    expect(body.height, greaterThan(380));
+    expect(find.text('Waste Estimation'), findsOneWidget); // the compact one-line title
+    expect(find.textContaining('Estimated waste generation using documented parameters.'), findsNothing);
+  });
 
   testWidgets('nothing configured: the overview says so and the areas stay Not Configured, no estimate anywhere', (WidgetTester tester) async {
     await pump(tester, sizes[2], empty);

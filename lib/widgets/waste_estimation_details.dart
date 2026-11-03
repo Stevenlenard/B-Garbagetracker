@@ -99,7 +99,7 @@ class _WasteEstimationDetailsState extends State<WasteEstimationDetails> {
       final double pad = wide ? 28 : 16;
       return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: <Widget>[
         if (!widget.fullScreen) _header(wide, pad) else _subtitleBar(pad),
-        Padding(padding: EdgeInsets.fromLTRB(pad, widget.fullScreen ? 4 : 0, pad, 14), child: _tabs(c.maxWidth)),
+        Padding(padding: EdgeInsets.fromLTRB(pad, widget.fullScreen ? 4 : 0, pad, wide ? 14 : 10), child: _tabs(c.maxWidth)),
         const Divider(height: 1, color: _C.border),
         Expanded(
           child: SingleChildScrollView(
@@ -127,24 +127,26 @@ class _WasteEstimationDetailsState extends State<WasteEstimationDetails> {
   }
 
   Widget _header(bool wide, double pad) => Padding(
-        padding: EdgeInsets.fromLTRB(pad, 22, pad - 8, 16),
-        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
+        padding: EdgeInsets.fromLTRB(pad, wide ? 22 : 12, pad - 8, wide ? 16 : 8),
+        child: Row(crossAxisAlignment: wide ? CrossAxisAlignment.start : CrossAxisAlignment.center, children: <Widget>[
           Container(
-            width: 48,
-            height: 48,
-            decoration: BoxDecoration(color: _C.mint, borderRadius: BorderRadius.circular(14)),
-            child: const Icon(Icons.eco_rounded, color: _C.teal, size: 26),
+            width: wide ? 48 : 38,
+            height: wide ? 48 : 38,
+            decoration: BoxDecoration(color: _C.mint, borderRadius: BorderRadius.circular(wide ? 14 : 12)),
+            child: Icon(Icons.eco_rounded, color: _C.teal, size: wide ? 26 : 21),
           ),
-          const SizedBox(width: 14),
+          SizedBox(width: wide ? 14 : 10),
           Expanded(
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
-              Text('Waste Estimation by Collection Area', style: TextStyle(fontSize: wide ? 22 : 18, fontWeight: FontWeight.w900, color: _C.ink, letterSpacing: -0.3)),
-              const SizedBox(height: 3),
-              const Text('Estimated waste generation using documented parameters.', style: TextStyle(fontSize: 13, color: _C.muted, fontWeight: FontWeight.w500)),
-            ]),
+            child: wide
+                ? const Column(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
+                    Text('Waste Estimation by Collection Area', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: _C.ink, letterSpacing: -0.3)),
+                    SizedBox(height: 3),
+                    Text('Estimated waste generation using documented parameters.', style: TextStyle(fontSize: 13, color: _C.muted, fontWeight: FontWeight.w500)),
+                  ])
+                : const Text('Waste Estimation', maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 17, fontWeight: FontWeight.w900, color: _C.ink, letterSpacing: -0.2)),
           ),
-          IconButton(tooltip: 'Edit parameters', onPressed: _edit, icon: const Icon(Icons.tune_rounded, color: _C.muted)),
-          IconButton(tooltip: 'Close', onPressed: widget.onClose, icon: const Icon(Icons.close_rounded, color: _C.muted)),
+          IconButton(tooltip: 'Edit parameters', visualDensity: wide ? null : VisualDensity.compact, onPressed: _edit, icon: const Icon(Icons.tune_rounded, color: _C.muted)),
+          IconButton(tooltip: 'Close', visualDensity: wide ? null : VisualDensity.compact, onPressed: widget.onClose, icon: const Icon(Icons.close_rounded, color: _C.muted)),
         ]),
       );
 
@@ -498,36 +500,68 @@ class _WasteEstimationDetailsState extends State<WasteEstimationDetails> {
     final int usableSizes = d.rows.where((WasteAreaRow r) => d.configOf(r).size.usable).length;
     final int withPopulation = d.rows.where((WasteAreaRow r) => d.configOf(r).hasPopulation).length;
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
-      _Section(Icons.groups_2_outlined, 'Population-based estimation', <Widget>[
-        _Fact('Waste-generation rate', p.hasCapitaRate ? '${p.kgPerCapitaDay} kg per person per day' : 'Not configured'),
-        _Fact('Rate source', p.hasCapitaRate ? p.rateSource : 'None on record'),
-        _Fact('Barangay population', bc.hasPopulation ? '${WasteFormat.m2(bc.population!.toDouble())}${bc.populationYear != null ? ' (${bc.populationYear})' : ''}' : 'Not configured'),
-        _Fact('Population source', bc.hasPopulation ? bc.populationSource : 'None on record'),
-        if (d.whole.breakdown.isNotEmpty) _Fact('Barangay estimate', d.whole.breakdown.join('  '), strong: true),
-      ]),
-      _Section(Icons.square_foot_outlined, 'Area-based estimation (per hectare)', <Widget>[
-        _Fact('Rate', p.hasHectareRate ? '${p.kgPerHectareDay} kg per hectare per day' : 'Not configured'),
-        _Fact('Rate source', p.hasHectareRate ? p.hectareRateSource : 'None on record: no documented per-hectare rate for Balintawak'),
-      ]),
-      _Section(Icons.event_repeat_outlined, 'Seasonal multiplier', <Widget>[
-        _Fact('Value', '×${sm.value.toStringAsFixed(2)}'),
-        _Fact('Applied', sm.applied ? 'Yes (×${sm.effective.toStringAsFixed(2)})' : 'No (neutral, ×1.0)'),
-        _Fact('Evidence on file', sm.validated ? 'Yes' : 'No: not validated'),
-        _Fact('Source and date', sm.source.isEmpty ? 'None on record' : sm.source),
-        if (sm.appliesTo.isNotEmpty) _Fact('Applies to', sm.appliesTo),
-      ]),
-      _Section(Icons.map_outlined, 'Geographic boundary sources', <Widget>[
-        _Fact('Verification status', '$verifiedSizes of ${d.rows.length} sizes verified · $usableSizes with a usable size · $withPopulation with a sourced population'),
-        const _Fact('OpenStreetMap', 'Polygons retrieved ${OsmAreaReference.retrieved}; volunteer-mapped, not an official boundary. Always shown as unverified.'),
-        for (final WasteAreaRow r in d.rows) _Fact(r.name, _boundaryLine(d, r)),
-      ]),
-      const _Section(Icons.functions_rounded, 'Calculation methodology', <Widget>[
-        _Bullet('Measured weight, when a load is attributable to exactly one area, is used as recorded and is not multiplied.'),
-        _Bullet('Otherwise: population × kg per person per day × seasonal multiplier.'),
-        _Bullet('Otherwise: area in hectares × kg per hectare per day × seasonal multiplier.'),
-        _Bullet('Without a sourced input there is no number: nothing is assumed or split from another figure.'),
-        _Bullet('Estimates are waste generated. They are never added to the recorded loads (capacity-equivalent 5,000 kg per FULL event) or to measured weights.'),
-      ]),
+      _Accordion(
+        key: const ValueKey<String>('sec-population'),
+        icon: Icons.groups_2_outlined,
+        title: 'Population-based estimation',
+        summary: d.whole.hasNumber ? '${WasteFormat.kg(d.whole.kgPerDay!)} kg/day for the barangay' : (p.hasCapitaRate ? '${p.kgPerCapitaDay} kg per person per day' : 'Not configured'),
+        initiallyOpen: true,
+        children: <Widget>[
+          _Fact('Waste-generation rate', p.hasCapitaRate ? '${p.kgPerCapitaDay} kg per person per day' : 'Not configured'),
+          _Fact('Rate source', p.hasCapitaRate ? p.rateSource : 'None on record'),
+          _Fact('Barangay population', bc.hasPopulation ? '${WasteFormat.m2(bc.population!.toDouble())}${bc.populationYear != null ? ' (${bc.populationYear})' : ''}' : 'Not configured'),
+          _Fact('Population source', bc.hasPopulation ? bc.populationSource : 'None on record'),
+          if (d.whole.breakdown.isNotEmpty) _Fact('Barangay estimate', d.whole.breakdown.join('  '), strong: true),
+        ],
+      ),
+      _Accordion(
+        key: const ValueKey<String>('sec-hectare'),
+        icon: Icons.square_foot_outlined,
+        title: 'Area-based estimation (per hectare)',
+        summary: p.hasHectareRate ? '${p.kgPerHectareDay} kg per hectare per day' : 'Not configured',
+        children: <Widget>[
+          _Fact('Rate', p.hasHectareRate ? '${p.kgPerHectareDay} kg per hectare per day' : 'Not configured'),
+          _Fact('Rate source', p.hasHectareRate ? p.hectareRateSource : 'None on record: no documented per-hectare rate for Balintawak'),
+        ],
+      ),
+      _Accordion(
+        key: const ValueKey<String>('sec-seasonal'),
+        icon: Icons.event_repeat_outlined,
+        title: 'Seasonal multiplier',
+        summary: sm.applied ? '×${sm.effective.toStringAsFixed(2)} applied' : '×1.0 (neutral, not applied)',
+        children: <Widget>[
+          _Fact('Value', '×${sm.value.toStringAsFixed(2)}'),
+          _Fact('Applied', sm.applied ? 'Yes (×${sm.effective.toStringAsFixed(2)})' : 'No (neutral, ×1.0)'),
+          _Fact('Evidence on file', sm.validated ? 'Yes' : 'No: not validated'),
+          _Fact('Source and date', sm.source.isEmpty ? 'None on record' : sm.source),
+          if (sm.appliesTo.isNotEmpty) _Fact('Applies to', sm.appliesTo),
+        ],
+      ),
+      _Accordion(
+        key: const ValueKey<String>('sec-boundaries'),
+        icon: Icons.map_outlined,
+        title: 'Geographic boundary sources',
+        summary: '$usableSizes of ${d.rows.length} sizes available · $verifiedSizes verified',
+        children: <Widget>[
+          _Fact('Verification status', '$verifiedSizes of ${d.rows.length} sizes verified · $usableSizes with a usable size · $withPopulation with a sourced population'),
+          const _Fact('OpenStreetMap', 'Polygons retrieved ${OsmAreaReference.retrieved}; volunteer-mapped, not an official boundary. Always shown as unverified.'),
+          for (final WasteAreaRow r in d.rows) _Fact(r.name, _boundaryLine(d, r)),
+        ],
+      ),
+      const _Accordion(
+        key: ValueKey<String>('sec-method'),
+        icon: Icons.functions_rounded,
+        title: 'Calculation methodology',
+        summary: 'How an estimate is made',
+        children: <Widget>[
+          _Bullet('Measured weight, when a load is attributable to exactly one area, is used as recorded and is not multiplied.'),
+          _Bullet('Otherwise: population × kg per person per day × seasonal multiplier.'),
+          _Bullet('Otherwise: area in hectares × kg per hectare per day × seasonal multiplier.'),
+          _Bullet('Without a sourced input there is no number: nothing is assumed or split from another figure.'),
+          _Bullet('Estimates are waste generated. They are never added to the recorded loads (capacity-equivalent 5,000 kg per FULL event) or to measured weights.'),
+        ],
+      ),
+      const SizedBox(height: 4),
       Align(
         alignment: Alignment.centerLeft,
         child: FilledButton.icon(
@@ -615,7 +649,7 @@ class _Empty extends StatelessWidget {
       );
 }
 
-class _Fact extends StatelessWidget {
+class _Fact extends StatefulWidget {
   const _Fact(this.label, this.value, {this.strong = false});
 
   final String label;
@@ -623,16 +657,38 @@ class _Fact extends StatelessWidget {
   final bool strong;
 
   @override
-  Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.only(bottom: 6),
-        child: LayoutBuilder(builder: (BuildContext context, BoxConstraints c) {
-          final bool stack = c.maxWidth < 420;
-          final Widget l = Text(label, style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: _C.muted));
-          final Widget v = Text(value, style: TextStyle(fontSize: 13, height: 1.35, fontWeight: strong ? FontWeight.w800 : FontWeight.w600, color: _C.ink));
-          if (stack) return Column(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[l, const SizedBox(height: 1), v]);
-          return Row(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[SizedBox(width: 170, child: l), Expanded(child: v)]);
-        }),
-      );
+  State<_Fact> createState() => _FactState();
+}
+
+class _FactState extends State<_Fact> {
+  static const int _long = 120;
+  bool _more = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final bool isLong = widget.value.length > _long;
+    final Widget l = Text(widget.label, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: _C.muted));
+    final Widget v = Column(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
+      Text(
+        widget.value,
+        maxLines: isLong && !_more ? 3 : null,
+        overflow: isLong && !_more ? TextOverflow.ellipsis : TextOverflow.visible,
+        style: TextStyle(fontSize: 13, height: 1.4, fontWeight: widget.strong ? FontWeight.w800 : FontWeight.w600, color: _C.ink),
+      ),
+      if (isLong)
+        InkWell(
+          onTap: () => setState(() => _more = !_more),
+          child: Padding(padding: const EdgeInsets.only(top: 2, bottom: 2), child: Text(_more ? 'Show less' : 'Show more', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: _C.teal))),
+        ),
+    ]);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: LayoutBuilder(builder: (BuildContext context, BoxConstraints c) {
+        if (c.maxWidth < 460) return Column(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[l, const SizedBox(height: 2), v]);
+        return Row(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[SizedBox(width: 170, child: l), Expanded(child: v)]);
+      }),
+    );
+  }
 }
 
 class _Bullet extends StatelessWidget {
@@ -651,27 +707,51 @@ class _Bullet extends StatelessWidget {
       );
 }
 
-class _Section extends StatelessWidget {
-  const _Section(this.icon, this.title, this.children);
+class _Accordion extends StatefulWidget {
+  const _Accordion({super.key, required this.icon, required this.title, required this.summary, required this.children, this.initiallyOpen = false});
 
   final IconData icon;
   final String title;
+  final String summary;
   final List<Widget> children;
+  final bool initiallyOpen;
+
+  @override
+  State<_Accordion> createState() => _AccordionState();
+}
+
+class _AccordionState extends State<_Accordion> {
+  late bool _open = widget.initiallyOpen;
 
   @override
   Widget build(BuildContext context) => Container(
         width: double.infinity,
-        margin: const EdgeInsets.only(bottom: 14),
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16), border: Border.all(color: _C.border)),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
-          Row(children: <Widget>[
-            Container(width: 32, height: 32, decoration: BoxDecoration(color: _C.mint, borderRadius: BorderRadius.circular(10)), child: Icon(icon, size: 18, color: _C.teal)),
-            const SizedBox(width: 10),
-            Expanded(child: Text(title, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w900, color: _C.ink))),
-          ]),
-          const SizedBox(height: 12),
-          ...children,
+        margin: const EdgeInsets.only(bottom: 10),
+        decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(14), border: Border.all(color: _C.border)),
+        clipBehavior: Clip.antiAlias,
+        child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: <Widget>[
+          InkWell(
+            onTap: () => setState(() => _open = !_open),
+            hoverColor: _C.mintSoft,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+              child: Row(children: <Widget>[
+                Container(width: 34, height: 34, decoration: BoxDecoration(color: _C.mint, borderRadius: BorderRadius.circular(10)), child: Icon(widget.icon, size: 18, color: _C.teal)),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
+                    Text(widget.title, style: const TextStyle(fontSize: 14.5, fontWeight: FontWeight.w900, color: _C.ink)),
+                    if (!_open) Padding(padding: const EdgeInsets.only(top: 2), child: Text(widget.summary, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12, color: _C.muted, fontWeight: FontWeight.w600))),
+                  ]),
+                ),
+                Icon(_open ? Icons.expand_less_rounded : Icons.expand_more_rounded, color: _C.muted),
+              ]),
+            ),
+          ),
+          if (_open) ...<Widget>[
+            const Divider(height: 1, color: _C.border),
+            Padding(padding: const EdgeInsets.fromLTRB(14, 12, 14, 4), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: widget.children)),
+          ],
         ]),
       );
 }
