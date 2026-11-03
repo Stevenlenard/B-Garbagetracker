@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
 import '../models/driver_trip.dart';
+import 'stationary_excursion.dart';
 
 /// Straight-line distance in metres between two coordinates.
 double gpsDistanceM(double lat1, double lng1, double lat2, double lng2) {
@@ -158,14 +159,26 @@ class RoutePointSelection {
 
 /// Collapses stationary GPS wander in an ALREADY RECORDED route, for display and statistics.
 ///
-/// Points that stay within the noise radius of the last anchor keep their time but take the anchor's
-/// position and a speed of 0, so stops keep their duration while the drawn line and the distance no
-/// longer zig-zag. Real movement is untouched.
+/// Two layers, both display-only (the raw fixes are never changed):
+///  * Long stays: the fixes of a stay of 10+ minutes, and the bursts of far-off fixes that scribble around it and come
+///    back ([StationaryExcursions]), take the position of the stay. This is what removes the web of lines and the false
+///    kilometres of a phone that stayed indoors for hours.
+///  * Short stops: points that stay within the noise radius of the last anchor keep their time but take the anchor's
+///    position and a speed of 0, so stops keep their duration while the drawn line and the distance no longer zig-zag.
+///
+/// Real movement is untouched.
 class RouteJitter {
   RouteJitter._();
 
-  static List<GpsPoint> collapse(List<GpsPoint> points) {
-    if (points.length < 2) return points;
+  static List<GpsPoint> collapse(List<GpsPoint> rawPoints) {
+    if (rawPoints.length < 2) return rawPoints;
+    final List<StayAnchor?> stay = StationaryExcursions.anchors(<StayFix>[
+      for (final GpsPoint p in rawPoints) StayFix(p.latitude, p.longitude, p.timestamp.millisecondsSinceEpoch),
+    ]);
+    final List<GpsPoint> points = <GpsPoint>[
+      for (int i = 0; i < rawPoints.length; i++)
+        stay[i] == null ? rawPoints[i] : rawPoints[i].copyWith(latitude: stay[i]!.lat, longitude: stay[i]!.lng, speedKmh: 0.0),
+    ];
     final List<GpsPoint> out = <GpsPoint>[];
     GpsPoint? anchor;
     for (final GpsPoint p in points) {
@@ -187,9 +200,30 @@ class RouteJitter {
   }
 
   /// The same for raw Firebase route points (maps with `lat`/`lng`/`latitude`/`longitude`), already sorted by time.
-  static List<Map> collapseMaps(List<Map> points) {
-    if (points.length < 2) return points;
+  static List<Map> collapseMaps(List<Map> rawPoints) {
+    if (rawPoints.length < 2) return rawPoints;
     double? num_(Object? v) => v is num ? v.toDouble() : double.tryParse('$v');
+    // long stays and the wander around them (see StationaryExcursions); the points without a position or a time are left alone
+    final List<int> at = <int>[];
+    final List<StayFix> fixes = <StayFix>[];
+    for (int i = 0; i < rawPoints.length; i++) {
+      final double? lat = num_(rawPoints[i]['lat'] ?? rawPoints[i]['latitude']);
+      final double? lng = num_(rawPoints[i]['lng'] ?? rawPoints[i]['longitude']);
+      final double? ts = num_(rawPoints[i]['timestamp']);
+      if (lat == null || lng == null || ts == null || ts <= 0) continue;
+      at.add(i);
+      fixes.add(StayFix(lat, lng, ts.toInt()));
+    }
+    final List<Map> points = List<Map>.of(rawPoints);
+    if (fixes.length >= 2) {
+      final List<StayAnchor?> stay = StationaryExcursions.anchors(fixes);
+      for (int k = 0; k < at.length; k++) {
+        final StayAnchor? a = stay[k];
+        if (a != null) {
+          points[at[k]] = <dynamic, dynamic>{...rawPoints[at[k]], 'lat': a.lat, 'lng': a.lng, 'latitude': a.lat, 'longitude': a.lng, 'speed': 0.0};
+        }
+      }
+    }
     final List<Map> out = <Map>[];
     double? aLat, aLng, aAcc;
     for (final Map p in points) {
@@ -208,7 +242,10 @@ class RouteJitter {
         continue;
       }
       final double d = gpsDistanceM(aLat, aLng, lat, lng);
-      if (d < RoutePointPolicy.movementThresholdM(acc, aAcc ?? 0)) {
+      // the same two rules as [collapse]; a receiver speed (km/h) is used when the point carries one
+      final double? kmh = num_(p['speed']);
+      final bool standing = kmh != null && kmh < RoutePointPolicy.standingSpeedMps * 3.6 && d < RoutePointPolicy.standingWanderM;
+      if (standing || d < RoutePointPolicy.movementThresholdM(acc, aAcc ?? 0)) {
         out.add(<dynamic, dynamic>{...p, 'lat': aLat, 'lng': aLng, 'latitude': aLat, 'longitude': aLng, 'speed': 0.0});
       } else {
         out.add(p);

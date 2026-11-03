@@ -98,17 +98,27 @@ class RouteLinkPolicy {
   static List<LinkedFix> link(List<RouteFix> fixes, {bool Function(int i)? exempt}) {
     final List<LinkedFix> out = <LinkedFix>[];
     final List<int> held = <int>[];
+    // When the truck was last seen where the last kept fix is: fixes at the same place are skipped as duplicates (a stop,
+    // the stored stay positions), but they prove the truck was recording there; the time to the next fix is measured from
+    // the latest of them, not from the first, or the first move after a long stop would look like a recording gap.
+    int lastSeenMs = 0;
     for (int i = 0; i < fixes.length; i++) {
       final RouteFix f = fixes[i];
       if (out.isEmpty) {
         out.add(LinkedFix(i, RouteLink.solid));
+        lastSeenMs = f.tsMs;
         continue;
       }
-      final RouteFix prev = fixes[out.last.index];
-      if (distanceM(prev.lat, prev.lng, f.lat, f.lng) < duplicateM) continue;
+      final RouteFix kept = fixes[out.last.index];
+      final RouteFix prev = RouteFix(kept.lat, kept.lng, math.max(kept.tsMs, lastSeenMs), kept.accuracyM);
+      if (distanceM(prev.lat, prev.lng, f.lat, f.lng) < duplicateM) {
+        if (f.tsMs > lastSeenMs) lastSeenMs = f.tsMs;
+        continue;
+      }
       if (exempt != null && exempt(i)) {
         held.clear();
         out.add(LinkedFix(i, RouteLink.solid));
+        lastSeenMs = f.tsMs;
         continue;
       }
       final RouteLink k = _between(prev, f);
@@ -119,12 +129,14 @@ class RouteLinkPolicy {
           for (final int j in held.skip(1)) {
             out.add(LinkedFix(j, RouteLink.solid));
           }
+          lastSeenMs = fixes[held.last].tsMs;
           held.clear();
         }
         continue;
       }
       held.clear();
       out.add(LinkedFix(i, k));
+      lastSeenMs = f.tsMs;
     }
     return out;
   }

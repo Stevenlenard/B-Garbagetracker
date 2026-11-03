@@ -252,4 +252,23 @@ void main() {
       expect((await q.pendingFor('trip-1')).map((e) => e.key), <String>['a', 'c']);
     });
   });
+
+  group('a long stop is not a recording gap', () {
+    test('the first move after a 10 minute stop (heartbeats at the same place) is joined solid, no dashed link', () {
+      final List<Map> stop = <Map>[
+        for (int s = 120; s <= 720; s += 60) <String, Object?>{'lat': lat0 + 8 * 120 * mLat, 'lng': lng0, 'timestamp': t0 + s * 1000, 'accuracy': 8, 'color': 'GREEN'},
+      ];
+      final List<Map> after = drive(723, 760, startNorthM: 8 * 120 + 110); // 110 m on, the first fix after the stop
+      final List<Map<String, dynamic>> f = RouteGeometry.lineFeatures(<Map>[...drive(0, 117), ...stop, ...after]);
+      expect(links(f), isEmpty);
+      expect(solid(f), hasLength(1));
+    });
+
+    test('the same for the saved history', () {
+      GpsPoint gp(int s, double northM) => GpsPoint(latitude: lat0 + northM * mLat, longitude: lng0, accuracyM: 8, speedKmh: 0, timestamp: DateTime.fromMillisecondsSinceEpoch(t0 + s * 1000));
+      final List<GpsPoint> pts = <GpsPoint>[for (int s = 0; s <= 120; s += 3) gp(s, 8.0 * s), for (int s = 180; s <= 720; s += 60) gp(s, 960), gp(723, 1070), gp(726, 1094)];
+      final List<GpsPoint> r = DriverRouteHistoryService.smoothForDisplay(pts);
+      expect(r.where((p) => p.uncertainLink || p.isGapStart), isEmpty);
+    });
+  });
 }
