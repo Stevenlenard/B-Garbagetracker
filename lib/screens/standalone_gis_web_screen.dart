@@ -18,6 +18,7 @@ import '../utils/app_theme.dart';
 import '../utils/fleet_status.dart';
 import '../api/api_service.dart';
 import '../widgets/fade_slide_entrance.dart';
+import '../services/route_points_feed.dart';
 import '../services/truck_locations_feed.dart';
 import '../utils/marker_labels.dart';
 import '../utils/truck_identity.dart';
@@ -132,7 +133,9 @@ class _StandaloneGisWebScreenState extends State<StandaloneGisWebScreen> with Ti
 
     _initFirebase();
     _syncPhpLocations();
-    _phpSyncTimer = Timer.periodic(const Duration(seconds: 8), (_) => _syncPhpLocations());
+    // The MySQL positions (get_locations.php) are read once. Polling them every few seconds was pointless: the server has no
+    // truck_locations table (the call answers with an error and an empty list) and each answer still re-processed every
+    // truck and redrew the markers and routes. Live positions come from Firebase.
     // Freshness changes without any event (a crashed driver writes nothing).
     _fleetAgingTimer = Timer.periodic(const Duration(seconds: 15), (_) => _reprocessTruckData());
   }
@@ -154,7 +157,7 @@ class _StandaloneGisWebScreenState extends State<StandaloneGisWebScreen> with Ti
 
   @override
   void dispose() {
-    for (final StreamSubscription<DatabaseEvent> sub in _webRouteSubs.values) {
+    for (final RoutePointsSubscription sub in _webRouteSubs.values) {
       sub.cancel();
     }
     _truckLocationsSubscription?.cancel();
@@ -587,7 +590,7 @@ class _StandaloneGisWebScreenState extends State<StandaloneGisWebScreen> with Ti
 
 
   // --- live route lines (what each truck has passed), same source of truth as the admin map ---
-  final Map<String, StreamSubscription<DatabaseEvent>> _webRouteSubs = <String, StreamSubscription<DatabaseEvent>>{};
+  final Map<String, RoutePointsSubscription> _webRouteSubs = <String, RoutePointsSubscription>{};
   final Map<String, String> _webRouteSession = <String, String>{};
   final Map<String, List<Map<dynamic, dynamic>>> _webRoutePts = <String, List<Map<dynamic, dynamic>>>{};
 
@@ -602,13 +605,8 @@ class _StandaloneGisWebScreenState extends State<StandaloneGisWebScreen> with Ti
       _webRouteSubs.remove(tid)?.cancel();
       _webRoutePts.remove(tid);
       _webRouteSession[tid] = sid;
-      _webRouteSubs[tid] = FirebaseDatabase.instance.ref('driver_routes/$sid/route').onValue.listen((DatabaseEvent e) {
-        final Object? v = e.snapshot.value;
-        if (v is! Map) return;
-        final List<Map<dynamic, dynamic>> pts = <Map<dynamic, dynamic>>[
-          for (final Object? p in v.values)
-            if (p is Map) Map<dynamic, dynamic>.from(p)
-        ]..sort((a, b) => ((a['timestamp'] ?? 0) as num).compareTo((b['timestamp'] ?? 0) as num));
+      _webRouteSubs[tid] = RoutePointsFeed.listen(FirebaseDatabase.instance.ref('driver_routes/$sid/route'), (List<Map> pts) {
+        if (_webRouteSession[tid] != sid) return;
         _webRoutePts[tid] = RouteJitter.collapseMaps(pts).cast<Map<dynamic, dynamic>>();
         _drawWebRoutes();
       });

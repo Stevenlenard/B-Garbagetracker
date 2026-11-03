@@ -6,6 +6,7 @@ import '../services/rtdb_port.dart';
 import '../services/notification_inbox.dart';
 import '../utils/relative_time.dart';
 import '../utils/complaint_flow.dart';
+import '../widgets/clock_text.dart';
 import '../utils/area_eta.dart';
 import '../utils/fleet_status.dart';
 import 'dart:async';
@@ -70,7 +71,7 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
   int _complaintsRefreshCount = 0;
   String? _targetComplaintId;
   bool _shouldShowDataManagement = false;
-  String _etaText = "--";
+  final ValueNotifier<String> _etaText = ValueNotifier<String>("--"); // the countdown rebuilds only its card
 
   // Live countdown: each new estimate (every truck update) re-anchors it, so it runs faster or slower with the
   // truck's real speed and distance; between updates it ticks down every second.
@@ -96,7 +97,7 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
     _etaTargetMs = target;
     _etaTicker ??= Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted || _etaTargetMs == null) return;
-      setState(() => _etaText = _countdownLabel());
+      _etaText.value = _countdownLabel();
     });
   }
 
@@ -106,7 +107,7 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
     if (left <= 30) return mmss;
     return _etaTrend == 'faster' ? '~$mmss ↓' : (_etaTrend == 'slower' ? '~$mmss ↑' : '~$mmss');
   }
-  String _currentTime = "";
+  final ValueNotifier<String> _currentTime = ValueNotifier<String>(""); // rebuilds only the clock widgets
   Timer? _clockTimer;
   Future<Response>? _complaintsFuture;
   final ScrollController _scrollController = ScrollController();
@@ -184,6 +185,8 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
     _notificationSubscription?.cancel();
     _totalTruckSubscription?.cancel();
     _userRealtimeSubscription?.cancel();
+    _currentTime.dispose();
+    _etaText.dispose();
     _circleController.dispose();
     _refreshRotationController.dispose();
     _scrollController.dispose();
@@ -215,7 +218,7 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
 
   void _updateTime() {
     final String time = DateFormat('hh:mm:ss a').format(DateTime.now());
-    if (mounted && _currentTime != time) setState(() => _currentTime = time);
+    if (mounted && _currentTime.value != time) _currentTime.value = time;
   }
 
   Future<void> _refreshAllStats({bool manual = false}) async {
@@ -519,7 +522,8 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
         final String etaDisplay = activeCount == 0
             ? "--"
             : (_etaTargetMs != null ? _countdownLabel() : (other != null ? "Next: ${other.area}" : "ETA unavailable"));
-        if (mounted) setState(() { _activeTrucks = activeCount; _etaText = etaDisplay; });
+        _etaText.value = etaDisplay;
+        if (mounted) setState(() { _activeTrucks = activeCount; });
         if (telemetryClock != null) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
             TrackingTelemetry.onFleetRendered(source: 'resident_cards', ms: telemetryClock.elapsedMilliseconds);
@@ -529,7 +533,8 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
     } else if (mounted) {
       // No truck data at all: clear the count instead of leaving a stale value.
       _anchorEta(null);
-      setState(() { _activeTrucks = 0; _etaText = "--"; });
+      _etaText.value = "--";
+      setState(() { _activeTrucks = 0; });
     }
   }
 
@@ -909,7 +914,7 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
                   children: [
                     const Icon(Icons.access_time_filled_rounded, color: Color(0xFF00796B), size: 18),
                     const SizedBox(width: 12),
-                    Text(_currentTime, style: const TextStyle(color: Color(0xFF00796B), fontSize: 16, fontWeight: FontWeight.w900, fontFamily: 'monospace')),
+                    ClockText(_currentTime, style: const TextStyle(color: Color(0xFF00796B), fontSize: 16, fontWeight: FontWeight.w900, fontFamily: 'monospace')),
                   ],
                 ),
               ),
@@ -1099,11 +1104,14 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
                                         ),
                                         const SizedBox(width: 20),
                                         Expanded(
-                                          child: _buildStatCard(
-                                            "Estimated Time",
-                                            _etaText,
-                                            Icons.access_time_filled_rounded,
-                                            AppColors.statEtaBg,
+                                          child: ValueListenableBuilder<String>(
+                                            valueListenable: _etaText,
+                                            builder: (BuildContext _, String eta, Widget? __) => _buildStatCard(
+                                              "Estimated Time",
+                                              eta,
+                                              Icons.access_time_filled_rounded,
+                                              AppColors.statEtaBg,
+                                            ),
                                           ),
                                         ),
                                       ],
@@ -1177,7 +1185,7 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
                       child: Row(children: [
                         Expanded(child: _buildStatCard("Active Trucks", "$_activeTrucks / $_totalTrucks", Icons.local_shipping_rounded, AppColors.statActiveBg, isLive: true)),
                         const SizedBox(width: 12),
-                        Expanded(child: _buildStatCard("Estimated Time", _etaText, Icons.access_time_filled_rounded, AppColors.statEtaBg))
+                        Expanded(child: ValueListenableBuilder<String>(valueListenable: _etaText, builder: (BuildContext _, String eta, Widget? __) => _buildStatCard("Estimated Time", eta, Icons.access_time_filled_rounded, AppColors.statEtaBg)))
                       ])),
                   const SizedBox(height: 16),
                   _buildMapCard(),
@@ -1582,7 +1590,7 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
                             borderRadius: BorderRadius.circular(isMobile ? 10 : 14),
                           ),
                           child: Center(
-                            child: Text(
+                            child: ClockText(
                               _currentTime,
                               style: TextStyle(
                                 color: Colors.white,

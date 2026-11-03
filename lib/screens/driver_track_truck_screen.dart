@@ -15,6 +15,7 @@ import '../utils/app_theme.dart';
 import '../utils/session_manager.dart';
 import '../models/user.dart';
 import '../widgets/fade_slide_entrance.dart';
+import '../services/route_points_feed.dart';
 import '../services/truck_assignment_service.dart';
 import '../services/truck_locations_feed.dart';
 import '../utils/gps_quality.dart';
@@ -87,6 +88,8 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> with Ti
   StreamSubscription? _truckSubscription;
   StreamSubscription? _userSubscription;
   StreamSubscription? _routeSubscription;
+  RoutePointsSubscription? _routeFeed;
+  List<StreamSubscription<DatabaseEvent>> _tripFieldSubs = <StreamSubscription<DatabaseEvent>>[];
   StreamSubscription? _routeMetaSubscription;
   StreamSubscription? _localGpsSubscription;
   StreamSubscription? _optimizedRouteSubscription;
@@ -324,9 +327,8 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> with Ti
 
   void _updateTime() {
     final String time = DateFormat('hh:mm:ss a').format(DateTime.now());
-    if (mounted && _currentTime != time) {
-      setState(() => _currentTime = time);
-    }
+    // not displayed on this screen: no rebuild (it used to call setState on the whole screen twice a second)
+    _currentTime = time;
   }
 
   @override
@@ -400,6 +402,10 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> with Ti
     _userSubscription?.cancel();
     _truckMetaSubscription?.cancel();
     _routeSubscription?.cancel();
+    _routeFeed?.cancel();
+    for (final StreamSubscription<DatabaseEvent> s in _tripFieldSubs) {
+      s.cancel();
+    }
     _optimizedRouteSubscription?.cancel();
     _routeMetaSubscription?.cancel();
     _localGpsSubscription?.cancel();
@@ -497,51 +503,63 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> with Ti
   void _listenToRoute() {
     if (widget.currentSessionId == null) return;
     _routeSubscription?.cancel();
-    _routeSubscription = _database.ref('driver_routes/${widget.currentSessionId}').onValue.listen((event) {
-      if (widget.testRoute != null) return; 
-      if (event.snapshot.exists && event.snapshot.value != null) {
-        final Map data = event.snapshot.value as Map;
-        _lastSessionData = data;
-
-        if (mounted) {
-          setState(() {
-            if (data['start_time'] != null) _startTime = data['start_time'];
-            if (data['final_distance'] != null) {
-              _distance = (data['final_distance'] as num).toDouble();
-            } else if (data['total_distance'] != null) {
-              _distance = (data['total_distance'] as num).toDouble();
-            }
-          });
+    // The trip is followed by its parts, not by one listener on the whole trip: that handed the app the entire route
+    // again (hundreds of points) with every new point. The route comes by its changes (RoutePointsFeed), the fixed fields
+    // of the trip are read once and only the figures that change are listened to.
+    final DatabaseReference tripRef = _database.ref('driver_routes/${widget.currentSessionId}');
+    final String sessionId = widget.currentSessionId!;
+    void applyTrip(Map<String, Object?> fields) {
+      if (widget.testRoute != null || !mounted || widget.currentSessionId != sessionId) return;
+      final Map<String, Object?> data = <String, Object?>{...?(_lastSessionData?.cast<String, Object?>()), ...fields};
+      _lastSessionData = data;
+      setState(() {
+        if (data['start_time'] != null) _startTime = data['start_time'].toString();
+        if (data['final_distance'] is num) {
+          _distance = (data['final_distance'] as num).toDouble();
+        } else if (data['total_distance'] is num) {
+          _distance = (data['total_distance'] as num).toDouble();
         }
+      });
+      if (_managersReady) _updateSpecialMarkers(data);
+    }
 
-        if (data['route'] != null) {
-          final Map routeData = data['route'] as Map;
-          final List<Map> points = [];
-          routeData.forEach((key, value) => points.add(value as Map));
-          
-          points.sort((a, b) => (a['timestamp'] ?? 0).compareTo(b['timestamp'] ?? 0));
-          final List<Map> settledPoints = RouteJitter.collapseMaps(points);
-          points
-            ..clear()
-            ..addAll(settledPoints);
-          
-          if (mounted && points.isNotEmpty) {
-            if (points.length != _lastPoints.length) {
-              _updateRoutePolyline(points);
-              
-              if (widget.isHistorical && _lastPoints.isEmpty) {
-                _fitHistoricalRoute(points);
-              }
-            }
-            
-            // PRIORITY: Use Firebase route points for historical polyline rendering,
-            // but NEVER overwrite the current Driver marker with potentially stale Firebase data.
-            // Local GPS stream handles real-time marker movement for minimal delay.
-            
-            _lastPoints = points;
+    const List<String> fixedFields = <String>[
+      'start_time', 'start_lat', 'start_lng', 'start_latitude', 'start_longitude', 'server_start_time', 'timestamp', 'truck_id', 'is_simulation',
+    ];
+    Future.wait<DataSnapshot>(<Future<DataSnapshot>>[for (final String f in fixedFields) tripRef.child(f).get()]).then((List<DataSnapshot> snaps) {
+      final Map<String, Object?> fields = <String, Object?>{
+        for (int i = 0; i < fixedFields.length; i++)
+          if (snaps[i].value != null) fixedFields[i]: snaps[i].value,
+      };
+      if (fields.isNotEmpty) applyTrip(fields);
+    }).catchError((Object _) {});
+    for (final StreamSubscription<DatabaseEvent> old in _tripFieldSubs) {
+      old.cancel();
+    }
+    _tripFieldSubs = <StreamSubscription<DatabaseEvent>>[
+      for (final String f in <String>['total_distance', 'final_distance', 'finish_lat', 'finish_lng', 'start_time'])
+        tripRef.child(f).onValue.listen((DatabaseEvent e) {
+          if (e.snapshot.value != null) applyTrip(<String, Object?>{f: e.snapshot.value});
+        }, onError: (Object _) {}),
+    ];
+
+    _routeFeed?.cancel();
+    _routeFeed = RoutePointsFeed.listen(tripRef.child('route'), (List<Map> raw) {
+      if (widget.testRoute != null || !mounted || widget.currentSessionId != sessionId) return;
+      final List<Map> points = RouteJitter.collapseMaps(raw);
+      if (points.isNotEmpty) {
+        if (points.length != _lastPoints.length) {
+          _updateRoutePolyline(points);
+
+          if (widget.isHistorical && _lastPoints.isEmpty) {
+            _fitHistoricalRoute(points);
           }
         }
-        if (_managersReady) _updateSpecialMarkers(data);
+
+        // PRIORITY: Use Firebase route points for historical polyline rendering,
+        // but NEVER overwrite the current Driver marker with potentially stale Firebase data.
+        // Local GPS stream handles real-time marker movement for minimal delay.
+        _lastPoints = points;
       }
     });
 

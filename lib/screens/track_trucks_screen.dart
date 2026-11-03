@@ -24,6 +24,7 @@ import '../widgets/fade_slide_entrance.dart';
 import '../utils/custom_notification.dart';
 import '../utils/eta_evaluation.dart';
 import '../utils/trip_eta.dart';
+import '../services/route_points_feed.dart';
 import '../utils/fleet_status.dart';
 import '../services/truck_assignment_service.dart';
 import '../api/api_service.dart';
@@ -70,7 +71,7 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> with TickerProvid
   String _lastFleetSig = '';
   final ApiService _apiService = ApiService();
 
-  final Map<String, StreamSubscription> _sharedRouteSubscriptions = {};
+  final Map<String, RoutePointsSubscription> _sharedRouteSubscriptions = {};
   final Map<String, String> _truckPlates = {}; // Cache for plate numbers
   final Map<String, String> _driverCurrentTrucks = {}; // driverId -> truckId
   final Map<String, String> _userNamesById = {}; // userId -> official name
@@ -280,7 +281,9 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> with TickerProvid
     _listenToTruckMeta();
     _listenToUsers();
     _syncPhpLocations();
-    _phpSyncTimer = Timer.periodic(const Duration(seconds: 3), (_) => _syncPhpLocations());
+    // The MySQL positions (get_locations.php) are read once. Polling them every few seconds was pointless: the server has no
+    // truck_locations table (the call answers with an error and an empty list) and each answer still re-processed every
+    // truck and redrew the markers and routes. Live positions come from Firebase.
     // Freshness changes without any event (a crashed driver writes nothing).
     _fleetAgingTimer = Timer.periodic(const Duration(seconds: 15), (_) => _processMergedTrucks());
     _refreshRotationController = AnimationController(
@@ -1402,23 +1405,14 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> with TickerProvid
 
       if (session.isNotEmpty && !_sharedRouteSubscriptions.containsKey(tid)) {
         _routeSessionByTruck[tid] = session;
-        _sharedRouteSubscriptions[tid] = _database.ref('driver_routes/$session/route').onValue.listen((event) {
-          if (event.snapshot.exists && event.snapshot.value is Map) {
-            final Map rawPoints = event.snapshot.value as Map;
-            final List<Map<dynamic, dynamic>> pointsList = [];
-            rawPoints.forEach((k, v) {
-              if (v is Map) pointsList.add(Map<dynamic, dynamic>.from(v));
-            });
-            pointsList.sort((a, b) => (a['timestamp'] ?? 0).compareTo(b['timestamp'] ?? 0));
-
-            if (mounted) {
-              setState(() {
-                _lastRoutePoints[tid] = RouteJitter.collapseMaps(pointsList).cast<Map<dynamic, dynamic>>();
-                _visiblePaths.add(tid);
-              });
-              _refreshLiveRouteLines();
-            }
-          }
+        // followed by its changes (RoutePointsFeed), not by re-reading the whole route for every new point
+        _sharedRouteSubscriptions[tid] = RoutePointsFeed.listen(_database.ref('driver_routes/$session/route'), (List<Map> pointsList) {
+          if (!mounted || _routeSessionByTruck[tid] != session) return;
+          setState(() {
+            _lastRoutePoints[tid] = RouteJitter.collapseMaps(pointsList).cast<Map<dynamic, dynamic>>();
+            _visiblePaths.add(tid);
+          });
+          _refreshLiveRouteLines();
         });
       }
     }

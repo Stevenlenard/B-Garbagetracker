@@ -20,6 +20,7 @@ import '../utils/trip_eta.dart';
 import '../utils/trip_activity_log.dart';
 import '../utils/collection_visits.dart';
 import '../services/service_area_service.dart';
+import '../services/route_points_feed.dart';
 import '../utils/fleet_status.dart';
 import 'package:intl/intl.dart';
 import '../utils/tracking_telemetry.dart';
@@ -63,7 +64,7 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
   geo.Position? _residentPosition;
   final DraggableScrollableController _sheetController = DraggableScrollableController();
 
-  final Map<String, StreamSubscription> _routeSubscriptions = {};
+  final Map<String, RoutePointsSubscription> _routeSubscriptions = {};
   final Map<String, StreamSubscription> _tripMetaSubscriptions = {}; // start point of the bound trip
   final Map<String, String> _routeSessionByTruck = {}; // trip each route line is bound to
   final Map<String, Position?> _sessionStartPoints = {};
@@ -121,7 +122,9 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
     _listenToTrucks();
     _getResidentLocation();
     _syncPhpLocations();
-    _phpSyncTimer = Timer.periodic(const Duration(seconds: 8), (_) => _syncPhpLocations());
+    // The MySQL positions (get_locations.php) are read once. Polling them every few seconds was pointless: the server has no
+    // truck_locations table (the call answers with an error and an empty list) and each answer still re-processed every
+    // truck and redrew the markers and routes. Live positions come from Firebase.
     // Freshness changes without any event (a crashed driver writes nothing).
     _fleetAgingTimer = Timer.periodic(const Duration(seconds: 15), (_) {
       if (mounted) _processMergedTrucks();
@@ -276,20 +279,21 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
     // 120 ms ticks (was 35 ms with a whole-screen setState). Step sizes are scaled
     // so the pulse period is unchanged; the values are only read by the map style
     // layers, so no widget rebuild is needed.
-    _pulseTimer = Timer.periodic(const Duration(milliseconds: 120), (timer) {
+    // 250 ms ticks (was 120 ms): the same pulse, half the style updates (each one is a platform call per layer)
+    _pulseTimer = Timer.periodic(const Duration(milliseconds: 250), (timer) {
       if (!mounted || mapboxMap == null) return;
 
       // Pulse 1
-      _pulseRadius += 2.0;
-      _pulseOpacity -= 0.05;
+      _pulseRadius += 4.2;
+      _pulseOpacity -= 0.105;
       if (_pulseRadius >= 28.0) {
         _pulseRadius = 8.0;
         _pulseOpacity = 0.6;
       }
 
       // Pulse 2 (offset)
-      _pulseRadius2 += 2.0;
-      _pulseOpacity2 -= 0.05;
+      _pulseRadius2 += 4.2;
+      _pulseOpacity2 -= 0.105;
       if (_pulseRadius2 >= 28.0) {
         _pulseRadius2 = 8.0;
         _pulseOpacity2 = 0.4;
@@ -660,35 +664,29 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
     _routeSubscriptions[truckId]?.cancel();
     _tripMetaSubscriptions.remove(truckId)?.cancel();
     _routeSessionByTruck[truckId] = sessionId;
-    _routeSubscriptions[truckId] = _database.ref('driver_routes/$sessionId/route').onValue.listen((event) {
-      if (event.snapshot.exists && event.snapshot.value != null) {
-        final Map data = event.snapshot.value as Map;
-        final List<Map> points = [];
-        data.forEach((key, value) => points.add(value as Map));
-        points.sort((a, b) => (a['timestamp'] ?? 0).compareTo(b['timestamp'] ?? 0));
+    // The points are followed by their changes (RoutePointsFeed) instead of re-reading the whole route for every new
+    // point; the list handed over is the same time-sorted list as before.
+    _routeSubscriptions[truckId] = RoutePointsFeed.listen(_database.ref('driver_routes/$sessionId/route'), (List<Map> points) {
+      if (!mounted || _routeSessionByTruck[truckId] != sessionId) return;
+      _lastRoutePoints[truckId] = RouteJitter.collapseMaps(points);
 
-        _lastRoutePoints[truckId] = RouteJitter.collapseMaps(points);
+      // A truck's live route is shown as soon as it exists (what it has passed); the card can still hide it.
+      if (_autoShownRoutes.add(truckId)) _comparingTrucks.add(truckId);
 
-        // A truck's live route is shown as soon as it exists (what it has passed); the card can still hide it.
-        if (_autoShownRoutes.add(truckId)) _comparingTrucks.add(truckId);
-
-        if (_comparingTrucks.contains(truckId)) {
-          _updateRoutePolyline(truckId, points);
-        }
+      if (_comparingTrucks.contains(truckId)) {
+        _updateRoutePolyline(truckId, points);
       }
     });
 
-    _tripMetaSubscriptions[truckId] = _database.ref('driver_routes/$sessionId').onValue.listen((event) {
-      if (event.snapshot.exists && event.snapshot.value != null) {
-        final Map data = event.snapshot.value as Map;
-        if (data['start_lat'] != null && data['start_lng'] != null) {
-          if (mounted) {
-            setState(() => _sessionStartPoints[truckId] = Position(data['start_lng'], data['start_lat']));
-            _updateTruckMarkers();
-          }
-        }
+    // The start of the trip never changes: read once (it used to listen to the whole trip, route included).
+    final DatabaseReference tripRef = _database.ref('driver_routes/$sessionId');
+    Future.wait<DataSnapshot>(<Future<DataSnapshot>>[tripRef.child('start_lat').get(), tripRef.child('start_lng').get()]).then((List<DataSnapshot> s) {
+      final Object? lat = s[0].value, lng = s[1].value;
+      if (lat is num && lng is num && mounted && _routeSessionByTruck[truckId] == sessionId) {
+        setState(() => _sessionStartPoints[truckId] = Position(lng.toDouble(), lat.toDouble()));
+        _updateTruckMarkers();
       }
-    });
+    }).catchError((Object _) {});
   }
 
   void _clearTruckRoute(String truckId) async {

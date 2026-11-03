@@ -1440,10 +1440,16 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     if (_sessionId == null) {
       return;
     }
+    // Read ONCE when the trip is opened or resumed (to know where it was last recorded). It used to be a live listener on
+    // the whole route: every point this phone wrote handed the app the entire route again, was sorted, and rebuilt this
+    // whole screen, more and more slowly as the trip grew. The points recorded afterwards are known here already.
     _routePointsSubscription?.cancel();
-    _routePointsSubscription = _database.ref('driver_routes/$_sessionId/route').onValue.listen((event) {
-      if (event.snapshot.exists && event.snapshot.value != null) {
-        final Map data = event.snapshot.value as Map;
+    _routePointsSubscription = null;
+    final String tripId = _sessionId!;
+    _database.ref('driver_routes/$tripId/route').get().then((DataSnapshot snap) {
+      if (_sessionId != tripId) return;
+      if (snap.exists && snap.value != null) {
+        final Map data = snap.value as Map;
         final List<Map> list = [];
         data.forEach((k, v) => list.add(v as Map));
         list.sort((a, b) => ((a['timestamp'] ?? 0) as num).compareTo((b['timestamp'] ?? 0) as num));
@@ -1476,6 +1482,8 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
           });
         }
       }
+    }).catchError((Object e) {
+      debugPrint("[LIFECYCLE] could not read the recorded route points: $e");
     });
   }
 

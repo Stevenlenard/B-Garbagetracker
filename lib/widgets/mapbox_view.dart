@@ -73,18 +73,19 @@ class _MapboxViewState extends State<MapboxView> {
     // 120 ms ticks (was 35 ms). Step sizes are scaled so the pulse period is
     // unchanged. The pulse values are only read by the map style layers, so no
     // widget rebuild (setState) is needed per tick.
-    _pulseTimer = Timer.periodic(const Duration(milliseconds: 120), (timer) {
+    // 250 ms ticks (was 120 ms): the same pulse, half the style updates (each one is a platform call per layer)
+    _pulseTimer = Timer.periodic(const Duration(milliseconds: 250), (timer) {
       if (!mounted || _map == null) return;
 
-      _pulseRadius += 2.0;
-      _pulseOpacity -= 0.05;
+      _pulseRadius += 4.2;
+      _pulseOpacity -= 0.105;
       if (_pulseRadius >= 28.0) {
         _pulseRadius = 8.0;
         _pulseOpacity = 0.6;
       }
 
-      _pulseRadius2 += 2.0;
-      _pulseOpacity2 -= 0.05;
+      _pulseRadius2 += 4.2;
+      _pulseOpacity2 -= 0.105;
       if (_pulseRadius2 >= 28.0) {
         _pulseRadius2 = 8.0;
         _pulseOpacity2 = 0.4;
@@ -94,8 +95,8 @@ class _MapboxViewState extends State<MapboxView> {
       }
 
       // Resident Pulse
-      _resPulseRadius += 1.7;
-      _resPulseOpacity -= 0.04;
+      _resPulseRadius += 3.5;
+      _resPulseOpacity -= 0.083;
       if (_resPulseRadius >= 24.0) {
         _resPulseRadius = 8.0;
         _resPulseOpacity = 0.5;

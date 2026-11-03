@@ -3,6 +3,7 @@ import '../utils/route_history_navigation.dart';
 import '../utils/trip_links.dart';
 import '../utils/eta_evaluation.dart';
 import '../utils/verified_eta.dart';
+import '../services/route_points_feed.dart';
 import '../services/eta_model_sync.dart';
 import '../utils/predictive_models.dart';
 import '../utils/analytics_report_data.dart';
@@ -153,7 +154,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
 
   StreamSubscription? _trucksSubscription;
   Timer? _fleetAgingTimer;
-  StreamSubscription? _routesSubscription;
+  RoutePointsSubscription? _routesSubscription;
   StreamSubscription? _progressSubscription;
   StreamSubscription? _weeklyProgressSubscription;
   StreamSubscription? _truckIssuesSubscription;
@@ -1547,9 +1548,12 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
     _fleetAgingTimer?.cancel();
     _fleetAgingTimer = Timer.periodic(const Duration(seconds: 15), (_) => _updateTruckStatusData());
 
-    _routesSubscription = _database.ref('driver_routes').onValue.listen((event) {
-      if (event.snapshot.exists && event.snapshot.value != null) {
-        _allDriverRoutes = event.snapshot.value as Map;
+    // Analytics needs every recorded trip (the arrival regression is fitted on all of them), but not a fresh copy of all
+    // of them with every route point a driver records: the trips are followed by their changes and everything is
+    // recomputed at most once every 15 seconds.
+    _routesSubscription = ChildrenFeed.listen(_database.ref('driver_routes'), (Map<dynamic, dynamic> routes) {
+      if (routes.isNotEmpty) {
+        _allDriverRoutes = routes;
         _etaClosedTripIds = VerifiedEta.closedTripIds(_allDriverRoutes);
         _etaRoutes = _allDriverRoutes;
         _refreshEtaVisits();
@@ -1575,7 +1579,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
         }
         _lastFinalizedRouteCount = finalized;
       }
-    });
+    }, minGap: const Duration(seconds: 15));
 
     _progressSubscription = _database.ref('collection_progress').onValue.listen((event) {
       if (event.snapshot.exists && event.snapshot.value != null) {

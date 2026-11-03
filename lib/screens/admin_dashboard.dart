@@ -1,3 +1,4 @@
+import '../widgets/clock_text.dart';
 import '../services/collection_schedule_service.dart';
 import '../widgets/period_selector.dart';
 import '../utils/rtdb_map.dart';
@@ -56,6 +57,8 @@ import '../utils/route_persistence_manager.dart';
 import '../utils/app_localizations.dart';
 import '../utils/responsive_text.dart';
 import '../models/user.dart';
+import '../services/route_points_feed.dart';
+import '../utils/history_playback.dart';
 import '../services/truck_locations_feed.dart';
 import 'collection_route_optimization_screen.dart';
 
@@ -126,7 +129,7 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
   late AnimationController _refreshRotationController;
   UserData? _user;
   StreamSubscription? _userSubscription;
-  String _currentTime = "";
+  final ValueNotifier<String> _currentTime = ValueNotifier<String>(""); // rebuilds only the clock widgets
   Timer? _clockTimer;
 
   final Map<String, String> _truckPlates = {}; // Cache for plate numbers
@@ -228,11 +231,7 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
 
   void _updateTime() {
     final String time = DateFormat('hh:mm:ss a').format(DateTime.now());
-    if (mounted && _currentTime != time) {
-      setState(() {
-        _currentTime = time;
-      });
-    }
+    if (mounted && _currentTime.value != time) _currentTime.value = time;
   }
 
   /// A tapped phone notification shows the dashboard's Home tab.
@@ -246,12 +245,14 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
     _circleController.dispose();
     _refreshRotationController.dispose();
     _clockTimer?.cancel();
+    _currentTime.dispose();
     _scheduleSub?.cancel();
     _userSubscription?.cancel();
     _usersPresenceSubscription?.cancel();
     _fleetAgingTimer?.cancel();
     _truckLocationsSubscription?.cancel();
     _trucksMetaSubscription?.cancel();
+    _coverageTripsFeed?.cancel();
     _scrollController.dispose();
     super.dispose();
   }
@@ -613,10 +614,7 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
       _schedules = s;
       _updateRouteCoverage();
     }, onError: (Object _) {});
-    _database.ref('driver_routes').onValue.listen((event) {
-      _coverageTrips = (event.snapshot.exists && event.snapshot.value is Map) ? event.snapshot.value as Map : const <dynamic, dynamic>{};
-      _updateRouteCoverage();
-    });
+    _watchCoverageTrips();
 
     // Complaint counts come ONLY from the MySQL complaints table (get_complaints.php), the same
     // data the Complaint Management screen shows. The legacy Firebase `complaints` node is not
@@ -1612,7 +1610,7 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
                                 borderRadius: BorderRadius.circular(isMobile ? 10 : 14),
                               ),
                               child: Center(
-                                child: Text(
+                                child: ClockText(
                                   _currentTime,
                                   style: TextStyle(
                                     color: Colors.white,
@@ -1872,7 +1870,7 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
                   children: [
                     const Icon(Icons.access_time_filled_rounded, color: Color(0xFF00796B), size: 18),
                     const SizedBox(width: 12),
-                    Text(_currentTime, style: const TextStyle(color: Color(0xFF00796B), fontSize: 16, fontWeight: FontWeight.w900, fontFamily: 'monospace')),
+                    ClockText(_currentTime, style: const TextStyle(color: Color(0xFF00796B), fontSize: 16, fontWeight: FontWeight.w900, fontFamily: 'monospace')),
                   ],
                 ),
               ),
@@ -2140,7 +2138,7 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
             compact: isMobile,
             onChanged: (ReportPeriod p) {
               setState(() => _period = p);
-              _updateRouteCoverage();
+              _watchCoverageTrips();
             },
           ),
         ),
@@ -2175,6 +2173,35 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
             Icons.people_alt_rounded, const Color(0xFF8E24AA), period: "All registered"),
       ],
     );
+  }
+
+  RoutePointsSubscription? _coverageTripsFeed;
+
+  /// Route Coverage needs only the trips of the SELECTED period. It used to listen to the whole `driver_routes` (4 MB and
+  /// growing): every route point any driver recorded made the dashboard fetch every trip again and recompute the
+  /// coverage over all of them. Now: the trips of the period, followed by their changes, and the coverage is recomputed
+  /// at most once every 10 seconds.
+  void _watchCoverageTrips() {
+    _coverageTripsFeed?.cancel();
+    final ReportPeriod p = _period.refreshed();
+    final (String from, String to) = HistoryDates.firebaseKeyBounds(p.startDay, p.endDay);
+    bool first = true;
+    _coverageTripsFeed = ChildrenFeed.listen(
+      _database.ref('driver_routes').orderByKey().startAt(from).endAt(to),
+      (Map<dynamic, dynamic> trips) {
+        _coverageTrips = trips;
+        _updateRouteCoverage();
+        first = false;
+      },
+      minGap: const Duration(seconds: 10),
+    );
+    // a period without any trip yet still has to show its (empty) coverage
+    Future<void>.delayed(const Duration(seconds: 2), () {
+      if (mounted && first) {
+        _coverageTrips = const <dynamic, dynamic>{};
+        _updateRouteCoverage();
+      }
+    });
   }
 
   Future<void> _updateRouteCoverage() async {
