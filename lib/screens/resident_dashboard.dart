@@ -349,6 +349,22 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
       if (event.snapshot.exists) {
         final Map data = event.snapshot.value as Map;
         if (mounted) {
+          // A change of purok starts a new inbox for that purok: the moment it is first seen is stored with the
+          // resident (every device agrees) and truck alerts sent before it are left out.
+          final String? newPurok = data['purok']?.toString();
+          final String? oldPurok = _user!.purok;
+          final String? sincePurok = data['purok_since_purok']?.toString();
+          final int? sinceMs = int.tryParse('${data['purok_since_ms'] ?? ''}');
+          if (newPurok != null && sinceMs != null && ResidentAlertRules.samePurok(sincePurok, newPurok)) {
+            _purokSinceMs = sinceMs;
+          }
+          if (newPurok != null && oldPurok != null && !ResidentAlertRules.samePurok(oldPurok, newPurok) &&
+              !ResidentAlertRules.samePurok(sincePurok, newPurok)) {
+            final int now = ServerClock.instance.nowMs();
+            _purokSinceMs = now;
+            _database.ref('residents/${_user!.userId}').update(<String, Object?>{'purok_since_ms': now, 'purok_since_purok': newPurok}).catchError((Object _) {});
+            _recomputeResidentUnread();
+          }
           final updatedUser = _user!.copyWith(
             name: data['name']?.toString(),
             purok: data['purok']?.toString(),
@@ -428,8 +444,11 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
       final int ts = t is num ? t.toInt() : int.tryParse('${t ?? ''}') ?? 0;
       if (ts < since) return false;
     }
-    return ResidentAlertRules.isFor(val, residentId: _user?.userId, purok: _user?.purok);
+    return ResidentAlertRules.isFor(val, residentId: _user?.userId, purok: _user?.purok, purokSinceMs: _purokSinceMs);
   }
+
+  /// When this resident's current purok was set, if they changed it: alerts of that purok sent before are not shown.
+  int? _purokSinceMs;
 
   void _ensureInbox() {
     if (_inbox != null || _user == null) return;
