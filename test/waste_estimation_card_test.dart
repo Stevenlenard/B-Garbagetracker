@@ -199,7 +199,11 @@ void main() {
       expect(find.textContaining('62,150'), findsOneWidget);
       expect(find.textContaining('Not verified'), findsOneWidget);
       expect(find.textContaining('OpenStreetMap way/407890456'), findsOneWidget);
-      expect(find.text('Limitations'), findsOneWidget);
+      // an area without an estimate says what is needed, not "None" / "n/a" rows
+      expect(find.text('To estimate this area'), findsOneWidget);
+      expect(find.text('Limitations'), findsNothing);
+      expect(find.text('Estimation method'), findsNothing);
+      expect(find.text('Waste-generation rate'), findsNothing);
       // no match
       await tester.enterText(find.byType(TextField), 'zzz');
       await tester.pumpAndSettle();
@@ -277,6 +281,33 @@ void main() {
     expect(find.textContaining('No collection area has enough sourced data yet'), findsOneWidget);
     expect(find.textContaining('kg/day'), findsNothing);
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('an unconfigured area shows no empty rows, only what is missing', (WidgetTester tester) async {
+    await pump(tester, sizes[2], seeded);
+    await openDetails(tester);
+    await tapText(tester, 'Area Details');
+    await tester.enterText(find.byType(TextField), 'purok 2');
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey<String>('area-a')));
+    await tester.pumpAndSettle();
+    for (final String gone in <String>['Source verification', 'Estimation method', 'Waste-generation rate', 'Seasonal adjustment', 'Estimated quantity', 'Confidence', 'Area size']) {
+      expect(find.text(gone), findsNothing, reason: gone);
+    }
+    expect(find.text('To estimate this area'), findsOneWidget);
+    expect(find.textContaining('A confirmed area size'), findsOneWidget);
+    expect(find.textContaining('A sourced population'), findsOneWidget);
+    expect(find.textContaining('A sourced waste-generation rate'), findsNothing); // the per-person rate is configured
+  });
+
+  testWidgets('the whole barangay is named once, and the Sources tab gives one clear formula', (WidgetTester tester) async {
+    await pump(tester, sizes[2], seeded);
+    await openDetails(tester);
+    await tapText(tester, 'Parameters & Sources');
+    expect(find.textContaining('19,278 people × 0.5 kg/person/day = 9,639 kg/day'), findsOneWidget);
+    await tapText(tester, 'Area Details');
+    expect(find.text('Barangay Balintawak'), findsOneWidget);
+    expect(find.text('Barangay Balintawak (whole barangay)'), findsNothing);
   });
 
   testWidgets('the overview lists the first areas and points to the rest', (WidgetTester tester) async {

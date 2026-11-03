@@ -65,6 +65,41 @@ void main() {
     });
   });
 
+  group('validation (the same rules as the backend)', () {
+    Map<String, String> check(Map<String, dynamic> settings, {List<Map<String, dynamic>> areas = const <Map<String, dynamic>>[]}) =>
+        validateWasteEstimationPayload((settings: <String, dynamic>{'seasonal_value': '1', ...settings}, areas: areas));
+
+    test('the saved starting values are valid', () {
+      final p = buildWasteEstimationPayload(settings: settings, rows: rows, typed: (String _) => null, flags: <String, bool>{});
+      expect(validateWasteEstimationPayload(p), isEmpty);
+    });
+
+    test('a rate needs its source, and a number in range', () {
+      expect(check(<String, dynamic>{'kg_per_capita_day': '0.5', 'rate_source': ''}), containsPair('cap_src', isNotEmpty));
+      expect(check(<String, dynamic>{'kg_per_capita_day': '11', 'rate_source': 'x'}), containsPair('cap', isNotEmpty));
+      expect(check(<String, dynamic>{'kg_per_capita_day': 'abc', 'rate_source': 'x'}), containsPair('cap', isNotEmpty));
+      expect(check(<String, dynamic>{'kg_per_hectare_day': '30', 'hectare_rate_source': ''}), containsPair('ha_src', isNotEmpty));
+      expect(check(<String, dynamic>{'kg_per_hectare_day': '30', 'hectare_rate_source': 'doc'}), isEmpty);
+      expect(check(<String, dynamic>{'kg_per_capita_day': null, 'rate_source': ''}), isEmpty); // blank is allowed
+    });
+
+    test('a multiplier other than 1.0, or switched on, needs its source and date', () {
+      expect(check(<String, dynamic>{'seasonal_value': '1.2', 'seasonal_source': ''}), containsPair('sea_src', isNotEmpty));
+      expect(check(<String, dynamic>{'seasonal_value': '1', 'seasonal_active': true, 'seasonal_source': ''}), containsPair('sea_src', isNotEmpty));
+      expect(check(<String, dynamic>{'seasonal_value': '1.2', 'seasonal_source': 'doc 2026'}), isEmpty);
+      expect(check(<String, dynamic>{'seasonal_value': '9', 'seasonal_source': 'doc'}), containsPair('sea', isNotEmpty));
+    });
+
+    test('an area size or population needs its source; the year must be a year', () {
+      Map<String, dynamic> area(Map<String, dynamic> x) => <String, dynamic>{'area_key': 'a', ...x};
+      expect(check(<String, dynamic>{}, areas: <Map<String, dynamic>>[area(<String, dynamic>{'size_m2': '5000', 'size_source': ''})]), containsPair('m2src_a', isNotEmpty));
+      expect(check(<String, dynamic>{}, areas: <Map<String, dynamic>>[area(<String, dynamic>{'size_m2': '0', 'size_source': 'x'})]), containsPair('m2_a', isNotEmpty));
+      expect(check(<String, dynamic>{}, areas: <Map<String, dynamic>>[area(<String, dynamic>{'population': '1200', 'population_source': ''})]), containsPair('popsrc_a', isNotEmpty));
+      expect(check(<String, dynamic>{}, areas: <Map<String, dynamic>>[area(<String, dynamic>{'population': '1200', 'population_source': 'PSA', 'population_year': '1800'})]), containsPair('popyr_a', isNotEmpty));
+      expect(check(<String, dynamic>{}, areas: <Map<String, dynamic>>[area(<String, dynamic>{'population': '1200', 'population_source': 'PSA', 'population_year': '2020'})]), isEmpty);
+    });
+  });
+
   group('form', () {
     Future<void> open(WidgetTester tester, Size size) async {
       tester.view.physicalSize = size;
@@ -87,6 +122,24 @@ void main() {
       await tester.tap(find.text('go'));
       await tester.pumpAndSettle();
     }
+
+    testWidgets('a value without its source: Save is refused on the screen, with the field marked and the change shown', (WidgetTester tester) async {
+      await open(tester, const Size(1366, 900));
+      expect(find.text('No changes'), findsOneWidget);
+      await tester.enterText(find.widgetWithText(TextField, 'kg per hectare per day'), '30');
+      await tester.pumpAndSettle();
+      expect(find.text('Unsaved changes'), findsOneWidget);
+      expect(find.text('Add the source of this rate'), findsNothing); // not before the first Save
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+      expect(find.text('Add the source of this rate'), findsOneWidget);
+      expect(find.textContaining('One field needs attention'), findsOneWidget);
+      expect(find.text('Estimation parameters'), findsOneWidget); // still open, nothing was sent
+      await tester.enterText(find.widgetWithText(TextField, 'Source of the per-hectare rate'), 'Test document, 2026');
+      await tester.pumpAndSettle();
+      expect(find.text('Add the source of this rate'), findsNothing);
+      expect(tester.takeException(), isNull);
+    });
 
     for (final Size size in const <Size>[Size(390, 844), Size(768, 1000), Size(1366, 900)]) {
       testWidgets('${size.width.toInt()} px: sections, no overflow, areas collapsed with a one-line summary, open on tap', (WidgetTester tester) async {

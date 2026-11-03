@@ -261,7 +261,7 @@ class _WasteEstimationDetailsState extends State<WasteEstimationDetails> {
           ),
         ),
         const SizedBox(width: 8),
-        Flexible(child: TextButton(onPressed: () => setState(() => _tab = 1), child: const Text('View all areas', maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontWeight: FontWeight.w800, color: _C.teal)))),
+        TextButton(onPressed: () => setState(() => _tab = 1), child: const Text('View all areas', maxLines: 1, style: TextStyle(fontWeight: FontWeight.w800, color: _C.teal))),
       ]),
       const SizedBox(height: 8),
       if (d.rows.isEmpty)
@@ -382,13 +382,15 @@ class _WasteEstimationDetailsState extends State<WasteEstimationDetails> {
     final String est = e.hasNumber ? '${WasteFormat.kg(e.kgPerDay!)} kg/day' : '—';
     final String method = e.hasNumber ? WasteFormat.methodLabel(e.method) : (isWhole ? 'Missing sourced data' : (e.size.usable ? _shortSource(e.size) : 'Missing sourced data'));
     final _Status st = _statusOf(e, cfg);
+    final String line = <String>[if (size != '—') size, if (e.hasNumber) est].join(' · ');
+    final String title = isWhole ? 'Barangay Balintawak' : r.name;
 
     final Widget summary = wide
         ? Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
             child: Row(children: <Widget>[
               SizedBox(width: 34, child: Text(index == null ? '' : index.toString().padLeft(2, '0'), style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: _C.muted))),
-              Expanded(flex: 3, child: Text(r.name, style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w800, color: _C.ink))),
+              Expanded(flex: 3, child: Text(title, style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w800, color: _C.ink))),
               Expanded(flex: 2, child: Text(size, style: const TextStyle(fontSize: 13, color: _C.ink))),
               Expanded(flex: 2, child: Text(est, style: TextStyle(fontSize: 13, fontWeight: e.hasNumber ? FontWeight.w800 : FontWeight.w500, color: e.hasNumber ? _C.ink : _C.muted))),
               Expanded(flex: 3, child: Padding(padding: const EdgeInsets.only(right: 8), child: Text(method, style: const TextStyle(fontSize: 12.5, color: _C.muted)))),
@@ -401,9 +403,11 @@ class _WasteEstimationDetailsState extends State<WasteEstimationDetails> {
             child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
               Expanded(
                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
-                  Text(r.name, style: const TextStyle(fontSize: 14.5, fontWeight: FontWeight.w800, color: _C.ink)),
-                  const SizedBox(height: 4),
-                  Text('$size · $est', style: TextStyle(fontSize: 12.5, color: e.hasNumber ? _C.ink : _C.muted, fontWeight: e.hasNumber ? FontWeight.w700 : FontWeight.w500)),
+                  Text(title, style: const TextStyle(fontSize: 14.5, fontWeight: FontWeight.w800, color: _C.ink)),
+                  if (line.isNotEmpty) ...<Widget>[
+                    const SizedBox(height: 4),
+                    Text(line, style: TextStyle(fontSize: 12.5, color: e.hasNumber ? _C.ink : _C.muted, fontWeight: e.hasNumber ? FontWeight.w700 : FontWeight.w500)),
+                  ],
                   const SizedBox(height: 2),
                   Text(method, style: const TextStyle(fontSize: 12, color: _C.muted)),
                   const SizedBox(height: 8),
@@ -429,28 +433,35 @@ class _WasteEstimationDetailsState extends State<WasteEstimationDetails> {
   }
 
   Widget _areaExpanded(WasteAreaRow r, AreaEstimate e, AreaConfig cfg, bool isWhole) {
-    final SeasonalMultiplier sm = _data.params.seasonal;
+    final EstimationParams params = _data.params;
+    final SeasonalMultiplier sm = params.seasonal;
     final AreaSize s = e.size;
+    final bool sized = !isWhole && s.usable;
     final List<(String, String)> facts = <(String, String)>[
-      ('Area name', r.name),
-      if (!isWhole) ('Area size', s.usable ? '${s.hectares.toStringAsFixed(2)} ha (${WasteFormat.m2(s.m2)} m²)' : 'Not available'),
-      if (!isWhole) ('Boundary source', s.usable ? (s.source.isEmpty ? 'Not recorded' : s.source) : (r.geometryNote.isEmpty ? 'None on record' : r.geometryNote)),
-      if (!isWhole) ('Source verification', s.usable ? (s.verified ? 'Verified by an admin' : 'Not verified') : 'n/a'),
-      if (isWhole || cfg.population != null) ('Population', cfg.hasPopulation ? '${WasteFormat.m2(cfg.population!.toDouble())}${cfg.populationYear != null ? ' (${cfg.populationYear})' : ''}, ${cfg.populationSource}' : 'Not configured'),
-      ('Estimation method', WasteFormat.methodLabel(e.method)),
-      ('Waste-generation rate', _rateFor(e)),
-      ('Seasonal adjustment', sm.applied ? '×${sm.effective.toStringAsFixed(2)} (${sm.source}${sm.validated ? '' : '; not validated'})' : '×1.0 (neutral, none applied)'),
-      ('Estimated quantity', e.hasNumber ? '${WasteFormat.kg(e.kgPerDay!)} kg/day (estimate of waste generated)' : 'No estimate: missing sourced data'),
-      ('Confidence', e.confidence),
+      if (sized) ('Area size', '${s.hectares.toStringAsFixed(2)} ha (${WasteFormat.m2(s.m2)} m²)'),
+      if (sized) ('Boundary source', s.source.isEmpty ? 'Not recorded' : s.source),
+      if (sized) ('Source verification', s.verified ? 'Verified by an admin' : 'Not verified'),
+      if (!isWhole && !s.usable && r.geometryNote.isNotEmpty) ('Boundary', r.geometryNote),
+      if (cfg.hasPopulation) ('Population', '${WasteFormat.m2(cfg.population!.toDouble())}${cfg.populationYear != null ? ' (${cfg.populationYear})' : ''}, ${cfg.populationSource}'),
+      if (e.hasNumber) ('Estimation method', WasteFormat.methodLabel(e.method)),
+      if (e.hasNumber) ('Waste-generation rate', _rateFor(e)),
+      if (e.hasNumber) ('Seasonal adjustment', sm.applied ? '×${sm.effective.toStringAsFixed(2)} (${sm.source}${sm.validated ? '' : '; not validated'})' : '×1.0 (neutral)'),
+      if (e.hasNumber) ('Estimated quantity', '${WasteFormat.kg(e.kgPerDay!)} kg/day (estimate of waste generated)'),
+      if (e.hasNumber) ('Confidence', e.confidence),
+    ];
+    final List<String> needs = <String>[
+      if (!e.hasNumber && !isWhole && !s.usable) 'A confirmed area size, with its source',
+      if (!e.hasNumber && !cfg.hasPopulation) 'A sourced population',
+      if (!e.hasNumber && !params.hasCapitaRate && !params.hasHectareRate) 'A sourced waste-generation rate',
     ];
     return Container(
       width: double.infinity,
       color: _C.mintSoft,
-      padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
         for (final (String, String) f in facts) _Fact(f.$1, f.$2),
         if (e.breakdown.isNotEmpty) ...<Widget>[
-          const SizedBox(height: 10),
+          const SizedBox(height: 4),
           const Text('Calculation breakdown', style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w900, color: _C.tealDark)),
           const SizedBox(height: 6),
           Container(
@@ -460,13 +471,26 @@ class _WasteEstimationDetailsState extends State<WasteEstimationDetails> {
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[for (final String line in e.breakdown) Padding(padding: const EdgeInsets.only(bottom: 3), child: Text(line, style: const TextStyle(fontSize: 12.5, height: 1.35, color: _C.ink)))]),
           ),
         ],
-        if (e.limitations.isNotEmpty) ...<Widget>[
+        if (needs.isNotEmpty) ...<Widget>[
+          if (facts.isNotEmpty) const SizedBox(height: 6),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(color: const Color(0xFFFFFBEB), borderRadius: BorderRadius.circular(12), border: Border.all(color: const Color(0xFFFDE68A))),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
+              const Text('To estimate this area', style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w900, color: Color(0xFF92400E))),
+              const SizedBox(height: 4),
+              for (final String n in needs) Padding(padding: const EdgeInsets.only(top: 2), child: Text('• $n', style: const TextStyle(fontSize: 12.5, height: 1.35, color: Color(0xFF92400E)))),
+            ]),
+          ),
+        ],
+        if (e.hasNumber && e.limitations.isNotEmpty) ...<Widget>[
           const SizedBox(height: 10),
           const Text('Limitations', style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w900, color: Color(0xFFB45309))),
           const SizedBox(height: 4),
           for (final String l in e.limitations) Padding(padding: const EdgeInsets.only(bottom: 2), child: Text('• $l', style: const TextStyle(fontSize: 12.5, height: 1.35, color: Color(0xFF92400E)))),
         ],
-        const SizedBox(height: 10),
+        const SizedBox(height: 6),
         Align(
           alignment: Alignment.centerLeft,
           child: TextButton.icon(onPressed: _edit, icon: const Icon(Icons.edit_outlined, size: 17), label: const Text('Edit parameters', style: TextStyle(fontWeight: FontWeight.w800)), style: TextButton.styleFrom(foregroundColor: _C.teal)),
@@ -508,10 +532,11 @@ class _WasteEstimationDetailsState extends State<WasteEstimationDetails> {
         initiallyOpen: true,
         children: <Widget>[
           _Fact('Waste-generation rate', p.hasCapitaRate ? '${p.kgPerCapitaDay} kg per person per day' : 'Not configured'),
-          _Fact('Rate source', p.hasCapitaRate ? p.rateSource : 'None on record'),
+          if (p.hasCapitaRate) _Fact('Rate source', p.rateSource),
           _Fact('Barangay population', bc.hasPopulation ? '${WasteFormat.m2(bc.population!.toDouble())}${bc.populationYear != null ? ' (${bc.populationYear})' : ''}' : 'Not configured'),
-          _Fact('Population source', bc.hasPopulation ? bc.populationSource : 'None on record'),
-          if (d.whole.breakdown.isNotEmpty) _Fact('Barangay estimate', d.whole.breakdown.join('  '), strong: true),
+          if (bc.hasPopulation) _Fact('Population source', bc.populationSource),
+          if (d.whole.hasNumber && d.whole.method == EstimateMethod.perCapita)
+            _Fact('Barangay estimate', '${WasteFormat.m2(bc.population!.toDouble())} people × ${p.kgPerCapitaDay} kg/person/day${sm.applied ? ' × ${sm.effective.toStringAsFixed(2)}' : ''} = ${WasteFormat.kg(d.whole.kgPerDay!)} kg/day', strong: true),
         ],
       ),
       _Accordion(
@@ -520,8 +545,8 @@ class _WasteEstimationDetailsState extends State<WasteEstimationDetails> {
         title: 'Area-based estimation (per hectare)',
         summary: p.hasHectareRate ? '${p.kgPerHectareDay} kg per hectare per day' : 'Not configured',
         children: <Widget>[
-          _Fact('Rate', p.hasHectareRate ? '${p.kgPerHectareDay} kg per hectare per day' : 'Not configured'),
-          _Fact('Rate source', p.hasHectareRate ? p.hectareRateSource : 'None on record: no documented per-hectare rate for Balintawak'),
+          _Fact('Rate', p.hasHectareRate ? '${p.kgPerHectareDay} kg per hectare per day' : 'Not configured: no documented per-hectare rate for Balintawak'),
+          if (p.hasHectareRate) _Fact('Rate source', p.hectareRateSource),
         ],
       ),
       _Accordion(
@@ -530,10 +555,9 @@ class _WasteEstimationDetailsState extends State<WasteEstimationDetails> {
         title: 'Seasonal multiplier',
         summary: sm.applied ? '×${sm.effective.toStringAsFixed(2)} applied' : '×1.0 (neutral, not applied)',
         children: <Widget>[
-          _Fact('Value', '×${sm.value.toStringAsFixed(2)}'),
-          _Fact('Applied', sm.applied ? 'Yes (×${sm.effective.toStringAsFixed(2)})' : 'No (neutral, ×1.0)'),
-          _Fact('Evidence on file', sm.validated ? 'Yes' : 'No: not validated'),
-          _Fact('Source and date', sm.source.isEmpty ? 'None on record' : sm.source),
+          _Fact('Value', sm.applied ? '×${sm.effective.toStringAsFixed(2)} applied' : '×${sm.value.toStringAsFixed(2)} (neutral, not applied)'),
+          if (sm.source.isNotEmpty) _Fact('Source and date', sm.source),
+          if (sm.source.isNotEmpty) _Fact('Evidence on file', sm.validated ? 'Yes' : 'No: not validated'),
           if (sm.appliesTo.isNotEmpty) _Fact('Applies to', sm.appliesTo),
         ],
       ),
