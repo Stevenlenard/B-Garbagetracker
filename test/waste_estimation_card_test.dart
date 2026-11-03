@@ -362,6 +362,21 @@ void main() {
       expect(find.textContaining('No: taken from other Philippine cities'), findsOneWidget);
     });
 
+    testWidgets('the barangay formula states the multiplier of the day: none on a regular day, x1.15 on Christmas', (WidgetTester tester) async {
+      await openOn(tester, DateTime(2026, 11, 4), true);
+      await tester.tap(find.text('Parameters & Sources'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('19,278 people × 0.5 kg/person/day = 9,639 kg/day'), findsOneWidget);
+      expect(find.textContaining('× 1.15'), findsNothing);
+    });
+
+    testWidgets('on Christmas the formula shows x1.15 and adds up', (WidgetTester tester) async {
+      await openOn(tester, DateTime(2026, 12, 25), true);
+      await tester.tap(find.text('Parameters & Sources'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('19,278 people × 0.5 kg/person/day × 1.15 = 11,085 kg/day'), findsOneWidget);
+    });
+
     testWidgets('not applied: x1.0 even on Christmas', (WidgetTester tester) async {
       await openOn(tester, DateTime(2026, 12, 25), false);
       expect(find.text('×1.0 today'), findsOneWidget);

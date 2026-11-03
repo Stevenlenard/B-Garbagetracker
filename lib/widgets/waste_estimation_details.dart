@@ -566,7 +566,7 @@ class _WasteEstimationDetailsState extends State<WasteEstimationDetails> {
           _Fact('Barangay population', bc.hasPopulation ? '${WasteFormat.m2(bc.population!.toDouble())}${bc.populationYear != null ? ' (${bc.populationYear})' : ''}' : 'Not configured'),
           if (bc.hasPopulation) _Fact('Population source', bc.populationSource),
           if (d.whole.hasNumber && d.whole.method == EstimateMethod.perCapita)
-            _Fact('Barangay estimate', '${WasteFormat.m2(bc.population!.toDouble())} people × ${p.kgPerCapitaDay} kg/person/day${sm.applied ? ' × ${sm.effective.toStringAsFixed(2)}' : ''} = ${WasteFormat.kg(d.whole.kgPerDay!)} kg/day', strong: true),
+            _Fact('Barangay estimate', '${WasteFormat.m2(bc.population!.toDouble())} people × ${p.kgPerCapitaDay} kg/person/day${p.multiplier != 1.0 ? ' × ${p.multiplier.toStringAsFixed(2)}' : ''} = ${WasteFormat.kg(d.whole.kgPerDay!)} kg/day', strong: true),
         ],
       ),
       _Accordion(
