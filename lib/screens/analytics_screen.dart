@@ -1,4 +1,5 @@
 import '../widgets/period_selector.dart';
+import '../widgets/waste_estimation_card.dart';
 import '../utils/route_history_navigation.dart';
 import '../utils/trip_links.dart';
 import '../utils/eta_evaluation.dart';
@@ -3471,6 +3472,8 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         _buildWasteCollectionSummaryCard(isMobile),
+        const SizedBox(height: 16),
+        const WasteEstimationCard(),
         const SizedBox(height: 16),
         _buildRedesignedEtaPerformanceCard(isMobile),
         const SizedBox(height: 16),

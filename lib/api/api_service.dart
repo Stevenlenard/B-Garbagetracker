@@ -443,4 +443,16 @@ class ApiService {
 
     return await _dio.get('get_ai_load_summary.php', queryParameters: queryParams);
   }
+
+  /// Objective 2.2 area-based waste estimation settings (admin only).
+  Future<Response> getWasteEstimation() async {
+    return await _dio.get('get_waste_estimation.php');
+  }
+
+  Future<Response> saveWasteEstimation({
+    required Map<String, dynamic> settings,
+    required List<Map<String, dynamic>> areas,
+  }) async {
+    return await _dio.post('save_waste_estimation.php', data: {'settings': settings, 'areas': areas});
+  }
 }
