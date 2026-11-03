@@ -211,12 +211,36 @@ class _WasteEstimationDetailsState extends State<WasteEstimationDetails> {
   Widget _overview(bool wide, double width) {
     final WasteEstimationData d = _data;
     final SeasonalMultiplier sm = d.params.seasonal;
-    final double cardW = wide ? (width - 24) / 3 : (width - 12) / 2;
+    final double m = d.params.multiplier;
+    final HolidayPeriod? today = d.params.day == null ? null : HolidayCalendar.periodOn(d.params.day!);
+    final int cols = width >= 820 ? 4 : 2;
+    final double cardW = (width - 12 * (cols - 1)) / cols;
+    final double? trucks = d.barangayTruckloads;
     final List<Widget> cards = <Widget>[
-      _statCard(Icons.pin_drop_outlined, 'Areas configured', '${d.summary.configuredCount} of ${d.summary.areaCount}', 'with a sourced estimate', cardW),
-      _statCard(Icons.groups_2_outlined, 'Whole barangay (est.)', d.whole.hasNumber ? '${WasteFormat.kg(d.whole.kgPerDay!)} kg/day' : 'Not configured', 'population × per-person rate', cardW),
-      _statCard(Icons.event_repeat_outlined, 'Seasonal multiplier', sm.applied ? '×${sm.effective.toStringAsFixed(2)}${sm.validated ? '' : ' (not validated)'}' : '×1.0 (Neutral)', sm.applied ? 'applied' : 'not applied', wide ? cardW : width),
+      _statCard(Icons.pin_drop_outlined, 'Areas configured', '${d.summary.configuredCount} of ${d.summary.areaCount}', 'with an estimate', cardW),
+      _statCard(Icons.groups_2_outlined, 'Whole barangay (est.)', d.whole.hasNumber ? '${WasteFormat.kg(d.whole.kgPerDay!)} kg/day' : 'Not configured', m != 1.0 ? 'today, holiday ×${m.toStringAsFixed(2)}' : 'population × per-person rate', cardW),
+      _statCard(
+        Icons.event_repeat_outlined,
+        'Seasonal multiplier',
+        m != 1.0 ? '×${m.toStringAsFixed(2)} today' : '×1.0 today',
+        today != null ? (today.uplift ? today.name : '${today.name}: no documented effect') : (sm.applied ? 'Christmas and New Year ×${sm.effective.toStringAsFixed(2)}' : 'regular day'),
+        cardW,
+      ),
+      _statCard(Icons.local_shipping_outlined, 'Trucks per day', trucks == null ? '—' : '${trucks.toStringAsFixed(1)} trucks', '5,000 kg per truck (capacity-equivalent)', cardW),
     ];
+    final List<double> kgs = <double>[for (final AreaEstimate e in d.estimates) if (e.hasNumber && !e.isMeasured) e.kgPerDay!];
+    String? truckNote;
+    if (kgs.length >= 2) {
+      final double avg = kgs.reduce((double a, double b) => a + b) / kgs.length;
+      final List<double> big = List<double>.of(kgs)..sort((double a, double b) => b.compareTo(a));
+      double run = 0;
+      int k = 0;
+      while (k < big.length && run < WasteEstimation.truckCapacityKg) {
+        run += big[k];
+        k++;
+      }
+      truckNote = 'An area averages about ${WasteFormat.kg(avg)} kg/day, so a truck (5,000 kg capacity-equivalent) is full after about $k of the largest areas or ${(WasteEstimation.truckCapacityKg / avg).round()} average ones, then it goes to the dumpsite.';
+    }
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
       Wrap(spacing: 12, runSpacing: 12, children: cards),
       const SizedBox(height: 16),
@@ -239,6 +263,10 @@ class _WasteEstimationDetailsState extends State<WasteEstimationDetails> {
             'Estimates per collection area using area size, population and waste-generation rate. This is estimated waste generation, not measured collected waste, and it is kept separate from the recorded loads (capacity-equivalent 5,000 kg per FULL event).',
             style: TextStyle(fontSize: 13, height: 1.45, color: _C.ink),
           ),
+          if (truckNote != null) ...<Widget>[
+            const SizedBox(height: 8),
+            Text(truckNote, style: const TextStyle(fontSize: 13, height: 1.45, color: _C.ink, fontWeight: FontWeight.w600)),
+          ],
           if (d.summary.configuredCount == 0) ...<Widget>[
             const SizedBox(height: 8),
             const Text(
@@ -434,7 +462,6 @@ class _WasteEstimationDetailsState extends State<WasteEstimationDetails> {
 
   Widget _areaExpanded(WasteAreaRow r, AreaEstimate e, AreaConfig cfg, bool isWhole) {
     final EstimationParams params = _data.params;
-    final SeasonalMultiplier sm = params.seasonal;
     final AreaSize s = e.size;
     final bool sized = !isWhole && s.usable;
     final List<(String, String)> facts = <(String, String)>[
@@ -445,8 +472,9 @@ class _WasteEstimationDetailsState extends State<WasteEstimationDetails> {
       if (cfg.hasPopulation) ('Population', '${WasteFormat.m2(cfg.population!.toDouble())}${cfg.populationYear != null ? ' (${cfg.populationYear})' : ''}, ${cfg.populationSource}'),
       if (e.hasNumber) ('Estimation method', WasteFormat.methodLabel(e.method)),
       if (e.hasNumber) ('Waste-generation rate', _rateFor(e)),
-      if (e.hasNumber) ('Seasonal adjustment', sm.applied ? '×${sm.effective.toStringAsFixed(2)} (${sm.source}${sm.validated ? '' : '; not validated'})' : '×1.0 (neutral)'),
+      if (e.hasNumber) ('Seasonal adjustment', params.multiplier != 1.0 ? '×${params.multiplier.toStringAsFixed(2)} today (${HolidayCalendar.upliftOn(params.day)?.name ?? 'holiday'})' : '×1.0 today (regular day)'),
       if (e.hasNumber) ('Estimated quantity', '${WasteFormat.kg(e.kgPerDay!)} kg/day (estimate of waste generated)'),
+      if (e.hasNumber) ('Share of a truck', '${(e.kgPerDay! / WasteEstimation.truckCapacityKg * 100).toStringAsFixed(0)}% of one truck (5,000 kg capacity-equivalent)'),
       if (e.hasNumber) ('Confidence', e.confidence),
     ];
     final List<String> needs = <String>[
@@ -555,12 +583,14 @@ class _WasteEstimationDetailsState extends State<WasteEstimationDetails> {
         key: const ValueKey<String>('sec-seasonal'),
         icon: Icons.event_repeat_outlined,
         title: 'Seasonal multiplier',
-        summary: sm.applied ? '×${sm.effective.toStringAsFixed(2)} applied' : '×1.0 (neutral, not applied)',
+        summary: sm.applied ? 'Today ×${p.multiplier.toStringAsFixed(2)} · Christmas and New Year ×${sm.effective.toStringAsFixed(2)}' : '×1.0 (neutral, not applied)',
         children: <Widget>[
-          _Fact('Value', sm.applied ? '×${sm.effective.toStringAsFixed(2)} applied' : '×${sm.value.toStringAsFixed(2)} (neutral, not applied)'),
+          _Fact('Today', p.multiplier != 1.0 ? '×${p.multiplier.toStringAsFixed(2)} (${HolidayCalendar.upliftOn(p.day)?.name ?? 'holiday'})' : '×1.0 (regular day)'),
+          _Fact('Holiday multiplier', sm.applied ? '×${sm.effective.toStringAsFixed(2)}, applied automatically on the days of Christmas and New Year; every other day is ×1.0' : 'Not applied (×${sm.value.toStringAsFixed(2)})'),
           if (sm.source.isNotEmpty) _Fact('Source and date', sm.source),
-          if (sm.source.isNotEmpty) _Fact('Evidence on file', sm.validated ? 'Yes' : 'No: not validated'),
-          if (sm.appliesTo.isNotEmpty) _Fact('Applies to', sm.appliesTo),
+          if (sm.source.isNotEmpty) _Fact('Validated for Lipa', sm.validated ? 'Yes' : 'No: taken from other Philippine cities'),
+          for (final HolidayPeriod hp in HolidayCalendar.periods)
+            _Fact(hp.name, '${hp.dates}. ${hp.uplift && sm.applied && d.holidayBarangayKg(hp) != null ? '×${sm.effective.toStringAsFixed(2)}: the barangay estimate becomes ${WasteFormat.kg(d.holidayBarangayKg(hp)!)} kg/day (from ${WasteFormat.kg(d.regularDayBarangayKg!)}). ' : ''}${hp.note}'),
         ],
       ),
       _Accordion(

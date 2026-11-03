@@ -63,6 +63,23 @@ class WasteEstimationData {
   final EstimateSummary summary;
   final Map<String, AreaConfig> configs;
 
+  /// The whole-barangay estimate on a regular day (the multiplier of the day taken out), or null.
+  double? get regularDayBarangayKg {
+    if (!whole.hasNumber) return null;
+    final double m = params.multiplier;
+    return m > 0 ? whole.kgPerDay! / m : null;
+  }
+
+  /// The whole-barangay estimate inside a period with a documented increase, or null when no multiplier is applied.
+  double? holidayBarangayKg(HolidayPeriod p) {
+    final double? base = regularDayBarangayKg;
+    final double v = params.seasonal.effective;
+    return (base == null || !p.uplift || v == 1.0) ? null : base * v;
+  }
+
+  /// Truckloads per day, as the capacity-equivalent of the estimate (not a measured weight).
+  double? get barangayTruckloads => whole.hasNumber ? whole.kgPerDay! / WasteEstimation.truckCapacityKg : null;
+
   AreaConfig configOf(WasteAreaRow r) => configs[r.key]!;
   AreaEstimate estimateOf(WasteAreaRow r) => r.key == barangayKey ? whole : estimates[rows.indexOf(r)];
 
@@ -79,9 +96,9 @@ class WasteEstimationData {
   }
 
   /// Reads the sources (or [loader], for tests) and computes the estimates. Throws [WasteEstimationLoadException].
-  static Future<WasteEstimationData> load({Future<WasteEstimationRaw> Function()? loader}) async {
+  static Future<WasteEstimationData> load({Future<WasteEstimationRaw> Function()? loader, DateTime? day}) async {
     try {
-      return fromRaw(loader != null ? await loader() : await fetchRaw());
+      return fromRaw(loader != null ? await loader() : await fetchRaw(), day: day);
     } on DioException catch (e) {
       final Object? d = e.response?.data;
       throw WasteEstimationLoadException((d is Map && d['message'] != null) ? '${d['message']}' : 'Could not load the waste estimation data.');
@@ -90,7 +107,10 @@ class WasteEstimationData {
     }
   }
 
-  static WasteEstimationData fromRaw(WasteEstimationRaw raw0) {
+  /// [day] is the day the estimate is for (today when null): on a holiday period with a documented increase the seasonal
+  /// multiplier applies, on any other day it is 1.0.
+  static WasteEstimationData fromRaw(WasteEstimationRaw raw0, {DateTime? day}) {
+    final DateTime forDay = day ?? DateTime.now();
     final Object? body = raw0.body;
     final Map<String, dynamic> data = body is Map ? Map<String, dynamic>.from(body) : <String, dynamic>{};
     final bool available = data['available'] != false;
@@ -140,7 +160,7 @@ class WasteEstimationData {
     final WasteAreaRow barangay = WasteAreaRow(key: barangayKey, name: 'Barangay Balintawak (whole barangay)', geometrySize: const AreaSize.none())
       ..saved = saved[barangayKey];
 
-    final EstimationParams params = _params(settings);
+    final EstimationParams params = _params(settings, forDay);
     final Map<String, AreaConfig> configs = <String, AreaConfig>{for (final WasteAreaRow r in <WasteAreaRow>[...rows, barangay]) r.key: _config(r)};
     final AreaEstimate whole = WasteEstimation.estimate(configs[barangayKey]!, params);
     // Areas without a population of their own share the barangay figure by size (see AreaShareBasis).
@@ -152,7 +172,7 @@ class WasteEstimationData {
         barangayKgPerDay: whole.kgPerDay!,
         totalSizedM2: sized.fold<double>(0, (double a, AreaConfig c) => a + c.size.m2),
         sizedCount: sized.length,
-        barangayBasis: '${bc.population} people × ${params.kgPerCapitaDay} kg/person/day${params.seasonal.applied ? ' × ${params.seasonal.effective}' : ''}',
+        barangayBasis: '${bc.population} people × ${params.kgPerCapitaDay} kg/person/day${params.multiplier != 1.0 ? ' × ${params.multiplier}' : ''}',
       );
     }
     final List<AreaEstimate> estimates = <AreaEstimate>[for (final WasteAreaRow r in rows) WasteEstimation.estimate(configs[r.key]!, params, share: share)];
@@ -169,9 +189,10 @@ class WasteEstimationData {
     );
   }
 
-  static EstimationParams _params(Map<String, dynamic>? s) {
-    if (s == null) return const EstimationParams();
+  static EstimationParams _params(Map<String, dynamic>? s, DateTime day) {
+    if (s == null) return EstimationParams(day: day);
     return EstimationParams(
+      day: day,
       kgPerCapitaDay: _d(s['kg_per_capita_day']),
       rateSource: '${s['rate_source'] ?? ''}',
       kgPerHectareDay: _d(s['kg_per_hectare_day']),
@@ -182,6 +203,7 @@ class WasteEstimationData {
         validated: flag(s['seasonal_validated']),
         active: flag(s['seasonal_active']),
         appliesTo: '${s['seasonal_applies_to'] ?? ''}',
+        holidaysOnly: true,
       ),
     );
   }

@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:garbage_tracking_app/services/waste_estimation_service.dart';
 import 'package:garbage_tracking_app/utils/predictive_models.dart';
 import 'package:garbage_tracking_app/utils/waste_estimation.dart';
 
@@ -161,6 +162,71 @@ void main() {
       expect(s.configuredCount, 2);
       expect(s.estimatedKgPerDay, 300);
       expect(s.measuredKg, 800);
+    });
+  });
+
+  group('holiday calendar and the multiplier by date', () {
+    test('only Christmas and New Year (Dec 24 to Jan 1) carry a documented increase', () {
+      for (final DateTime d in <DateTime>[DateTime(2026, 12, 24), DateTime(2026, 12, 25), DateTime(2026, 12, 31), DateTime(2027, 1, 1)]) {
+        expect(HolidayCalendar.upliftOn(d)?.id, 'christmas', reason: '$d');
+      }
+      for (final DateTime d in <DateTime>[DateTime(2026, 12, 23), DateTime(2027, 1, 2), DateTime(2026, 11, 4), DateTime(2026, 6, 1)]) {
+        expect(HolidayCalendar.upliftOn(d), isNull, reason: '$d');
+      }
+      expect(HolidayCalendar.upliftOn(null), isNull);
+    });
+
+    test('Undas and the Lipa celebrations are known holidays without a multiplier', () {
+      expect(HolidayCalendar.periodOn(DateTime(2026, 11, 1))?.id, 'undas');
+      expect(HolidayCalendar.periodOn(DateTime(2026, 1, 20))?.id, 'lipa_festival');
+      expect(HolidayCalendar.periodOn(DateTime(2026, 6, 20))?.id, 'lipa_foundation');
+      for (final DateTime d in <DateTime>[DateTime(2026, 11, 2), DateTime(2026, 1, 20), DateTime(2026, 6, 20)]) {
+        expect(HolidayCalendar.upliftOn(d), isNull);
+      }
+    });
+
+    test('the multiplier applies on the holiday days only, and only when active and sourced', () {
+      const SeasonalMultiplier on = SeasonalMultiplier(value: 1.15, source: 'doc', active: true, holidaysOnly: true);
+      expect(on.on(DateTime(2026, 12, 25)), 1.15);
+      expect(on.on(DateTime(2026, 11, 4)), 1.0);
+      expect(const SeasonalMultiplier(value: 1.15, source: 'doc', active: false, holidaysOnly: true).on(DateTime(2026, 12, 25)), 1.0);
+      expect(const SeasonalMultiplier(value: 1.15, source: '', active: true, holidaysOnly: true).on(DateTime(2026, 12, 25)), 1.0);
+    });
+
+    test('an estimate follows the day it is for', () {
+      const AreaConfig a = AreaConfig(name: 'A', size: AreaSize(m2: 100000, kind: AreaSizeKind.manual, source: 's', verified: true));
+      EstimationParams on(DateTime day) => EstimationParams(
+          kgPerHectareDay: 30, hectareRateSource: 'doc', seasonal: const SeasonalMultiplier(value: 1.15, source: 'doc', active: true, holidaysOnly: true), day: day);
+      final AreaEstimate regular = WasteEstimation.estimate(a, on(DateTime(2026, 11, 4)));
+      final AreaEstimate christmas = WasteEstimation.estimate(a, on(DateTime(2026, 12, 25)));
+      expect(regular.kgPerDay, closeTo(300, 1e-9));
+      expect(christmas.kgPerDay, closeTo(345, 1e-9));
+      expect(christmas.breakdown.join(' '), contains('Christmas and New Year'));
+      expect(regular.breakdown.join(' '), contains('regular day'));
+    });
+
+    test('the barangay figure and the area shares follow the day, and the shares still add up to it', () {
+      final Map<String, Object?> body = <String, Object?>{
+        'success': true,
+        'available': true,
+        'settings': <String, Object?>{'kg_per_capita_day': '0.5', 'rate_source': 'NSWMC', 'seasonal_value': '1.15', 'seasonal_source': 'cities', 'seasonal_active': 1},
+        'areas': <Object>[
+          <String, Object?>{'area_key': 'barangay_total', 'population': 19278, 'population_source': 'PSA', 'population_year': 2020},
+          <String, Object?>{'area_key': 'a', 'size_m2': '100000', 'size_kind': 'manual', 'size_source': 's', 'size_verified': 1},
+          <String, Object?>{'area_key': 'b', 'size_m2': '300000', 'size_kind': 'manual', 'size_source': 's', 'size_verified': 1},
+        ],
+      };
+      final Map<String, Object?> puroks = <String, Object?>{'a': <String, Object?>{'name': 'A'}, 'b': <String, Object?>{'name': 'B'}};
+      final WasteEstimationData reg = WasteEstimationData.fromRaw((body: body, puroks: puroks), day: DateTime(2026, 11, 4));
+      final WasteEstimationData xmas = WasteEstimationData.fromRaw((body: body, puroks: puroks), day: DateTime(2026, 12, 25));
+      expect(reg.whole.kgPerDay, closeTo(9639, 1e-6));
+      expect(xmas.whole.kgPerDay, closeTo(9639 * 1.15, 1e-6));
+      expect(xmas.regularDayBarangayKg, closeTo(9639, 1e-6));
+      expect(reg.barangayTruckloads, closeTo(9639 / 5000, 1e-9));
+      final double sum = xmas.estimates.map((AreaEstimate e) => e.kgPerDay!).reduce((double x, double y) => x + y);
+      expect(sum, closeTo(xmas.whole.kgPerDay!, 1e-6));
+      expect(xmas.holidayBarangayKg(HolidayCalendar.periods.first), closeTo(9639 * 1.15, 1e-6));
+      expect(xmas.holidayBarangayKg(HolidayCalendar.periods[1]), isNull); // Undas: no multiplier
     });
   });
 

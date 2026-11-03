@@ -36,9 +36,115 @@ class AreaSize {
   bool get usable => kind != AreaSizeKind.none && m2.isFinite && m2 > 0;
 }
 
+/// A holiday or celebration period (every year). Only a period with documented waste figures carries a multiplier
+/// ([uplift]); the others are listed so that nothing is applied to them without evidence.
+class HolidayPeriod {
+  const HolidayPeriod({
+    required this.id,
+    required this.name,
+    required this.fromMonth,
+    required this.fromDay,
+    required this.toMonth,
+    required this.toDay,
+    required this.uplift,
+    required this.note,
+    this.source = '',
+  });
+
+  final String id;
+  final String name;
+  final int fromMonth, fromDay, toMonth, toDay;
+
+  /// true: documented increase of waste; the admin-set multiplier applies on these days.
+  final bool uplift;
+  final String note;
+  final String source;
+
+  static int _key(int m, int d) => m * 100 + d;
+
+  /// Whether [day] falls in the period (it may wrap over New Year).
+  bool contains(DateTime day) {
+    final int k = _key(day.month, day.day), a = _key(fromMonth, fromDay), b = _key(toMonth, toDay);
+    return a <= b ? (k >= a && k <= b) : (k >= a || k <= b);
+  }
+
+  static const List<String> _months = <String>['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+  String get dates => (fromMonth == toMonth && fromDay == toDay)
+      ? '${_months[fromMonth - 1]} $fromDay'
+      : '${_months[fromMonth - 1]} $fromDay to ${_months[toMonth - 1]} $toDay';
+}
+
+/// The national and Lipa holidays considered for the seasonal multiplier. Facts as found on 2026-11-04.
+class HolidayCalendar {
+  HolidayCalendar._();
+
+  static const List<HolidayPeriod> periods = <HolidayPeriod>[
+    HolidayPeriod(
+      id: 'christmas',
+      name: 'Christmas and New Year',
+      fromMonth: 12,
+      fromDay: 24,
+      toMonth: 1,
+      toDay: 1,
+      uplift: true,
+      note: 'Waste rose 10 to 20 percent in Philippine provincial cities during the holiday season.',
+      source: 'Iloilo City CENRO: holiday waste up 10-20 % (425 t on Dec 18-25 against 370 t before; New Year 440 t against 400 t), reported by Panay News, January 2025; Cagayan de Oro: 480 t/day against 400 t, Dec 24 to Jan 1 (PNA-based report). Other Philippine cities, not measured in Lipa.',
+    ),
+    HolidayPeriod(
+      id: 'undas',
+      name: 'All Saints and All Souls (Undas)',
+      fromMonth: 11,
+      fromDay: 1,
+      toMonth: 11,
+      toDay: 2,
+      uplift: false,
+      note: 'The documented increase is cemetery waste (DENR: over 1,000 tons collected nationwide after Undas 2024), not household waste. No multiplier.',
+    ),
+    HolidayPeriod(
+      id: 'lipa_festival',
+      name: 'Lipa Coffee Festival / Feast of St. Sebastian',
+      fromMonth: 1,
+      fromDay: 20,
+      toMonth: 1,
+      toDay: 20,
+      uplift: false,
+      note: 'A special non-working day in Lipa City (proclaimed each year). No waste figures found, so no multiplier.',
+    ),
+    HolidayPeriod(
+      id: 'lipa_foundation',
+      name: 'Lipa City Foundation Day',
+      fromMonth: 6,
+      fromDay: 20,
+      toMonth: 6,
+      toDay: 20,
+      uplift: false,
+      note: 'Celebrated on June 20 (a special non-working day in Lipa City). No waste figures found, so no multiplier.',
+    ),
+  ];
+
+  static HolidayPeriod? periodOn(DateTime day) {
+    for (final HolidayPeriod p in periods) {
+      if (p.contains(day)) return p;
+    }
+    return null;
+  }
+
+  /// The period (with a documented increase) that [day] belongs to, or null.
+  static HolidayPeriod? upliftOn(DateTime? day) {
+    if (day == null) return null;
+    final HolidayPeriod? p = periodOn(day);
+    return (p != null && p.uplift) ? p : null;
+  }
+}
+
 /// Seasonal/holiday multiplier. Neutral (1.0, inactive) unless an admin supplies a value WITH a source.
+/// With [holidaysOnly] it is applied only on the days of a period that has a documented increase (see [HolidayCalendar]);
+/// every other day is 1.0.
 class SeasonalMultiplier {
-  const SeasonalMultiplier({this.value = 1.0, this.source = '', this.validated = false, this.active = false, this.appliesTo = ''});
+  const SeasonalMultiplier({this.value = 1.0, this.source = '', this.validated = false, this.active = false, this.appliesTo = '', this.holidaysOnly = false});
+
+  final bool holidaysOnly;
 
   final double value;
   final String source;
@@ -51,6 +157,9 @@ class SeasonalMultiplier {
   /// The factor actually used: 1.0 unless active, finite, positive and sourced.
   double get effective => (active && value.isFinite && value > 0 && source.trim().isNotEmpty) ? value : 1.0;
   bool get applied => effective != 1.0;
+
+  /// The factor for [day]: [effective] on the days it applies to, otherwise 1.0.
+  double on(DateTime? day) => holidaysOnly ? (HolidayCalendar.upliftOn(day) != null ? effective : 1.0) : effective;
 }
 
 class EstimationParams {
@@ -60,7 +169,14 @@ class EstimationParams {
     this.kgPerHectareDay,
     this.hectareRateSource = '',
     this.seasonal = const SeasonalMultiplier(),
+    this.day,
   });
+
+  /// The day the estimate is for (null: no holiday logic, the multiplier applies as configured).
+  final DateTime? day;
+
+  /// The seasonal factor used for [day].
+  double get multiplier => seasonal.on(day);
 
   /// kg of waste generated per person per day, with the document it comes from.
   final double? kgPerCapitaDay;
@@ -151,6 +267,10 @@ class AreaShareBasis {
 class WasteEstimation {
   WasteEstimation._();
 
+  /// The capacity-equivalent of one truck (the same 5,000 kg the system counts per FULL event). Used only to express an
+  /// estimate as a share of a truck; it is not a measured weight.
+  static const double truckCapacityKg = 5000.0;
+
   static const double _earthRadiusM = 6371008.8;
 
   /// Geodesic area (m²) of a ring of `[lng, lat]` vertices (open or closed). Returns 0 for fewer than 3 distinct
@@ -221,10 +341,11 @@ class WasteEstimation {
   /// then per-hectare × usable size, then (with a [share] basis) the area's proportion of the barangay estimate by size.
   /// Never a guessed fallback.
   static AreaEstimate estimate(AreaConfig area, EstimationParams params, {AreaShareBasis? share}) {
-    final double m = params.seasonal.effective;
-    final List<String> seasonNote = params.seasonal.applied
-        ? <String>['Seasonal multiplier ×${_n(m)} (${params.seasonal.source}${params.seasonal.validated ? '' : '; not validated'})']
-        : const <String>['Seasonal multiplier ×1.0 (neutral)'];
+    final double m = params.multiplier;
+    final HolidayPeriod? holiday = params.seasonal.holidaysOnly ? HolidayCalendar.upliftOn(params.day) : null;
+    final List<String> seasonNote = m != 1.0
+        ? <String>['Seasonal multiplier ×${_n(m)}${holiday != null ? ' (${holiday.name})' : ''}, ${params.seasonal.source}${params.seasonal.validated ? '' : '; not validated for Lipa'}']
+        : const <String>['Seasonal multiplier ×1.0 (regular day)'];
 
     if (area.measuredKg != null) {
       final double k = area.measuredKg!;

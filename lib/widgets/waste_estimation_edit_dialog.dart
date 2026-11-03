@@ -463,19 +463,19 @@ class _WasteEstimationEditDialogState extends State<WasteEstimationEditDialog> {
 
   Widget _seasonal(bool wide, Map<String, String> errs) {
     final Map<String, dynamic> s = widget.settings ?? <String, dynamic>{};
-    final Widget value = _field('sea', 'Multiplier (1.0 = neutral)', s['seasonal_value'] ?? 1, errs, number: true, suffix: '×');
-    final Widget appliesTo = _field('sea_to', 'Applies to', s['seasonal_applies_to'], errs, hint: 'Days or seasons');
+    final Widget value = _field('sea', 'Holiday multiplier (1.0 = neutral)', s['seasonal_value'] ?? 1, errs, number: true, suffix: '×');
+    final Widget appliesTo = _field('sea_to', 'Note on where it applies', s['seasonal_applies_to'], errs, hint: 'Cities, years');
     final bool applied = _flags['seasonal_active'] == true;
     return _card(
       2,
       Icons.event_repeat_outlined,
       'Seasonal multiplier',
-      'Neutral (1.0) unless it has a documented source and date.',
+      'Applied automatically on Christmas and New Year (Dec 24 to Jan 1); every other day is 1.0. Neutral unless it has a documented source and date.',
       applied ? _chip('Applied', bg: const Color(0xFFFEF3C7), fg: _E.amber) : _chip('Neutral', icon: Icons.check_rounded),
       <Widget>[
         if (wide) Row(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[Expanded(child: value), const SizedBox(width: 16), Expanded(child: appliesTo)]) else ...<Widget>[value, appliesTo],
         _field('sea_src', 'Source and date of the multiplier', s['seasonal_source'], errs, lines: 2, hint: 'Document, author, date'),
-        _switch('seasonal_active', 'Apply the multiplier'),
+        _switch('seasonal_active', 'Apply on holidays automatically'),
         _switch('seasonal_validated', 'Evidence is on file (validated)'),
       ],
     );

@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:garbage_tracking_app/services/waste_estimation_service.dart';
 import 'package:garbage_tracking_app/widgets/waste_estimation_card.dart';
+import 'package:garbage_tracking_app/widgets/waste_estimation_details.dart';
 
 /// Objective 2.2 UI: a compact card on the Analytics page, details (Overview / Area Details / Parameters & Sources) in a
 /// dialog on wide screens and a full-screen page on phones. Same data and calculation everywhere; estimates are labelled
@@ -135,7 +137,8 @@ void main() {
         expect(find.text('Estimated waste generation using documented parameters.'), findsOneWidget);
         expect(find.text('Areas configured'), findsOneWidget);
         expect(find.text('Whole barangay (est.)'), findsOneWidget);
-        expect(find.text('×1.0 (Neutral)'), findsOneWidget);
+        expect(find.text('×1.0 today'), findsOneWidget);
+        expect(find.textContaining('trucks'), findsWidgets); // 9,639 kg/day against 5,000 kg per truck
         expect(find.textContaining('9,639 kg/day'), findsWidgets);
         expect(find.textContaining('not measured collected waste'), findsOneWidget);
         await tester.tap(find.text('Close'));
@@ -309,6 +312,67 @@ void main() {
     await tapText(tester, 'Area Details');
     expect(find.text('Barangay Balintawak'), findsOneWidget);
     expect(find.text('Barangay Balintawak (whole barangay)'), findsNothing);
+  });
+
+  group('holiday multiplier by date', () {
+    Map<String, Object?> body(bool active) => <String, Object?>{
+          'success': true,
+          'available': true,
+          'settings': <String, Object?>{
+            'kg_per_capita_day': '0.5000',
+            'rate_source': 'NSWMC 2015',
+            'seasonal_value': '1.150',
+            'seasonal_source': 'Iloilo City CENRO and Cagayan de Oro, holiday season +10-20 %',
+            'seasonal_active': active ? 1 : 0,
+          },
+          'areas': <Object>[
+            <String, Object?>{'area_key': 'barangay_total', 'population': 19278, 'population_source': 'PSA 2020', 'population_year': 2020},
+          ],
+        };
+
+    Future<void> openOn(WidgetTester tester, DateTime day, bool active) async {
+      tester.view.physicalSize = const Size(1366, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final WasteEstimationData data = WasteEstimationData.fromRaw((body: body(active), puroks: puroks), day: day);
+      await tester.pumpWidget(MaterialApp(home: Scaffold(body: WasteEstimationDetails(data: data, reload: () async => data))));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('a regular day: x1.0 today, and the Christmas figure is shown as what it will be', (WidgetTester tester) async {
+      await openOn(tester, DateTime(2026, 11, 4), true);
+      expect(tester.takeException(), isNull);
+      expect(find.text('×1.0 today'), findsOneWidget);
+      expect(find.textContaining('Christmas and New Year ×1.15'), findsOneWidget);
+      expect(find.textContaining('9,639 kg/day'), findsWidgets);
+      expect(find.text('1.9 trucks'), findsOneWidget);
+    });
+
+    testWidgets('on Christmas the multiplier applies by itself: 9,639 x 1.15 = 11,085 kg/day', (WidgetTester tester) async {
+      await openOn(tester, DateTime(2026, 12, 25), true);
+      expect(find.text('×1.15 today'), findsOneWidget);
+      expect(find.textContaining('11,085 kg/day'), findsWidgets);
+      expect(find.text('2.2 trucks'), findsOneWidget);
+      await tester.tap(find.text('Parameters & Sources'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Seasonal multiplier'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Lipa Coffee Festival'), findsOneWidget);
+      expect(find.textContaining('no multiplier'), findsWidgets);
+      expect(find.textContaining('No: taken from other Philippine cities'), findsOneWidget);
+    });
+
+    testWidgets('not applied: x1.0 even on Christmas', (WidgetTester tester) async {
+      await openOn(tester, DateTime(2026, 12, 25), false);
+      expect(find.text('×1.0 today'), findsOneWidget);
+      expect(find.textContaining('11,085'), findsNothing);
+    });
+
+    testWidgets('a Lipa holiday without documented waste figures says so and stays x1.0', (WidgetTester tester) async {
+      await openOn(tester, DateTime(2027, 1, 20), true);
+      expect(find.text('×1.0 today'), findsOneWidget);
+      expect(find.textContaining('no documented effect'), findsOneWidget);
+    });
   });
 
   testWidgets('the overview lists the first areas and points to the rest', (WidgetTester tester) async {
