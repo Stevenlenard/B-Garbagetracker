@@ -23,8 +23,11 @@ class PredictionEngine {
 
   /// 1. Waste Volume Prediction Logic
   /// Formula: Uses historical collection weight data if available, otherwise Area * Density * HolidayMultiplier
-  static double predictWasteVolume(String purokName, {int stopCount = 0, DateTime? date, double? historicalAvgKg}) {
-    double multiplier = HolidayTracker.getMultiplier(date ?? DateTime.now());
+  ///
+  /// [multiplier] replaces the weekend/holiday factor of [HolidayTracker] when given (1.0 = no adjustment). The reports use
+  /// 1.0: no source supports the legacy 1.2 on every Saturday and Sunday.
+  static double predictWasteVolume(String purokName, {int stopCount = 0, DateTime? date, double? historicalAvgKg, double? multiplier}) {
+    multiplier ??= HolidayTracker.getMultiplier(date ?? DateTime.now());
 
     if (historicalAvgKg != null && historicalAvgKg > 0) {
       // Historical data driven forecast
@@ -45,7 +48,7 @@ class PredictionEngine {
   }
 
   /// Predict Volume for the whole week
-  static double predictWeeklyVolume(String purokName, {int avgStops = 0, double? historicalAvgKg}) {
+  static double predictWeeklyVolume(String purokName, {int avgStops = 0, double? historicalAvgKg, double? multiplier}) {
     double total = 0;
     DateTime today = DateTime.now();
     for (int i = 0; i < 7; i++) {
@@ -54,6 +57,7 @@ class PredictionEngine {
         stopCount: avgStops,
         date: today.add(Duration(days: i)),
         historicalAvgKg: historicalAvgKg,
+        multiplier: multiplier,
       );
     }
     return total;

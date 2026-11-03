@@ -39,6 +39,10 @@ class _WasteEstimationCardState extends State<WasteEstimationCard> {
   Map<String, dynamic>? _settings;
   final List<_AreaRow> _rows = <_AreaRow>[];
 
+  /// The whole barangay (population x per-person rate). Kept apart from the areas so it is never added to them.
+  static const String _barangayKey = 'barangay_total';
+  _AreaRow? _barangay;
+
   @override
   void initState() {
     super.initState();
@@ -111,6 +115,8 @@ class _WasteEstimationCardState extends State<WasteEstimationCard> {
           ..saved = saved[p.key]);
       }
       _rows.sort((_AreaRow a, _AreaRow b) => a.name.compareTo(b.name));
+      _barangay = _AreaRow(key: _barangayKey, name: 'Barangay Balintawak (whole barangay)', geometrySize: const AreaSize.none())
+        ..saved = saved[_barangayKey];
     } on DioException catch (e) {
       final Object? d = e.response?.data;
       _error = (d is Map && d['message'] != null) ? '${d['message']}' : 'Could not load the waste estimation data.';
@@ -194,6 +200,7 @@ class _WasteEstimationCardState extends State<WasteEstimationCard> {
     final List<AreaEstimate> estimates = <AreaEstimate>[for (final _AreaRow r in _rows) WasteEstimation.estimate(_config(r), params)];
     final EstimateSummary sum = WasteEstimation.summarize(estimates);
     final SeasonalMultiplier sm = params.seasonal;
+    final AreaEstimate? whole = _barangay == null ? null : WasteEstimation.estimate(_config(_barangay!), params);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -215,9 +222,17 @@ class _WasteEstimationCardState extends State<WasteEstimationCard> {
         Wrap(spacing: 10, runSpacing: 10, children: <Widget>[
           _stat(t, 'Areas configured', '${sum.configuredCount} of ${sum.areaCount}'),
           _stat(t, 'Estimated generation', sum.configuredCount == 0 ? 'Not configured' : '${_fmt(sum.estimatedKgPerDay)} kg/day'),
+          if (whole != null) _stat(t, 'Whole barangay (population-based)', whole.hasNumber ? '${_fmt(whole.kgPerDay!)} kg/day' : 'Not configured'),
           _stat(t, 'Seasonal multiplier', sm.applied ? '×${sm.effective.toStringAsFixed(2)}${sm.validated ? '' : ' (not validated)'}' : '×1.0 (neutral)'),
         ]),
         const SizedBox(height: 12),
+        if (whole != null) ...<Widget>[
+          _areaTile(t, _barangay!, whole),
+          Padding(
+            padding: const EdgeInsets.only(bottom: 6),
+            child: Text('The areas below are estimated separately and are not added to the whole-barangay figure.', style: t.textTheme.bodySmall),
+          ),
+        ],
         if (_rows.isEmpty) Text('No collection areas found.', style: t.textTheme.bodyMedium),
         for (int i = 0; i < _rows.length; i++) _areaTile(t, _rows[i], estimates[i]),
       ],
@@ -239,7 +254,7 @@ class _WasteEstimationCardState extends State<WasteEstimationCard> {
 
   Widget _areaTile(ThemeData t, _AreaRow r, AreaEstimate e) {
     final AreaSize size = e.size;
-    final String sizeText = size.usable ? '${size.hectares.toStringAsFixed(2)} ha (${size.m2.round()} m²)' : 'Size unavailable';
+    final String sizeText = r.key == _barangayKey ? 'Whole barangay' : size.usable ? '${size.hectares.toStringAsFixed(2)} ha (${size.m2.round()} m²)' : 'Size unavailable';
     return ExpansionTile(
       tilePadding: EdgeInsets.zero,
       childrenPadding: const EdgeInsets.only(bottom: 8),
@@ -291,7 +306,7 @@ class _WasteEstimationCardState extends State<WasteEstimationCard> {
   Future<void> _edit() async {
     final bool? saved = await showDialog<bool>(
       context: context,
-      builder: (BuildContext _) => _EditDialog(settings: _settings, rows: _rows),
+      builder: (BuildContext _) => _EditDialog(settings: _settings, rows: <_AreaRow>[if (_barangay != null) _barangay!, ..._rows]),
     );
     if (saved == true) _load();
   }

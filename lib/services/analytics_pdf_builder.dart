@@ -846,7 +846,7 @@ class AnalyticsPdfBuilder {
         ]),
       ]),
       _p('Method: a baseline from the recorded collection weights combined with the number of stops per route. '
-          'It is a projection, not a measurement.', size: 8, color: muted),
+          'No holiday or weekend adjustment is applied. It is a projection, not a measurement.', size: 8, color: muted),
     ];
   }
 

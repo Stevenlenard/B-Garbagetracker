@@ -747,8 +747,9 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> with TickerProviderSt
       setState(() {
         _forecastSamples = validSessions;
         if (histAvgKg != null) {
-          _tomorrowWaste = PredictionEngine.predictWasteVolume(topArea, stopCount: _stopsPerRoute, historicalAvgKg: histAvgKg);
-          _weeklyWaste = PredictionEngine.predictWeeklyVolume(topArea, avgStops: _stopsPerRoute, historicalAvgKg: histAvgKg);
+          // No weekend/holiday adjustment: the earlier x1.2 on every Saturday and Sunday had no source.
+          _tomorrowWaste = PredictionEngine.predictWasteVolume(topArea, stopCount: _stopsPerRoute, historicalAvgKg: histAvgKg, multiplier: 1.0);
+          _weeklyWaste = PredictionEngine.predictWeeklyVolume(topArea, avgStops: _stopsPerRoute, historicalAvgKg: histAvgKg, multiplier: 1.0);
         } else {
           _tomorrowWaste = 0;
           _weeklyWaste = 0;

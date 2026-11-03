@@ -1,6 +1,11 @@
 # Objective 2.2: Waste Estimation by Collection Area
 
-Status 2026-11-04: implemented **locally only**. Not deployed, no migration run. The module computes nothing until an admin enters sourced parameters (see "What is missing").
+Status 2026-11-04: deployed with the approval of the project owner (see section 8). Starting values, each with its source (migration `2026_11_waste_estimation_seed.sql`):
+
+- Rate: **0.50 kg/person/day**, NSWMC 2015 national figure as cited in Villanueva et al. (2021), JPAIR 43(1). A secondary citation and a national average, not a Balintawak measurement.
+- Population: **19,278**, Barangay Balintawak, PSA 2020 CPH. Whole barangay only.
+- Result: **19,278 x 0.50 x 1.0 = 9,639 kg/day** for the whole barangay (an estimate of waste generated, not collected weight). Per-purok estimates stay "Not configured": there is no purok population and only OpenStreetMap-derived sizes (unverified), and the per-hectare rate has no source.
+- The whole-barangay figure is shown on its own and is never added to the per-area figures or to the capacity-equivalent total.
 
 ## 1. Area data (10 collection areas)
 
@@ -57,17 +62,17 @@ Example (test fixture, not real data): 10 ha × 30 kg/ha/day × 1.0 = 300 kg/day
 4. Optional: documented seasonal/holiday evidence for Lipa.
 5. The migration has to be approved and applied before the page can save anything.
 
-## 6. Separate finding: legacy holiday adjustment in PDF/Excel exports (not changed)
+## 6. Legacy holiday adjustment in PDF/Excel exports (corrected 2026-11-04 with approval)
 
 `HolidayTracker.getMultiplier` (`lib/utils/holiday_tracker.dart`) returns 1.2 for every Saturday and Sunday and for 13 hard-coded dates. `PredictionEngine.predictWasteVolume/predictWeeklyVolume` use it, and `analytics_screen.dart` (~725-770 and ~1036-1052) feeds those forecasts to the exported reports. No source supports a 20% weekend increase for Lipa. The Moving Average forecast and its error metrics do not use it and are untouched.
 
-**Proposed safe correction (needs your approval):** make the export forecast use the neutral multiplier 1.0 unless a sourced multiplier is configured in this module, and label the export "Holiday/seasonal adjustment: none applied" otherwise. Cover with a test that pins the current output first, then the change. Until then, exports continue to behave as before.
+**Correction made:** the Analytics forecast (on-screen and in the PDF/Excel exports) now passes a neutral multiplier of 1.0 (`PredictionEngine.predictWasteVolume/predictWeeklyVolume(multiplier: 1.0)`), and the exports say "No holiday or weekend adjustment is applied". `HolidayTracker` and the legacy default are unchanged and pinned by `test/forecast_holiday_test.dart`. Effect: the next-day figure no longer rises 20% on weekends and the 7-day total no longer depends on the weekday of export. The Moving Average, its metrics, and historical results are unaffected. Not changed: the unsourced +10% for routes of more than 10 stops in the same function.
 
 ## 7. Files
 
 New: `lib/utils/osm_area_references.dart`, `lib/utils/waste_estimation.dart`, `lib/widgets/waste_estimation_card.dart`, `test/waste_estimation_test.dart`, `test/waste_estimation_card_test.dart`, `backend/waste_estimation_lib.php`, `backend/get_waste_estimation.php`, `backend/save_waste_estimation.php`, `backend/migrations/2026_11_waste_estimation.sql`, `backend/migrations/2026_11_waste_estimation_rollback.sql`.
 Edited: `lib/api/api_service.dart` (two methods), `lib/screens/analytics_screen.dart` (one import and one card line in the insights section).
 
-## 8. Deployment requirements (not done)
+## 8. Deployment
 
 Run the migration after a database backup (rollback script provided), upload the two PHP endpoints plus `waste_estimation_lib.php`, build and upload web and APK. Both endpoints use `gt_guard(['admin'])` and prepared statements; save is POST-only and writes only the two new tables.

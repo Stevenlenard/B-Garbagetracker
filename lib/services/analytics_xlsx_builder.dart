@@ -247,7 +247,7 @@ class AnalyticsXlsxBuilder {
     if (c != ReportCategory.areaCoverage) {
       _sectionTitle(s, 'Waste forecast', cols);
       if (d.forecast.available) {
-        final String method = 'Projection from ${d.forecast.samples} recorded collection weight(s); not a measurement.';
+        final String method = 'Projection from ${d.forecast.samples} recorded collection weight(s); no holiday or weekend adjustment applied; not a measurement.';
         _table(s, const <String>['Forecast', 'Tons', 'Method'], <List<Object?>>[
           <Object?>[XlsxCell('Next collection day volume', _label), d.forecast.tomorrowKg / 1000.0, method],
           <Object?>[XlsxCell('Weekly volume projection', _label), d.forecast.weeklyKg / 1000.0, method],

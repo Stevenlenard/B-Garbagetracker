@@ -77,7 +77,29 @@ void main() {
     expect(find.textContaining('62150 m²'), findsOneWidget);
   });
 
-  testWidgets('tables not created yet: says so instead of showing numbers', (WidgetTester tester) async {
+  testWidgets('whole barangay: 19,278 people x 0.50 kg = 9,639 kg/day, with its sources, and not added to the areas', (WidgetTester tester) async {
+    await pump(tester, const Size(390, 800), <String, Object?>{
+      'success': true,
+      'available': true,
+      'settings': <String, Object?>{'kg_per_capita_day': '0.5000', 'rate_source': 'NSWMC 2015 via Villanueva et al. 2021', 'seasonal_value': '1.000'},
+      'areas': <Object>[
+        <String, Object?>{'area_key': 'barangay_total', 'population': 19278, 'population_source': 'PSA 2020 CPH', 'population_year': 2020},
+      ],
+    });
+    expect(tester.takeException(), isNull);
+    expect(find.textContaining('9639 kg/day'), findsWidgets);
+    expect(find.textContaining('not added to the whole-barangay figure'), findsOneWidget);
+    // the summary of the areas stays at "not configured": no purok has a population or a verified size
+    expect(find.textContaining('0 of 6'), findsOneWidget);
+    await tester.ensureVisible(find.text('Barangay Balintawak (whole barangay)'));
+    await tester.tap(find.text('Barangay Balintawak (whole barangay)'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('PSA 2020 CPH'), findsOneWidget);
+    expect(find.textContaining('NSWMC 2015'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('tables not created yet: says so instead of showing numbers',(WidgetTester tester) async {
     await pump(tester, const Size(390, 800), <String, Object?>{'success': true, 'available': false, 'settings': null, 'areas': <Object>[]});
     expect(find.textContaining('migration pending'), findsOneWidget);
   });
