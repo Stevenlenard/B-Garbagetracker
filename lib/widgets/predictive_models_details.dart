@@ -230,6 +230,8 @@ class PredictiveModelsDetails extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 16),
+            _Workings(regression: regression, forecast: forecast),
+            const SizedBox(height: 16),
             Theme(
               data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
               child: Material(
@@ -255,6 +257,323 @@ class PredictiveModelsDetails extends StatelessWidget {
       ),
     );
   }
+}
+
+/// "How these numbers were computed": the working behind every figure of the dialog, done on the recorded data itself, with
+/// where each piece of data comes from and where it can be checked in the system. Nothing here is typed in; it is all derived
+/// from the same reports the figures above come from, so it always matches them.
+class _Workings extends StatelessWidget {
+  const _Workings({required this.regression, required this.forecast});
+
+  final ArrivalRegressionReport regression;
+  final MovingAverageReport forecast;
+
+  static String minutes(double? v) => PredictiveModelsDetails.minutes(v);
+  static String kg(double? v) => PredictiveModelsDetails.kg(v);
+  static String r2Text(double? v) => PredictiveModelsDetails.r2Text(v);
+  static String _n(double v, [int d = 2]) => v.toStringAsFixed(d);
+  static String _signedKg(double v) => '${v >= 0 ? '+' : '−'}${NumberFormat('#,##0').format(v.abs().round())}';
+  static String _million(double v) => '${(v / 1e6).toStringAsFixed(1)} million kg²';
+  static String _kg(double v) => NumberFormat('#,##0').format(v.round());
+  static String _signed(double v, [int d = 1]) => '${v >= 0 ? '+' : '−'}${v.abs().toStringAsFixed(d)}';
+  static String _day(DateTime d) => DateFormat('MMM d').format(d);
+  static String _stamp(int ms) => DateFormat('MMM d, h:mm a').format(DateTime.fromMillisecondsSinceEpoch(ms, isUtc: true).add(const Duration(hours: 8)));
+  static String _tail(String id) => id.length <= 6 ? id : '…${id.substring(id.length - 6)}';
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
+      _Section(
+        icon: Icons.calculate_rounded,
+        color: PredictiveModelsDetails.teal,
+        title: 'How the arrival-time figures were computed',
+        method: 'Worked from the recorded trips',
+        badge: ('Real data', PredictiveModelsDetails.teal),
+        children: _arrival(),
+      ),
+      const SizedBox(height: 16),
+      _Section(
+        icon: Icons.calculate_rounded,
+        color: PredictiveModelsDetails.violet,
+        title: 'How the collected-load figures were computed',
+        method: 'Worked from the recorded loads',
+        badge: ('Real data', PredictiveModelsDetails.violet),
+        children: _load(),
+      ),
+    ]);
+  }
+
+  // ------------------------------------------------------------------ arrival time
+  List<Widget> _arrival() {
+    final List<ArrivalSample> all = regression.allSamples;
+    final LinearFit? fit = regression.fit;
+    if (all.length < 2 || fit == null) {
+      return const <Widget>[
+        _Method('There are not enough recorded approaches to a collection area yet to show the working. It appears here as soon as trucks record trips that enter the areas.'),
+      ];
+    }
+    final int n = all.length;
+    double mx = 0, my = 0;
+    for (final ArrivalSample s in all) {
+      mx += s.distanceKm;
+      my += s.actualMin;
+    }
+    mx /= n;
+    my /= n;
+    double sxx = 0, sxy = 0;
+    for (final ArrivalSample s in all) {
+      sxx += (s.distanceKm - mx) * (s.distanceKm - mx);
+      sxy += (s.distanceKm - mx) * (s.actualMin - my);
+    }
+
+    // a handful of samples spread over the whole period, so the table is not just the oldest trip
+    final int shown = math.min(6, n);
+    final List<ArrivalSample> pick = <ArrivalSample>[for (int i = 0; i < shown; i++) all[(i * (n - 1) / math.max(1, shown - 1)).round()]];
+    final ArrivalSample ex = pick.firstWhere((ArrivalSample s) => s.baselineMin != null, orElse: () => pick.first);
+    final double exModel = fit.predict(ex.distanceKm);
+    final double? exLive = ex.baselineMin;
+
+    final ErrorMetrics m = regression.regression;
+    final List<double> act = regression.testActual, pred = regression.testPredicted;
+    double sumAbs = 0, ssRes = 0, meanAct = 0;
+    for (int i = 0; i < act.length; i++) {
+      final double e = act[i] - pred[i];
+      sumAbs += e.abs();
+      ssRes += e * e;
+      meanAct += act[i];
+    }
+    if (act.isNotEmpty) meanAct /= act.length;
+    double ssTot = 0;
+    for (final double a in act) {
+      ssTot += (a - meanAct) * (a - meanAct);
+    }
+    final int tn = act.length;
+    final List<ArrivalSample> tested = regression.testSamples;
+    final int testShown = math.min(8, tn);
+
+    return <Widget>[
+      const _SubTitle('1. Where the data comes from'),
+      const SizedBox(height: 6),
+      _Bullets(<String>[
+        'Each sample is one GPS fix that the driver app saved for a trip (Firebase: driver_routes / trip / route). The same trip can be opened in Admin > Route History (past tracking): choose the date, open the trip and replay it.',
+        'Distance = straight line from that fix to the edge of the area (a 100 m circle around the area\'s verified point). Actual minutes = time from that fix until the first fix of the same trip inside the circle, which is the arrival of the truck at the area.',
+        'Only a truck that is collecting and was moving (3 km/h or more in the last 90 seconds), with a fix accuracy of 50 m or better, up to 5 km and 30 minutes before the arrival, one sample every 2 minutes. Simulated trips are left out.',
+        'Right now: $n samples from ${regression.trips} trips, ${_stamp(all.first.fixMs)} to ${_stamp(all.last.fixMs)} (Manila time).',
+      ]),
+      const SizedBox(height: 10),
+      _SubTitle('A few of the $n samples'),
+      const SizedBox(height: 6),
+      _Grid(
+        const <String>['Fix time', 'Area', 'Trip', 'Distance (km)', 'Speed (km/h)', 'Actual (min)'],
+        <List<String>>[
+          for (final ArrivalSample s in pick)
+            <String>[_stamp(s.fixMs), s.area, _tail(s.tripId), _n(s.distanceKm), s.speedKmh == null ? '—' : _n(s.speedKmh!, 1), _n(s.actualMin, 1)],
+        ],
+      ),
+      const SizedBox(height: 14),
+      _SubTitle('2. Where ${_n(fit.intercept)} and ${_n(fit.slope)} come from (the line through all the samples)'),
+      const SizedBox(height: 6),
+      const _Formula('minutes = intercept + slope × distance\nslope b = Σ(x − x̄)(y − ȳ) ÷ Σ(x − x̄)²\nintercept a = ȳ − b × x̄'),
+      const SizedBox(height: 8),
+      _Formula(
+        'n = $n samples\n'
+        'average distance x̄ = ${_n(mx, 3)} km\n'
+        'average actual time ȳ = ${_n(my, 2)} min\n'
+        'Σ(x − x̄)² = ${_n(sxx, 2)}\n'
+        'Σ(x − x̄)(y − ȳ) = ${_n(sxy, 2)}\n'
+        'slope b = ${_n(sxy, 2)} ÷ ${_n(sxx, 2)} = ${_n(fit.slope)} min per km\n'
+        'intercept a = ${_n(my, 2)} − ${_n(fit.slope)} × ${_n(mx, 3)} = ${_n(fit.intercept)} min',
+      ),
+      const SizedBox(height: 6),
+      _Method(
+        'So the slope ${_n(fit.slope)} means each extra kilometre adds about ${_n(fit.slope, 1)} minutes, and the intercept ${_n(fit.intercept)} is the time a collecting truck loses on the way '
+        '(stops, streets served, detours) even when it is close. Different trips give a different line, which is why the equation changes as trips are recorded. Figures are rounded for display.',
+      ),
+      const SizedBox(height: 8),
+      _SubTitle('Example with a real sample (${ex.area}, ${_stamp(ex.fixMs)}, trip ${_tail(ex.tripId)})'),
+      const SizedBox(height: 6),
+      _Formula(
+        'Model: minutes = ${_n(fit.intercept)} + ${_n(fit.slope)} × ${_n(ex.distanceKm)} = ${_n(exModel, 1)} min\n'
+        '${exLive == null ? '' : 'Live rule: Time = Distance ÷ Speed × 60\n'
+            '           = ${_n(ex.distanceKm)} ÷ ${_n(ex.speedKmh!, 1)} × 60 = ${_n(exLive, 1)} min\n'}'
+        'Actual: ${_n(ex.actualMin, 1)} min (the truck entered the circle that long after this fix)',
+      ),
+      const SizedBox(height: 14),
+      const _SubTitle('3. How MAE, RMSE and R² were measured'),
+      const SizedBox(height: 6),
+      _Method(
+        '${regression.method} The error is measured only on trips that were not used to fit the line, so it shows how the model does on trips it has not seen.'
+        '${regression.trainFit == null ? '' : ' The line used for the test is fitted on the first ${regression.trainTrips} trips only: minutes = ${_n(regression.trainFit!.intercept)} + ${_n(regression.trainFit!.slope)} × distance, so it differs a little from the line above, which uses all samples.'}',
+      ),
+      if (tn > 0) ...<Widget>[
+        const SizedBox(height: 8),
+        _SubTitle('${tn > testShown ? 'First $testShown of the $tn test samples' : 'The $tn test samples'} (error = actual − predicted)'),
+        const SizedBox(height: 6),
+        _Grid(
+          const <String>['Area', 'Distance (km)', 'Predicted (min)', 'Actual (min)', 'Error (min)'],
+          <List<String>>[
+            for (int i = 0; i < testShown; i++)
+              <String>[
+                i < tested.length ? tested[i].area : '—',
+                i < tested.length ? _n(tested[i].distanceKm) : '—',
+                _n(pred[i], 1),
+                _n(act[i], 1),
+                _signed(act[i] - pred[i]),
+              ],
+          ],
+        ),
+        const SizedBox(height: 8),
+        const _Formula('MAE  = Σ|actual − predicted| ÷ n\nRMSE = √( Σ(actual − predicted)² ÷ n )\nR²   = 1 − SSres ÷ SStot'),
+        const SizedBox(height: 8),
+        _Formula(
+          'MAE  = ${_n(sumAbs, 1)} ÷ $tn = ${minutes(m.mae)}\n'
+          'RMSE = √( ${_n(ssRes, 1)} ÷ $tn ) = ${minutes(m.rmse)}\n'
+          'SSres = Σ(actual − predicted)² = ${_n(ssRes, 1)}\n'
+          'SStot = Σ(actual − average actual)² = ${_n(ssTot, 1)}  (average actual = ${_n(meanAct, 1)} min)\n'
+          'R²   = 1 − ${_n(ssRes, 1)} ÷ ${_n(ssTot, 1)} = ${r2Text(m.r2)}',
+        ),
+        const SizedBox(height: 6),
+        _Method(
+          m.r2 == null
+              ? 'R² needs at least two test samples that are not all the same.'
+              : (m.r2! >= 0
+                  ? 'R² ${r2Text(m.r2)} means the distance explains ${(m.r2! * 100).round()} percent of the differences between the real arrival times; the rest is what distance cannot see (stops, route, traffic).'
+                  : 'R² ${r2Text(m.r2)} is below 0: on these test trips the line is worse than always predicting the average arrival time (${_n(meanAct, 1)} min).'),
+        ),
+      ],
+    ];
+  }
+
+  // ------------------------------------------------------------------ collected load
+  List<Widget> _load() {
+    final int w = forecast.window;
+    final List<double> s = forecast.series;
+    final ErrorMetrics m = forecast.metrics;
+    if (s.length < w || forecast.nextForecast == null) {
+      return <Widget>[_Method('The selected period is shorter than $w days, so there is no load figure to work out yet.')];
+    }
+    final List<int> last = <int>[for (int i = s.length - w; i < s.length; i++) i];
+    final double sum = last.fold<double>(0, (double a, int i) => a + s[i]);
+
+    final int bn = forecast.backtestActual.length;
+    double sumAbs = 0, ssRes = 0, meanAct = 0;
+    for (int i = 0; i < bn; i++) {
+      final double e = forecast.backtestActual[i] - forecast.backtestForecast[i];
+      sumAbs += e.abs();
+      ssRes += e * e;
+      meanAct += forecast.backtestActual[i];
+    }
+    if (bn > 0) meanAct /= bn;
+    double ssTot = 0;
+    for (final double a in forecast.backtestActual) {
+      ssTot += (a - meanAct) * (a - meanAct);
+    }
+    final int shown = math.min(7, bn);
+
+    return <Widget>[
+      const _SubTitle('1. Where the data comes from'),
+      const SizedBox(height: 6),
+      const _Bullets(<String>[
+        'Each load is a trip that was finalized FULL. Open Analytics > Waste Collection Summary > View Load History to see every trip under its date; it is the same list the Waste Collection Summary card counts.',
+        'Every FULL counts as 5,000 kg unless an admin entered a measured weight, because there is no weighing scale yet. So the daily load is mostly the number of FULL trips of the day × 5,000 kg.',
+        'A day with no FULL is 0 kg. Days are Asia/Manila calendar days.',
+      ]),
+      const SizedBox(height: 10),
+      _SubTitle('2. The next-day forecast (the last $w days)'),
+      const SizedBox(height: 6),
+      _Grid(
+        <String>['Day', for (final int i in last) _day(forecast.days[i])],
+        <List<String>>[
+          <String>['Load (kg)', for (final int i in last) _kg(s[i])],
+        ],
+      ),
+      const SizedBox(height: 8),
+      _Formula(
+        'Forecast = (sum of the last $w days) ÷ $w\n'
+        '= (${last.map((int i) => _kg(s[i])).join(' + ')}) ÷ $w\n'
+        '= ${_kg(sum)} ÷ $w = ${kg(forecast.nextForecast)}',
+      ),
+      const SizedBox(height: 14),
+      const _SubTitle('3. How it was checked against what really happened'),
+      const SizedBox(height: 6),
+      _Method('Every day from day ${w + 1} on was forecast from the $w days before it and then compared with the real load of that day ($bn checked days).'),
+      if (bn > 0) ...<Widget>[
+        const SizedBox(height: 8),
+        _SubTitle('The latest $shown checked days (error = actual − forecast)'),
+        const SizedBox(height: 6),
+        _Grid(
+          <String>['Day', 'Previous $w days (kg)', 'Forecast (kg)', 'Actual (kg)', 'Error (kg)'],
+          <List<String>>[
+            for (int i = bn - shown; i < bn; i++)
+              <String>[
+                _day(forecast.days[w + i]),
+                _kg(forecast.backtestForecast[i] * w),
+                _kg(forecast.backtestForecast[i]),
+                _kg(forecast.backtestActual[i]),
+                _signedKg(forecast.backtestActual[i] - forecast.backtestForecast[i]),
+              ],
+          ],
+        ),
+        const SizedBox(height: 8),
+        _Formula(
+          'MAE  = Σ|actual − forecast| ÷ n = ${_kg(sumAbs)} ÷ $bn = ${kg(m.mae)}\n'
+          'RMSE = √( Σ(actual − forecast)² ÷ n ) = √( ${_million(ssRes)} ÷ $bn ) = ${kg(m.rmse)}\n'
+          'SSres = Σ(actual − forecast)² = ${_million(ssRes)}\n'
+          'SStot = Σ(actual − average actual)² = ${_million(ssTot)}  (average actual = ${_kg(meanAct)} kg)\n'
+          'R²   = 1 − SSres ÷ SStot = ${r2Text(m.r2)}',
+        ),
+        const SizedBox(height: 6),
+        _Method(
+          m.r2 == null
+              ? 'R² needs at least two checked days that are not all the same.'
+              : (m.r2! >= 0
+                  ? 'R² ${r2Text(m.r2)}: the forecast explains ${(m.r2! * 100).round()} percent of the day-to-day differences.'
+                  : 'R² ${r2Text(m.r2)} is below 0: always forecasting the average day (${_kg(meanAct)} kg) would have been closer, because collection days alternate between 0 and many loads and an average of the past week cannot follow that.'),
+        ),
+      ],
+    ];
+  }
+}
+
+class _Bullets extends StatelessWidget {
+  const _Bullets(this.items);
+  final List<String> items;
+  @override
+  Widget build(BuildContext context) => Column(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
+        for (final String t in items)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 5),
+            child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
+              const Padding(padding: EdgeInsets.only(top: 7, right: 8), child: Icon(Icons.circle, size: 5, color: PredictiveModelsDetails.muted)),
+              Expanded(child: Text(t, style: const TextStyle(fontSize: 12.5, height: 1.45, color: Color(0xFF334155)))),
+            ]),
+          ),
+      ]);
+}
+
+/// A small table that scrolls sideways on a narrow screen instead of squeezing its columns.
+class _Grid extends StatelessWidget {
+  const _Grid(this.headers, this.rows);
+  final List<String> headers;
+  final List<List<String>> rows;
+
+  Widget _cell(String t, {bool head = false}) => Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        child: Text(t, style: TextStyle(fontSize: 12, fontWeight: head ? FontWeight.w800 : FontWeight.w500, color: PredictiveModelsDetails.ink)),
+      );
+
+  @override
+  Widget build(BuildContext context) => SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Table(
+          defaultColumnWidth: const IntrinsicColumnWidth(),
+          border: TableBorder.all(color: const Color(0xFFE2E8F0), borderRadius: BorderRadius.circular(8)),
+          children: <TableRow>[
+            TableRow(decoration: const BoxDecoration(color: Color(0xFFF1F5F9)), children: <Widget>[for (final String h in headers) _cell(h, head: true)]),
+            for (final List<String> r in rows) TableRow(children: <Widget>[for (final String v in r) _cell(v)]),
+          ],
+        ),
+      );
 }
 
 class _Section extends StatelessWidget {

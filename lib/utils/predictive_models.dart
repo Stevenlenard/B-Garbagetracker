@@ -118,6 +118,10 @@ class ArrivalRegressionReport {
     required this.baseline,
     required this.testActual,
     required this.testPredicted,
+    this.allSamples = const <ArrivalSample>[],
+    this.testSamples = const <ArrivalSample>[],
+    this.trainFit,
+    this.trainTrips = 0,
   });
 
   final int samples;
@@ -134,6 +138,17 @@ class ArrivalRegressionReport {
   final ErrorMetrics baseline;
   final List<double> testActual;
   final List<double> testPredicted;
+
+  /// Every sample the equation [fit] was fitted on (what the details dialog shows its working from).
+  final List<ArrivalSample> allSamples;
+
+  /// The samples [testActual] and [testPredicted] belong to, in the same order (test trips only).
+  final List<ArrivalSample> testSamples;
+
+  /// The line fitted on the training trips only, which made the test predictions (null with leave-one-trip-out,
+  /// where every trip is predicted by a different line), and how many trips it was fitted on.
+  final LinearFit? trainFit;
+  final int trainTrips;
 
   bool get hasModel => fit != null && regression.n > 0;
 }
@@ -221,10 +236,14 @@ class ArrivalRegression {
     }
     final LinearFit? all = LinearFit.fit(samples.map((s) => s.distanceKm).toList(), samples.map((s) => s.actualMin).toList());
     final List<double> act = <double>[], pred = <double>[], bAct = <double>[], bPred = <double>[];
+    final List<ArrivalSample> tested = <ArrivalSample>[];
+    LinearFit? trainFit;
+    int trainTrips = 0;
     String method;
 
     void score(List<ArrivalSample> test, LinearFit f) {
       for (final ArrivalSample s in test) {
+        tested.add(s);
         act.add(s.actualMin);
         pred.add(math.max(0, f.predict(s.distanceKm)));
         final double? b = s.baselineMin;
@@ -241,6 +260,8 @@ class ArrivalRegression {
       final List<ArrivalSample> tr = samples.where((s) => train.contains(s.tripId)).toList();
       final LinearFit? f = LinearFit.fit(tr.map((s) => s.distanceKm).toList(), tr.map((s) => s.actualMin).toList());
       if (f != null) score(samples.where((s) => !train.contains(s.tripId)).toList(), f);
+      trainFit = f;
+      trainTrips = cut;
       method = 'Fitted on the earliest $cut of ${tripOrder.length} trips and tested on the other ${tripOrder.length - cut}.';
     } else {
       for (final String t in tripOrder) {
@@ -259,6 +280,10 @@ class ArrivalRegression {
       baseline: ErrorMetrics.of(bAct, bPred),
       testActual: act,
       testPredicted: pred,
+      allSamples: samples,
+      testSamples: tested,
+      trainFit: trainFit,
+      trainTrips: trainTrips,
     );
   }
 }
