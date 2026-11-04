@@ -4,6 +4,7 @@ import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
+import '../utils/app_localizations.dart';
 import '../utils/predictive_models.dart';
 import 'ai_model_explanation.dart';
 
@@ -259,46 +260,66 @@ class PredictiveModelsDetails extends StatelessWidget {
   }
 }
 
+/// Number and date formatting of the working (the same figures in English and in Tagalog).
+class _F {
+  static String minutes(double? v) => PredictiveModelsDetails.minutes(v);
+  static String kg(double? v) => PredictiveModelsDetails.kg(v);
+  static String r2(double? v) => PredictiveModelsDetails.r2Text(v);
+  static String n(double v, [int d = 2]) => v.toStringAsFixed(d);
+  static String kgn(double v) => NumberFormat('#,##0').format(v.round());
+  static String signed(double v, [int d = 1]) => '${v >= 0 ? '+' : '−'}${v.abs().toStringAsFixed(d)}';
+  static String signedKg(double v) => '${v >= 0 ? '+' : '−'}${NumberFormat('#,##0').format(v.abs().round())}';
+  static String million(double v, bool tl) => '${(v / 1e6).toStringAsFixed(1)} ${tl ? 'milyong' : 'million'} kg²';
+  static String day(DateTime d) => DateFormat('MMM d').format(d);
+  static String stamp(int ms) => DateFormat('MMM d, h:mm a').format(DateTime.fromMillisecondsSinceEpoch(ms, isUtc: true).add(const Duration(hours: 8)));
+  static String tail(String id) => id.length <= 6 ? id : '…${id.substring(id.length - 6)}';
+}
+
 /// "How these numbers were computed": the working behind every figure of the dialog, done on the recorded data itself, with
 /// where each piece of data comes from and where it can be checked in the system. Nothing here is typed in; it is all derived
 /// from the same reports the figures above come from, so it always matches them. Each step is a dropdown, so the reader opens
-/// only the part that is being asked about.
-class _Workings extends StatelessWidget {
+/// only the part that is being asked about, and the whole section can be read in English or in Tagalog (the figures,
+/// formulas and screen names stay the same; only the sentences are translated).
+class _Workings extends StatefulWidget {
   const _Workings({required this.regression, required this.forecast});
 
   final ArrivalRegressionReport regression;
   final MovingAverageReport forecast;
 
-  static String minutes(double? v) => PredictiveModelsDetails.minutes(v);
-  static String kg(double? v) => PredictiveModelsDetails.kg(v);
-  static String r2Text(double? v) => PredictiveModelsDetails.r2Text(v);
-  static String _n(double v, [int d = 2]) => v.toStringAsFixed(d);
-  static String _kg(double v) => NumberFormat('#,##0').format(v.round());
-  static String _signed(double v, [int d = 1]) => '${v >= 0 ? '+' : '−'}${v.abs().toStringAsFixed(d)}';
-  static String _signedKg(double v) => '${v >= 0 ? '+' : '−'}${NumberFormat('#,##0').format(v.abs().round())}';
-  static String _million(double v) => '${(v / 1e6).toStringAsFixed(1)} million kg²';
-  static String _day(DateTime d) => DateFormat('MMM d').format(d);
-  static String _stamp(int ms) => DateFormat('MMM d, h:mm a').format(DateTime.fromMillisecondsSinceEpoch(ms, isUtc: true).add(const Duration(hours: 8)));
-  static String _tail(String id) => id.length <= 6 ? id : '…${id.substring(id.length - 6)}';
+  @override
+  State<_Workings> createState() => _WorkingsState();
+}
+
+class _WorkingsState extends State<_Workings> {
+  /// Starts in the language the app is set to.
+  bool _tl = AppLocalizations.currentLanguage.value == AppLanguage.fil;
+
+  ArrivalRegressionReport get regression => widget.regression;
+  MovingAverageReport get forecast => widget.forecast;
+
+  /// The sentence in the language chosen.
+  String _t(String en, String tl) => _tl ? tl : en;
 
   @override
   Widget build(BuildContext context) {
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
+      _LangToggle(tl: _tl, onChanged: (bool v) => setState(() => _tl = v)),
+      const SizedBox(height: 10),
       _Section(
         icon: Icons.calculate_rounded,
         color: PredictiveModelsDetails.teal,
-        title: 'How the arrival-time figures were computed',
-        method: 'Worked from the recorded trips',
-        badge: ('Real data', PredictiveModelsDetails.teal),
+        title: _t('How the arrival-time figures were computed', 'Paano nakuha ang mga numero ng arrival time'),
+        method: _t('Worked from the recorded trips', 'Kinuwenta mula sa mga naitalang trip'),
+        badge: (_t('Real data', 'Totoong datos'), PredictiveModelsDetails.teal),
         children: _arrival(),
       ),
       const SizedBox(height: 16),
       _Section(
         icon: Icons.calculate_rounded,
         color: PredictiveModelsDetails.violet,
-        title: 'How the collected-load figures were computed',
-        method: 'Worked from the recorded loads',
-        badge: ('Real data', PredictiveModelsDetails.violet),
+        title: _t('How the collected-load figures were computed', 'Paano nakuha ang mga numero ng collected load'),
+        method: _t('Worked from the recorded loads', 'Kinuwenta mula sa mga naitalang load'),
+        badge: (_t('Real data', 'Totoong datos'), PredictiveModelsDetails.violet),
         children: _load(),
       ),
     ]);
@@ -310,8 +331,11 @@ class _Workings extends StatelessWidget {
     final List<ArrivalSample> all = regression.allSamples;
     final LinearFit? fit = regression.fit;
     if (all.length < 2 || fit == null) {
-      return const <Widget>[
-        _Method('There are not enough recorded approaches to a collection area yet to show the working. It appears here as soon as trucks record trips that enter the areas.'),
+      return <Widget>[
+        _Method(_t(
+          'There are not enough recorded approaches to a collection area yet to show the working. It appears here as soon as trucks record trips that enter the areas.',
+          'Wala pang sapat na naitalang pagpasok sa collection area para maipakita ang kuwenta. Lalabas ito dito kapag may mga trip nang pumasok sa mga area.',
+        )),
       ];
     }
     final int n = all.length;
@@ -352,30 +376,60 @@ class _Workings extends StatelessWidget {
     final int tn = act.length;
     final List<ArrivalSample> tested = regression.testSamples;
     final int testShown = math.min(8, tn);
+    final String a = _F.n(fit.intercept), b = _F.n(fit.slope);
+
+    final String method = regression.trainFit == null
+        ? _t(regression.method, 'Leave-one-trip-out: bawat isa sa ${regression.trips} trip ay hinuhulaan ng linyang hinubog sa ibang mga trip.')
+        : _t(regression.method,
+            'Hinubog sa pinakamaagang ${regression.trainTrips} sa ${regression.trips} trip at sinubok sa natirang ${regression.trips - regression.trainTrips}.');
 
     return <Widget>[
       _Step(
         n: 1,
         color: c,
-        title: 'Where the data comes from',
-        summary: '$n samples from ${regression.trips} trips',
+        title: _t('Where the data comes from', 'Saan galing ang data'),
+        summary: _t('$n samples from ${regression.trips} trips', '$n sample mula sa ${regression.trips} trip'),
         children: <Widget>[
-          const _Fact(Icons.storage_rounded, 'Source', 'Each sample is one GPS fix that the driver app saved for a trip (Firebase: driver_routes / trip / route).'),
-          const _Fact(Icons.travel_explore_rounded, 'Check it in the system',
-              'Admin > Route History (past tracking): choose the date, open the trip and replay it. The fixes inside the 100 m circle of the area are the arrival.'),
-          const _Fact(Icons.straighten_rounded, 'Distance and actual minutes',
-              'Distance = straight line from the fix to the edge of the area (a 100 m circle around the area\'s verified point). Actual minutes = time from the fix until the first fix of the same trip inside the circle.'),
-          const _Fact(Icons.filter_alt_rounded, 'What counts as a sample',
-              'A collecting truck that was moving (3 km/h or more in the last 90 seconds), fix accuracy 50 m or better, up to 5 km and 30 minutes before the arrival, one sample every 2 minutes. Simulated trips are left out.'),
-          _Fact(Icons.event_rounded, 'Right now', '$n samples from ${regression.trips} trips, ${_stamp(all.first.fixMs)} to ${_stamp(all.last.fixMs)} (Manila time).'),
+          _Fact(
+              Icons.storage_rounded,
+              _t('Source', 'Pinagmulan'),
+              _t('Each sample is one GPS fix that the driver app saved for a trip (Firebase: driver_routes / trip / route).',
+                  'Ang bawat sample ay isang GPS fix na na-save ng driver app para sa isang trip (Firebase: driver_routes / trip / route).')),
+          _Fact(
+              Icons.travel_explore_rounded,
+              _t('Check it in the system', 'Paano i-check sa system'),
+              _t('Admin > Route History (past tracking): choose the date, open the trip and replay it. The fixes inside the 100 m circle of the area are the arrival.',
+                  'Admin > Route History (past tracking): piliin ang petsa, buksan ang trip at i-replay. Ang mga fix sa loob ng 100 m na bilog ng area ang dating ng truck.')),
+          _Fact(
+              Icons.straighten_rounded,
+              _t('Distance and actual minutes', 'Layo at totoong minuto'),
+              _t('Distance = straight line from the fix to the edge of the area (a 100 m circle around the area\'s verified point). Actual minutes = time from the fix until the first fix of the same trip inside the circle.',
+                  'Layo = tuwid na linya mula sa fix hanggang sa gilid ng area (100 m na bilog sa paligid ng verified point ng area). Totoong minuto = oras mula sa fix hanggang sa unang fix ng parehong trip na nasa loob ng bilog.')),
+          _Fact(
+              Icons.filter_alt_rounded,
+              _t('What counts as a sample', 'Ano ang binibilang na sample'),
+              _t('A collecting truck that was moving (3 km/h or more in the last 90 seconds), fix accuracy 50 m or better, up to 5 km and 30 minutes before the arrival, one sample every 2 minutes. Simulated trips are left out.',
+                  'Truck na nangongolekta at gumagalaw (3 km/h o higit sa huling 90 segundo), accuracy ng fix na 50 m o mas maganda, hanggang 5 km at 30 minuto bago dumating, isang sample bawat 2 minuto. Hindi kasama ang mga simulation.')),
+          _Fact(
+              Icons.event_rounded,
+              _t('Right now', 'Ngayon'),
+              _t('$n samples from ${regression.trips} trips, ${_F.stamp(all.first.fixMs)} to ${_F.stamp(all.last.fixMs)} (Manila time).',
+                  '$n sample mula sa ${regression.trips} trip, ${_F.stamp(all.first.fixMs)} hanggang ${_F.stamp(all.last.fixMs)} (oras sa Maynila).')),
           const SizedBox(height: 6),
-          _SubTitle('A few of the $n samples'),
+          _SubTitle(_t('A few of the $n samples', 'Ilan sa $n sample')),
           const SizedBox(height: 6),
           _Grid(
-            const <String>['Fix time', 'Area', 'Trip', 'Distance (km)', 'Speed (km/h)', 'Actual (min)'],
+            <String>[
+              _t('Fix time', 'Oras ng fix'),
+              _t('Area', 'Area'),
+              _t('Trip', 'Trip'),
+              _t('Distance (km)', 'Layo (km)'),
+              _t('Speed (km/h)', 'Bilis (km/h)'),
+              _t('Actual (min)', 'Totoo (min)'),
+            ],
             <List<String>>[
               for (final ArrivalSample s in pick)
-                <String>[_stamp(s.fixMs), s.area, _tail(s.tripId), _n(s.distanceKm), s.speedKmh == null ? '—' : _n(s.speedKmh!, 1), _n(s.actualMin, 1)],
+                <String>[_F.stamp(s.fixMs), s.area, _F.tail(s.tripId), _F.n(s.distanceKm), s.speedKmh == null ? '—' : _F.n(s.speedKmh!, 1), _F.n(s.actualMin, 1)],
             ],
             color: c,
           ),
@@ -385,110 +439,175 @@ class _Workings extends StatelessWidget {
         n: 2,
         color: c,
         open: true,
-        title: 'Where ${_n(fit.intercept)} and ${_n(fit.slope)} come from',
-        summary: 'minutes = ${_n(fit.intercept)} + ${_n(fit.slope)} × distance (km)',
+        title: _t('Where $a and $b come from', 'Saan galing ang $a at $b'),
+        summary: _t('minutes = $a + $b × distance (km)', 'minuto = $a + $b × layo (km)'),
         children: <Widget>[
-          const _Method('The line is the straight line that passes closest to all the samples (least squares). First the averages and sums of the samples:'),
+          _Method(_t(
+            'The line is the straight line that passes closest to all the samples (least squares). First the averages and sums of the samples:',
+            'Ang linya ay ang tuwid na linyang pinakamalapit sa lahat ng sample (least squares). Una, ang mga average at kabuuan ng mga sample:',
+          )),
           const SizedBox(height: 8),
           _CalcRows(<(String, String)>[
-            ('Number of samples', '$n'),
-            ('Average distance', '${_n(mx, 3)} km'),
-            ('Average actual minutes', '${_n(my)} min'),
-            ('Spread of the distances: sum of (distance − average distance)²', _n(sxx)),
-            ('Distance and minutes moving together: sum of (distance − average distance) × (minutes − average minutes)', _n(sxy)),
+            (_t('Number of samples', 'Bilang ng sample'), '$n'),
+            (_t('Average distance', 'Average na layo'), '${_F.n(mx, 3)} km'),
+            (_t('Average actual minutes', 'Average na totoong minuto'), '${_F.n(my)} min'),
+            (
+              _t('Spread of the distances: sum of (distance − average distance)²', 'Lawak ng mga layo: kabuuan ng (layo − average na layo)²'),
+              _F.n(sxx)
+            ),
+            (
+              _t('Distance and minutes moving together: sum of (distance − average distance) × (minutes − average minutes)',
+                  'Layo at minuto na sabay gumagalaw: kabuuan ng (layo − average na layo) × (minuto − average na minuto)'),
+              _F.n(sxy)
+            ),
           ]),
           const SizedBox(height: 10),
-          _Eq(title: 'Slope', general: 'slope = moving together ÷ spread of the distances', numbers: '${_n(sxy)} ÷ ${_n(sxx)}', result: '${_n(fit.slope)} min per km', color: c),
+          _Eq(
+              title: 'Slope',
+              general: _t('slope = moving together ÷ spread of the distances', 'slope = sabay na paggalaw ÷ lawak ng mga layo'),
+              numbers: '${_F.n(sxy)} ÷ ${_F.n(sxx)}',
+              result: _t('$b min per km', '$b min kada km'),
+              color: c),
           const SizedBox(height: 8),
-          _Eq(title: 'Intercept', general: 'intercept = average minutes − slope × average distance', numbers: '${_n(my)} − ${_n(fit.slope)} × ${_n(mx, 3)}', result: '${_n(fit.intercept)} min', color: c),
+          _Eq(
+              title: 'Intercept',
+              general: _t('intercept = average minutes − slope × average distance', 'intercept = average na minuto − slope × average na layo'),
+              numbers: '${_F.n(my)} − $b × ${_F.n(mx, 3)}',
+              result: '$a min',
+              color: c),
           const SizedBox(height: 10),
-          _Banner('minutes = ${_n(fit.intercept)} + ${_n(fit.slope)} × distance (km)', c),
+          _Banner(_t('minutes = $a + $b × distance (km)', 'minuto = $a + $b × layo (km)'), c),
           const SizedBox(height: 8),
-          _Method(
-            'Slope ${_n(fit.slope)}: each extra kilometre adds about ${_n(fit.slope, 1)} minutes. Intercept ${_n(fit.intercept)}: the time a collecting truck loses on the way (stops, streets served, detours) even when it is close. '
-            'The line changes as trips are recorded. Figures are rounded for display.',
-          ),
+          _Method(_t(
+            'Slope $b: each extra kilometre adds about ${_F.n(fit.slope, 1)} minutes. Intercept $a: the time a collecting truck loses on the way (stops, streets served, detours) even when it is close. '
+                'The line changes as trips are recorded. Figures are rounded for display.',
+            'Slope $b: bawat dagdag na kilometro ay nagdadagdag ng mga ${_F.n(fit.slope, 1)} minuto. Intercept $a: ang oras na nawawala sa nangongolektang truck sa daan (paghinto, mga kalyeng dinadaanan, paglihis) kahit malapit na ito. '
+                'Nagbabago ang linya habang may naitatalang trip. Ni-round ang mga numero para sa display.',
+          )),
         ],
       ),
       _Step(
         n: 3,
         color: c,
-        title: 'Example with a real sample',
-        summary: '${ex.area} · model ${_n(exModel, 1)} min · actual ${_n(ex.actualMin, 1)} min',
+        title: _t('Example with a real sample', 'Halimbawa gamit ang totoong sample'),
+        summary: _t('${ex.area} · model ${_F.n(exModel, 1)} min · actual ${_F.n(ex.actualMin, 1)} min',
+            '${ex.area} · model ${_F.n(exModel, 1)} min · totoo ${_F.n(ex.actualMin, 1)} min'),
         children: <Widget>[
           _CalcRows(<(String, String)>[
-            ('Area', ex.area),
-            ('Fix time', _stamp(ex.fixMs)),
-            ('Trip', _tail(ex.tripId)),
-            ('Distance to the area', '${_n(ex.distanceKm)} km'),
-            if (ex.speedKmh != null) ('Truck speed', '${_n(ex.speedKmh!, 1)} km/h'),
+            (_t('Area', 'Area'), ex.area),
+            (_t('Fix time', 'Oras ng fix'), _F.stamp(ex.fixMs)),
+            (_t('Trip', 'Trip'), _F.tail(ex.tripId)),
+            (_t('Distance to the area', 'Layo sa area'), '${_F.n(ex.distanceKm)} km'),
+            if (ex.speedKmh != null) (_t('Truck speed', 'Bilis ng truck'), '${_F.n(ex.speedKmh!, 1)} km/h'),
           ]),
           const SizedBox(height: 10),
-          _Eq(title: 'Model', general: 'minutes = intercept + slope × distance', numbers: '${_n(fit.intercept)} + ${_n(fit.slope)} × ${_n(ex.distanceKm)}', result: '${_n(exModel, 1)} min', color: c),
+          _Eq(
+              title: 'Model',
+              general: _t('minutes = intercept + slope × distance', 'minuto = intercept + slope × layo'),
+              numbers: '$a + $b × ${_F.n(ex.distanceKm)}',
+              result: '${_F.n(exModel, 1)} min',
+              color: c),
           if (exLive != null) ...<Widget>[
             const SizedBox(height: 8),
             _Eq(
                 title: 'Live rule',
-                general: 'Time = Distance ÷ Speed × 60',
-                numbers: '${_n(ex.distanceKm)} ÷ ${_n(ex.speedKmh!, 1)} × 60',
-                result: '${_n(exLive, 1)} min',
+                general: _t('Time = Distance ÷ Speed × 60', 'Oras = Layo ÷ Bilis × 60'),
+                numbers: '${_F.n(ex.distanceKm)} ÷ ${_F.n(ex.speedKmh!, 1)} × 60',
+                result: '${_F.n(exLive, 1)} min',
                 color: const Color(0xFF0EA5E9)),
           ],
           const SizedBox(height: 10),
           _MetricRow(<(String, String)>[
-            ('Model said', '${_n(exModel, 1)} min'),
-            if (exLive != null) ('Live rule said', '${_n(exLive, 1)} min'),
-            ('Really took', '${_n(ex.actualMin, 1)} min'),
+            (_t('Model said', 'Sabi ng model'), '${_F.n(exModel, 1)} min'),
+            if (exLive != null) (_t('Live rule said', 'Sabi ng live rule'), '${_F.n(exLive, 1)} min'),
+            (_t('Really took', 'Totoong inabot'), '${_F.n(ex.actualMin, 1)} min'),
           ]),
         ],
       ),
       _Step(
         n: 4,
         color: c,
-        title: 'How MAE, RMSE and R² were measured',
-        summary: 'MAE ${minutes(m.mae)} · RMSE ${minutes(m.rmse)} · R² ${r2Text(m.r2)}',
+        title: _t('How MAE, RMSE and R² were measured', 'Paano nasukat ang MAE, RMSE at R²'),
+        summary: 'MAE ${_F.minutes(m.mae)} · RMSE ${_F.minutes(m.rmse)} · R² ${_F.r2(m.r2)}',
         children: <Widget>[
-          _Method(
-            '${regression.method} The error is measured only on trips that were not used to fit the line, so it shows how the model does on trips it has not seen.'
-            '${regression.trainFit == null ? '' : ' The line used for the test is fitted on the first ${regression.trainTrips} trips only: minutes = ${_n(regression.trainFit!.intercept)} + ${_n(regression.trainFit!.slope)} × distance, so it differs a little from the line above, which uses all samples.'}',
-          ),
+          _Method(_t(
+            '$method The error is measured only on trips that were not used to fit the line, so it shows how the model does on trips it has not seen.'
+                '${regression.trainFit == null ? '' : ' The line used for the test is fitted on the first ${regression.trainTrips} trips only: minutes = ${_F.n(regression.trainFit!.intercept)} + ${_F.n(regression.trainFit!.slope)} × distance, so it differs a little from the line above, which uses all samples.'}',
+            '$method Sinusukat lang ang error sa mga trip na hindi ginamit sa paghubog ng linya, kaya ipinapakita nito kung paano ang model sa mga trip na hindi pa nito nakita.'
+                '${regression.trainFit == null ? '' : ' Ang linyang ginamit sa test ay hinubog sa unang ${regression.trainTrips} trip lang: minuto = ${_F.n(regression.trainFit!.intercept)} + ${_F.n(regression.trainFit!.slope)} × layo, kaya bahagyang naiiba ito sa linya sa itaas na gumagamit ng lahat ng sample.'}',
+          )),
           if (tn > 0) ...<Widget>[
             const SizedBox(height: 10),
-            _SubTitle('${tn > testShown ? 'First $testShown of the $tn test samples' : 'The $tn test samples'} (error = actual − predicted)'),
+            _SubTitle(_t(
+              '${tn > testShown ? 'First $testShown of the $tn test samples' : 'The $tn test samples'} (error = actual − predicted)',
+              '${tn > testShown ? 'Unang $testShown sa $tn test sample' : 'Ang $tn test sample'} (error = totoo − hula)',
+            )),
             const SizedBox(height: 6),
             _Grid(
-              const <String>['Area', 'Distance (km)', 'Predicted (min)', 'Actual (min)', 'Error (min)'],
+              <String>[
+                _t('Area', 'Area'),
+                _t('Distance (km)', 'Layo (km)'),
+                _t('Predicted (min)', 'Hula (min)'),
+                _t('Actual (min)', 'Totoo (min)'),
+                _t('Error (min)', 'Error (min)'),
+              ],
               <List<String>>[
                 for (int i = 0; i < testShown; i++)
                   <String>[
                     i < tested.length ? tested[i].area : '—',
-                    i < tested.length ? _n(tested[i].distanceKm) : '—',
-                    _n(pred[i], 1),
-                    _n(act[i], 1),
-                    _signed(act[i] - pred[i]),
+                    i < tested.length ? _F.n(tested[i].distanceKm) : '—',
+                    _F.n(pred[i], 1),
+                    _F.n(act[i], 1),
+                    _F.signed(act[i] - pred[i]),
                   ],
               ],
               color: c,
             ),
             const SizedBox(height: 10),
-            _Eq(title: 'MAE', general: 'MAE = sum of |actual − predicted| ÷ number of test samples', numbers: '${_n(sumAbs, 1)} ÷ $tn', result: minutes(m.mae), color: c),
+            _Eq(
+                title: 'MAE',
+                general: _t('MAE = sum of |actual − predicted| ÷ number of test samples', 'MAE = kabuuan ng |totoo − hula| ÷ bilang ng test sample'),
+                numbers: '${_F.n(sumAbs, 1)} ÷ $tn',
+                result: _F.minutes(m.mae),
+                color: c),
             const SizedBox(height: 8),
-            _Eq(title: 'RMSE', general: 'RMSE = square root of (sum of (actual − predicted)² ÷ number of test samples)', numbers: '√( ${_n(ssRes, 1)} ÷ $tn )', result: minutes(m.rmse), color: c),
+            _Eq(
+                title: 'RMSE',
+                general: _t('RMSE = square root of (sum of (actual − predicted)² ÷ number of test samples)',
+                    'RMSE = square root ng (kabuuan ng (totoo − hula)² ÷ bilang ng test sample)'),
+                numbers: '√( ${_F.n(ssRes, 1)} ÷ $tn )',
+                result: _F.minutes(m.rmse),
+                color: c),
             const SizedBox(height: 8),
             _CalcRows(<(String, String)>[
-              ('Total squared error (SSres): sum of (actual − predicted)²', _n(ssRes, 1)),
-              ('Total variation (SStot): sum of (actual − average actual)²', _n(ssTot, 1)),
-              ('Average actual', '${_n(meanAct, 1)} min'),
+              (
+                _t('Total squared error (SSres): sum of (actual − predicted)²', 'Kabuuang squared error (SSres): kabuuan ng (totoo − hula)²'),
+                _F.n(ssRes, 1)
+              ),
+              (
+                _t('Total variation (SStot): sum of (actual − average actual)²', 'Kabuuang pagkakaiba sa average (SStot): kabuuan ng (totoo − average na totoo)²'),
+                _F.n(ssTot, 1)
+              ),
+              (_t('Average actual', 'Average na totoo'), '${_F.n(meanAct, 1)} min'),
             ]),
             const SizedBox(height: 8),
-            _Eq(title: 'R²', general: 'R² = 1 − total squared error ÷ total variation', numbers: '1 − ${_n(ssRes, 1)} ÷ ${_n(ssTot, 1)}', result: r2Text(m.r2), color: c),
+            _Eq(
+                title: 'R²',
+                general: _t('R² = 1 − total squared error ÷ total variation', 'R² = 1 − kabuuang squared error ÷ kabuuang pagkakaiba'),
+                numbers: '1 − ${_F.n(ssRes, 1)} ÷ ${_F.n(ssTot, 1)}',
+                result: _F.r2(m.r2),
+                color: c),
             const SizedBox(height: 8),
             _Insight(
               m.r2 == null
-                  ? 'R² needs at least two test samples that are not all the same.'
+                  ? _t('R² needs at least two test samples that are not all the same.', 'Kailangan ng R² ng hindi bababa sa dalawang test sample na hindi pare-pareho.')
                   : (m.r2! >= 0
-                      ? 'R² ${r2Text(m.r2)} means the distance explains ${(m.r2! * 100).round()} percent of the differences between the real arrival times; the rest is what distance cannot see (stops, route, traffic).'
-                      : 'R² ${r2Text(m.r2)} is below 0: on these test trips the line is worse than always predicting the average arrival time (${_n(meanAct, 1)} min).'),
+                      ? _t(
+                          'R² ${_F.r2(m.r2)} means the distance explains ${(m.r2! * 100).round()} percent of the differences between the real arrival times; the rest is what distance cannot see (stops, route, traffic).',
+                          'Ang R² ${_F.r2(m.r2)} ay nangangahulugang ang layo ay nagpapaliwanag ng ${(m.r2! * 100).round()} porsiyento ng pagkakaiba ng mga totoong oras ng dating; ang natitira ay hindi nakikita ng layo (paghinto, ruta, trapiko).')
+                      : _t(
+                          'R² ${_F.r2(m.r2)} is below 0: on these test trips the line is worse than always predicting the average arrival time (${_F.n(meanAct, 1)} min).',
+                          'Ang R² ${_F.r2(m.r2)} ay mas mababa sa 0: sa mga test trip na ito, mas masama ang linya kaysa basta hulaan ang average na oras ng dating (${_F.n(meanAct, 1)} min).')),
             ),
           ],
         ],
@@ -503,10 +622,13 @@ class _Workings extends StatelessWidget {
     final List<double> s = forecast.series;
     final ErrorMetrics m = forecast.metrics;
     if (s.length < w || forecast.nextForecast == null) {
-      return <Widget>[_Method('The selected period is shorter than $w days, so there is no load figure to work out yet.')];
+      return <Widget>[
+        _Method(_t('The selected period is shorter than $w days, so there is no load figure to work out yet.',
+            'Mas maikli sa $w araw ang piniling panahon, kaya wala pang numero ng load na maikukuwenta.')),
+      ];
     }
     final List<int> last = <int>[for (int i = s.length - w; i < s.length; i++) i];
-    final double sum = last.fold<double>(0, (double a, int i) => a + s[i]);
+    final double sum = last.fold<double>(0, (double acc, int i) => acc + s[i]);
 
     final int bn = forecast.backtestActual.length;
     double sumAbs = 0, ssRes = 0, meanAct = 0;
@@ -524,89 +646,170 @@ class _Workings extends StatelessWidget {
     final int shown = math.min(7, bn);
 
     return <Widget>[
-      const _Step(
+      _Step(
         n: 1,
         color: c,
-        title: 'Where the data comes from',
-        summary: 'Load History · 5,000 kg per FULL trip',
+        title: _t('Where the data comes from', 'Saan galing ang data'),
+        summary: _t('Load History · 5,000 kg per FULL trip', 'Load History · 5,000 kg bawat FULL na trip'),
         children: <Widget>[
-          _Fact(Icons.local_shipping_rounded, 'Source', 'Each load is a trip that was finalized FULL.'),
-          _Fact(Icons.travel_explore_rounded, 'Check it in the system',
-              'Analytics > Waste Collection Summary > View Load History lists every trip under its date. It is the same list the Waste Collection Summary card counts.'),
-          _Fact(Icons.scale_rounded, 'Weight', 'Every FULL counts as 5,000 kg unless an admin entered a measured weight, because there is no weighing scale yet. So the daily load is mostly the number of FULL trips of the day × 5,000 kg.'),
-          _Fact(Icons.event_rounded, 'Days', 'A day with no FULL is 0 kg. Days are Asia/Manila calendar days.'),
+          _Fact(Icons.local_shipping_rounded, _t('Source', 'Pinagmulan'),
+              _t('Each load is a trip that was finalized FULL.', 'Ang bawat load ay isang trip na natapos bilang FULL.')),
+          _Fact(
+              Icons.travel_explore_rounded,
+              _t('Check it in the system', 'Paano i-check sa system'),
+              _t('Analytics > Waste Collection Summary > View Load History lists every trip under its date. It is the same list the Waste Collection Summary card counts.',
+                  'Ang Analytics > Waste Collection Summary > View Load History ay naglilista ng bawat trip sa ilalim ng petsa nito. Ito rin ang listahang binibilang ng Waste Collection Summary card.')),
+          _Fact(
+              Icons.scale_rounded,
+              _t('Weight', 'Timbang'),
+              _t('Every FULL counts as 5,000 kg unless an admin entered a measured weight, because there is no weighing scale yet. So the daily load is mostly the number of FULL trips of the day × 5,000 kg.',
+                  'Ang bawat FULL ay binibilang na 5,000 kg maliban kung may sinukat na timbang na inilagay ng admin, dahil wala pang timbangan. Kaya ang daily load ay halos bilang ng FULL na trip sa araw × 5,000 kg.')),
+          _Fact(
+              Icons.event_rounded,
+              _t('Days', 'Mga araw'),
+              _t('A day with no FULL is 0 kg. Days are Asia/Manila calendar days.',
+                  'Ang araw na walang FULL ay 0 kg. Ang mga araw ay ayon sa kalendaryo ng Asia/Manila.')),
         ],
       ),
       _Step(
         n: 2,
         color: c,
         open: true,
-        title: 'The next-day forecast',
-        summary: 'last $w days ÷ $w = ${kg(forecast.nextForecast)}',
+        title: _t('The next-day forecast', 'Ang forecast para bukas'),
+        summary: _t('last $w days ÷ $w = ${_F.kg(forecast.nextForecast)}', 'huling $w araw ÷ $w = ${_F.kg(forecast.nextForecast)}'),
         children: <Widget>[
-          _SubTitle('The last $w days'),
+          _SubTitle(_t('The last $w days', 'Ang huling $w araw')),
           const SizedBox(height: 6),
-          _Chips(<(String, String)>[for (final int i in last) (_day(forecast.days[i]), '${_kg(s[i])} kg')], c),
+          _Chips(<(String, String)>[for (final int i in last) (_F.day(forecast.days[i]), '${_F.kgn(s[i])} kg')], c),
           const SizedBox(height: 10),
           _Eq(
               title: 'Forecast',
-              general: 'Forecast = (sum of the last $w days) ÷ $w',
-              numbers: '(${last.map((int i) => _kg(s[i])).join(' + ')}) ÷ $w',
-              result: kg(forecast.nextForecast),
+              general: _t('Forecast = (sum of the last $w days) ÷ $w', 'Forecast = (kabuuan ng huling $w araw) ÷ $w'),
+              numbers: '(${last.map((int i) => _F.kgn(s[i])).join(' + ')}) ÷ $w',
+              result: _F.kg(forecast.nextForecast),
               color: c),
           const SizedBox(height: 6),
-          _Method('The sum of the $w days is ${_kg(sum)} kg, so ${_kg(sum)} ÷ $w = ${kg(forecast.nextForecast)}.'),
+          _Method(_t(
+            'The sum of the $w days is ${_F.kgn(sum)} kg, so ${_F.kgn(sum)} ÷ $w = ${_F.kg(forecast.nextForecast)}.',
+            'Ang kabuuan ng $w araw ay ${_F.kgn(sum)} kg, kaya ${_F.kgn(sum)} ÷ $w = ${_F.kg(forecast.nextForecast)}.',
+          )),
         ],
       ),
       _Step(
         n: 3,
         color: c,
-        title: 'How it was checked against what really happened',
-        summary: 'MAE ${kg(m.mae)} · RMSE ${kg(m.rmse)} · R² ${r2Text(m.r2)}',
+        title: _t('How it was checked against what really happened', 'Paano ito sinuri laban sa totoong nangyari'),
+        summary: 'MAE ${_F.kg(m.mae)} · RMSE ${_F.kg(m.rmse)} · R² ${_F.r2(m.r2)}',
         children: <Widget>[
-          _Method('Every day from day ${w + 1} on was forecast from the $w days before it and then compared with the real load of that day ($bn checked days).'),
+          _Method(_t(
+            'Every day from day ${w + 1} on was forecast from the $w days before it and then compared with the real load of that day ($bn checked days).',
+            'Bawat araw mula sa araw na ${w + 1} ay hinulaan mula sa $w araw bago nito, at inihambing sa totoong load ng araw na iyon ($bn araw na sinuri).',
+          )),
           if (bn > 0) ...<Widget>[
             const SizedBox(height: 10),
-            _SubTitle('The latest $shown checked days (error = actual − forecast)'),
+            _SubTitle(_t('The latest $shown checked days (error = actual − forecast)', 'Ang pinakabagong $shown araw na sinuri (error = totoo − forecast)')),
             const SizedBox(height: 6),
             _Grid(
-              <String>['Day', 'Previous $w days (kg)', 'Forecast (kg)', 'Actual (kg)', 'Error (kg)'],
+              <String>[
+                _t('Day', 'Araw'),
+                _t('Previous $w days (kg)', 'Nakaraang $w araw (kg)'),
+                _t('Forecast (kg)', 'Forecast (kg)'),
+                _t('Actual (kg)', 'Totoo (kg)'),
+                _t('Error (kg)', 'Error (kg)'),
+              ],
               <List<String>>[
                 for (int i = bn - shown; i < bn; i++)
                   <String>[
-                    _day(forecast.days[w + i]),
-                    _kg(forecast.backtestForecast[i] * w),
-                    _kg(forecast.backtestForecast[i]),
-                    _kg(forecast.backtestActual[i]),
-                    _signedKg(forecast.backtestActual[i] - forecast.backtestForecast[i]),
+                    _F.day(forecast.days[w + i]),
+                    _F.kgn(forecast.backtestForecast[i] * w),
+                    _F.kgn(forecast.backtestForecast[i]),
+                    _F.kgn(forecast.backtestActual[i]),
+                    _F.signedKg(forecast.backtestActual[i] - forecast.backtestForecast[i]),
                   ],
               ],
               color: c,
             ),
             const SizedBox(height: 10),
-            _Eq(title: 'MAE', general: 'MAE = sum of |actual − forecast| ÷ number of checked days', numbers: '${_kg(sumAbs)} ÷ $bn', result: kg(m.mae), color: c),
+            _Eq(
+                title: 'MAE',
+                general: _t('MAE = sum of |actual − forecast| ÷ number of checked days', 'MAE = kabuuan ng |totoo − forecast| ÷ bilang ng araw na sinuri'),
+                numbers: '${_F.kgn(sumAbs)} ÷ $bn',
+                result: _F.kg(m.mae),
+                color: c),
             const SizedBox(height: 8),
-            _Eq(title: 'RMSE', general: 'RMSE = square root of (sum of (actual − forecast)² ÷ number of checked days)', numbers: '√( ${_million(ssRes)} ÷ $bn )', result: kg(m.rmse), color: c),
+            _Eq(
+                title: 'RMSE',
+                general: _t('RMSE = square root of (sum of (actual − forecast)² ÷ number of checked days)',
+                    'RMSE = square root ng (kabuuan ng (totoo − forecast)² ÷ bilang ng araw na sinuri)'),
+                numbers: '√( ${_F.million(ssRes, _tl)} ÷ $bn )',
+                result: _F.kg(m.rmse),
+                color: c),
             const SizedBox(height: 8),
             _CalcRows(<(String, String)>[
-              ('Total squared error (SSres): sum of (actual − forecast)²', _million(ssRes)),
-              ('Total variation (SStot): sum of (actual − average actual)²', _million(ssTot)),
-              ('Average actual', '${_kg(meanAct)} kg'),
+              (
+                _t('Total squared error (SSres): sum of (actual − forecast)²', 'Kabuuang squared error (SSres): kabuuan ng (totoo − forecast)²'),
+                _F.million(ssRes, _tl)
+              ),
+              (
+                _t('Total variation (SStot): sum of (actual − average actual)²', 'Kabuuang pagkakaiba sa average (SStot): kabuuan ng (totoo − average na totoo)²'),
+                _F.million(ssTot, _tl)
+              ),
+              (_t('Average actual', 'Average na totoo'), '${_F.kgn(meanAct)} kg'),
             ]),
             const SizedBox(height: 8),
-            _Eq(title: 'R²', general: 'R² = 1 − total squared error ÷ total variation', numbers: '1 − ${_n(ssRes / 1e6, 1)} ÷ ${_n(ssTot / 1e6, 1)}', result: r2Text(m.r2), color: c),
+            _Eq(
+                title: 'R²',
+                general: _t('R² = 1 − total squared error ÷ total variation', 'R² = 1 − kabuuang squared error ÷ kabuuang pagkakaiba'),
+                numbers: '1 − ${_F.n(ssRes / 1e6, 1)} ÷ ${_F.n(ssTot / 1e6, 1)}',
+                result: _F.r2(m.r2),
+                color: c),
             const SizedBox(height: 8),
             _Insight(
               m.r2 == null
-                  ? 'R² needs at least two checked days that are not all the same.'
+                  ? _t('R² needs at least two checked days that are not all the same.', 'Kailangan ng R² ng hindi bababa sa dalawang araw na sinuri na hindi pare-pareho.')
                   : (m.r2! >= 0
-                      ? 'R² ${r2Text(m.r2)}: the forecast explains ${(m.r2! * 100).round()} percent of the day-to-day differences.'
-                      : 'R² ${r2Text(m.r2)} is below 0: always forecasting the average day (${_kg(meanAct)} kg) would have been closer, because collection days alternate between 0 and many loads and an average of the past week cannot follow that.'),
+                      ? _t('R² ${_F.r2(m.r2)}: the forecast explains ${(m.r2! * 100).round()} percent of the day-to-day differences.',
+                          'R² ${_F.r2(m.r2)}: ipinapaliwanag ng forecast ang ${(m.r2! * 100).round()} porsiyento ng pagkakaiba kada araw.')
+                      : _t(
+                          'R² ${_F.r2(m.r2)} is below 0: always forecasting the average day (${_F.kgn(meanAct)} kg) would have been closer, because collection days alternate between 0 and many loads and an average of the past week cannot follow that.',
+                          'Ang R² ${_F.r2(m.r2)} ay mas mababa sa 0: mas malapit sana kung ang average na araw (${_F.kgn(meanAct)} kg) ang palaging hinulaan, dahil paiba-iba ang mga araw ng koleksyon sa pagitan ng 0 at maraming load, at hindi iyon masusundan ng average ng nakaraang linggo.')),
             ),
           ],
         ],
       ),
     ];
+  }
+}
+
+/// English / Tagalog switch of the working.
+class _LangToggle extends StatelessWidget {
+  const _LangToggle({required this.tl, required this.onChanged});
+  final bool tl;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    Widget chip(String label, bool selected, bool value) => ChoiceChip(
+          label: Text(label, style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w800, color: selected ? Colors.white : PredictiveModelsDetails.ink)),
+          selected: selected,
+          showCheckmark: false,
+          selectedColor: PredictiveModelsDetails.violet,
+          backgroundColor: Colors.white,
+          side: const BorderSide(color: Color(0xFFE2E8F0)),
+          visualDensity: VisualDensity.compact,
+          onSelected: (_) => onChanged(value),
+        );
+    return Row(children: <Widget>[
+      const Icon(Icons.translate_rounded, size: 18, color: PredictiveModelsDetails.muted),
+      const SizedBox(width: 8),
+      Expanded(
+        child: Text(tl ? 'Wika ng kuwenta' : 'Language of the working',
+            style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: PredictiveModelsDetails.muted)),
+      ),
+      chip('English', !tl, false),
+      const SizedBox(width: 6),
+      chip('Tagalog', tl, true),
+    ]);
   }
 }
 

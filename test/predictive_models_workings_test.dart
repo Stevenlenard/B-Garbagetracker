@@ -96,6 +96,34 @@ void main() {
     expect(find.textContaining('Admin > Route History (past tracking)'), findsOneWidget);
   });
 
+  for (final Size size in <Size>[const Size(1400, 1000), const Size(400, 900)]) {
+    testWidgets('the working can be read in Tagalog at ${size.width.toInt()} px: the sentences change, the figures do not', (WidgetTester t) async {
+      await open(t, size);
+      final Finder chip = find.widgetWithText(ChoiceChip, 'Tagalog');
+      await t.ensureVisible(chip);
+      await t.tap(chip);
+      await t.pumpAndSettle();
+      expect(t.takeException(), isNull);
+      expect(find.text('Paano nakuha ang mga numero ng arrival time'), findsOneWidget);
+      expect(find.text('Paano nakuha ang mga numero ng collected load'), findsOneWidget);
+      expect(find.text('Saan galing ang 2.00 at 3.00'), findsOneWidget);
+      expect(find.text('3.00 min kada km'), findsOneWidget);
+      // the numbers are the same as in English
+      expect(find.text('52.50 ÷ 17.50'), findsOneWidget);
+      expect(find.text('12.50 − 3.00 × 3.500'), findsOneWidget);
+      expect(text('Hinubog sa pinakamaagang 2 sa 3 trip'), findsWidgets);
+      expect(text('Ang kabuuan ng 7 araw ay 25,000 kg, kaya 25,000 ÷ 7 = 3,571 kg.'), findsOneWidget);
+      expect(text('Kabuuang squared error (SSres)'), findsWidgets);
+      // and back to English
+      final Finder en = find.widgetWithText(ChoiceChip, 'English');
+      await t.ensureVisible(en);
+      await t.tap(en);
+      await t.pumpAndSettle();
+      expect(find.text('How the arrival-time figures were computed'), findsOneWidget);
+      expect(t.takeException(), isNull);
+    });
+  }
+
   testWidgets('without recorded approaches the working says so instead of showing empty maths', (WidgetTester t) async {
     final ArrivalRegressionReport none = ArrivalRegressionReport(
       samples: 0,
