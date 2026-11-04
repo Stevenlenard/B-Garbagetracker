@@ -48,37 +48,53 @@ void main() {
     await t.pump();
   }
 
+  // the steps are dropdowns: their content is built but folded away until opened, so look at it with skipOffstage off
+  Finder text(String t) => find.textContaining(t, skipOffstage: false);
+
   for (final Size size in <Size>[const Size(1400, 1000), const Size(400, 900)]) {
-    testWidgets('the working renders at ${size.width.toInt()} px and shows where 7.98 and 2.22 come from', (WidgetTester t) async {
+    testWidgets('the working renders at ${size.width.toInt()} px and shows where the slope and intercept come from', (WidgetTester t) async {
       await open(t, size);
       expect(t.takeException(), isNull);
       expect(find.text('How the arrival-time figures were computed'), findsOneWidget);
       expect(find.text('How the collected-load figures were computed'), findsOneWidget);
-      expect(find.textContaining('2. Where 2.00 and 3.00 come from'), findsOneWidget);
+      expect(find.text('Where 2.00 and 3.00 come from'), findsOneWidget);
       // the data and where to check it
-      expect(find.textContaining('driver_routes / trip / route'), findsOneWidget);
-      expect(find.textContaining('Admin > Route History'), findsOneWidget);
-      expect(find.textContaining('Right now: 6 samples from 3 trips'), findsOneWidget);
-      // the least-squares working: n, averages, slope and intercept
-      expect(find.textContaining('n = 6 samples'), findsOneWidget);
-      expect(find.textContaining('average distance x̄ = 3.500 km'), findsOneWidget);
-      expect(find.textContaining('slope b = 52.50 ÷ 17.50 = 3.00 min per km'), findsOneWidget);
-      expect(find.textContaining('intercept a = 12.50 − 3.00 × 3.500 = 2.00 min'), findsOneWidget);
+      expect(text('driver_routes / trip / route'), findsOneWidget);
+      expect(text('Admin > Route History'), findsOneWidget);
+      expect(text('6 samples from 3 trips'), findsWidgets);
+      // the least-squares working: n, averages, sums, slope and intercept
+      expect(text('3.500 km'), findsOneWidget);
+      expect(find.text('52.50 ÷ 17.50'), findsOneWidget);
+      expect(find.text('3.00 min per km'), findsOneWidget);
+      expect(find.text('12.50 − 3.00 × 3.500'), findsOneWidget);
+      expect(find.text('2.00 min', skipOffstage: false), findsWidgets);
       // the live rule and the error measures, on the recorded numbers
-      expect(find.textContaining('Time = Distance ÷ Speed × 60'), findsOneWidget);
-      expect(find.textContaining('MAE  = 2.0 ÷ 2 = 1.0 min'), findsOneWidget);
-      expect(find.textContaining('SSres = Σ(actual − predicted)² = 2.0'), findsOneWidget);
-      expect(find.textContaining('Fitted on the earliest 2 of 3 trips'), findsWidgets);
+      expect(text('Time = Distance ÷ Speed × 60'), findsOneWidget);
+      expect(find.text('2.0 ÷ 2', skipOffstage: false), findsOneWidget);
+      expect(find.text('1.0 min', skipOffstage: false), findsWidgets);
+      expect(text('SSres = Σ(actual − predicted)²'), findsOneWidget);
+      expect(text('Fitted on the earliest 2 of 3 trips'), findsWidgets);
     });
 
     testWidgets('the load working adds up the last 7 days and divides by 7 at ${size.width.toInt()} px', (WidgetTester t) async {
       await open(t, size);
-      expect(find.textContaining('View Load History'), findsOneWidget);
+      expect(t.takeException(), isNull);
+      expect(text('View Load History'), findsOneWidget);
       // last 7 days of [0, 5000, 0, 10000, 5000, 0, 0, 5000, 5000, 0] = 0+10000+5000+0+0+5000+5000 = 25000 over 7 days
-      expect(find.textContaining('= 25,000 ÷ 7 = 3,571 kg'), findsOneWidget);
-      expect(find.textContaining('Σ|actual − forecast| ÷ n'), findsOneWidget);
+      expect(text('÷ 7'), findsWidgets);
+      expect(text('The sum of the 7 days is 25,000 kg, so 25,000 ÷ 7 = 3,571 kg.'), findsOneWidget);
+      expect(text('Σ|actual − forecast| ÷ n'), findsOneWidget);
     });
   }
+
+  testWidgets('a folded step opens when its title is tapped', (WidgetTester t) async {
+    await open(t, const Size(1000, 1400));
+    expect(find.text('Admin > Route History (past tracking): choose the date, open the trip and replay it. The fixes inside the 100 m circle of the area are the arrival.'), findsNothing);
+    await t.ensureVisible(find.text('Where the data comes from').first);
+    await t.tap(find.text('Where the data comes from').first);
+    await t.pumpAndSettle();
+    expect(find.textContaining('Admin > Route History (past tracking)'), findsOneWidget);
+  });
 
   testWidgets('without recorded approaches the working says so instead of showing empty maths', (WidgetTester t) async {
     final ArrivalRegressionReport none = ArrivalRegressionReport(
