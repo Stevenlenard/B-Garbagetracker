@@ -2,19 +2,16 @@ import 'dart:math' as math;
 
 /// Area-based waste ESTIMATION (Objective 2.2). Pure Dart, shared by Admin Web and Admin Mobile.
 ///
-/// What this is NOT: it never touches the capacity-equivalent total (5,000 kg per FULL event), measured weights, Load
-/// History or the forecast. Its numbers are estimates of waste GENERATED in a collection area, computed from parameters an
-/// admin entered together with their source. Nothing is invented here: no default rate, no default population, no default
-/// area. Without a sourced parameter the result is [EstimateStatus.notConfigured] and carries no number.
+/// Simple on purpose: estimate (kg/day) = area size (ha) x waste rate (kg/ha/day) x holiday multiplier of the day.
+/// It never touches the capacity-equivalent total (5,000 kg per FULL event), measured weights, Load History or the forecast.
+/// The waste rate is entered by an admin together with its source; nothing is invented here (no default rate, no default
+/// area). Without a sourced rate or a usable size the result is [EstimateStatus.notConfigured] and carries no number.
 
 /// Where an area's size came from.
 enum AreaSizeKind { polygon, manual, none }
 
 /// Why an estimate has no number, or how it was obtained.
 enum EstimateStatus { ok, notConfigured, invalidInput }
-
-/// Basis of the estimate.
-enum EstimateMethod { perCapita, perHectare, areaShare, measured, none }
 
 class AreaSize {
   const AreaSize({required this.m2, required this.kind, this.source = '', this.verified = false, this.note = ''});
@@ -162,10 +159,10 @@ class SeasonalMultiplier {
   double on(DateTime? day) => holidaysOnly ? (HolidayCalendar.upliftOn(day) != null ? effective : 1.0) : effective;
 }
 
+/// The three things an estimate is made of: the waste rate per hectare per day (with its source), the holiday multiplier of
+/// the day, and (per area) the size. Estimate = area size (ha) x waste rate (kg/ha/day) x holiday multiplier.
 class EstimationParams {
   const EstimationParams({
-    this.kgPerCapitaDay,
-    this.rateSource = '',
     this.kgPerHectareDay,
     this.hectareRateSource = '',
     this.seasonal = const SeasonalMultiplier(),
@@ -178,98 +175,54 @@ class EstimationParams {
   /// The seasonal factor used for [day].
   double get multiplier => seasonal.on(day);
 
-  /// kg of waste generated per person per day, with the document it comes from.
-  final double? kgPerCapitaDay;
-  final String rateSource;
-
-  /// kg of waste generated per hectare per day (fallback basis), with its source.
+  /// kg of waste generated per hectare per day, with the document or reasoning it comes from.
   final double? kgPerHectareDay;
   final String hectareRateSource;
   final SeasonalMultiplier seasonal;
 
-  bool get hasCapitaRate => kgPerCapitaDay != null && kgPerCapitaDay!.isFinite && kgPerCapitaDay! > 0 && rateSource.trim().isNotEmpty;
-  bool get hasHectareRate => kgPerHectareDay != null && kgPerHectareDay!.isFinite && kgPerHectareDay! > 0 && hectareRateSource.trim().isNotEmpty;
+  bool get hasRate => kgPerHectareDay != null && kgPerHectareDay!.isFinite && kgPerHectareDay! > 0 && hectareRateSource.trim().isNotEmpty;
 }
 
-/// What an admin configured for one collection area.
+/// What is known of one collection area: its name and size.
 class AreaConfig {
-  const AreaConfig({
-    required this.name,
-    this.size = const AreaSize.none(),
-    this.population,
-    this.populationSource = '',
-    this.populationYear,
-    this.measuredKg,
-  });
+  const AreaConfig({required this.name, this.size = const AreaSize.none()});
 
   final String name;
   final AreaSize size;
-  final int? population;
-  final String populationSource;
-  final int? populationYear;
-
-  /// A MEASURED weight attributable to exactly this area (one area per load), or null.
-  final double? measuredKg;
-
-  bool get hasPopulation => population != null && population! > 0 && populationSource.trim().isNotEmpty;
 }
 
 class AreaEstimate {
   const AreaEstimate({
     required this.name,
     required this.status,
-    required this.method,
     this.kgPerDay,
     this.size = const AreaSize.none(),
+    this.rate,
     this.multiplierUsed = 1.0,
-    this.breakdown = const <String>[],
-    this.confidence = 'None',
-    this.limitations = const <String>[],
+    this.reason = '',
   });
 
   final String name;
   final EstimateStatus status;
-  final EstimateMethod method;
 
   /// Estimated kg generated per day; null when [status] is not ok.
   final double? kgPerDay;
   final AreaSize size;
+
+  /// The kg/ha/day used.
+  final double? rate;
   final double multiplierUsed;
-  final List<String> breakdown;
-  final String confidence;
-  final List<String> limitations;
+
+  /// Why there is no number (only when [status] is not ok).
+  final String reason;
+
+  double get hectares => size.hectares;
 
   bool get hasNumber => status == EstimateStatus.ok && kgPerDay != null;
-
-  /// A measured figure is a recorded weight; every other basis is a proxy and must be labelled as an estimate.
-  bool get isMeasured => method == EstimateMethod.measured;
-}
-
-/// The barangay-wide estimate that is shared among the collection areas by their size (population per area is not
-/// available). Built from the whole-barangay figure and the sizes of the areas that have one.
-class AreaShareBasis {
-  const AreaShareBasis({required this.barangayKgPerDay, required this.totalSizedM2, required this.sizedCount, required this.barangayBasis});
-
-  /// The whole-barangay estimate (kg/day), seasonal multiplier included.
-  final double barangayKgPerDay;
-
-  /// Sum of the usable sizes of the areas that get a share.
-  final double totalSizedM2;
-  final int sizedCount;
-
-  /// One line saying how the barangay figure was obtained (for the breakdown).
-  final String barangayBasis;
-
-  /// The basis exists only with a positive barangay figure and at least two sized areas (one area would simply get all of it).
-  bool get usable => barangayKgPerDay.isFinite && barangayKgPerDay > 0 && totalSizedM2 > 0 && sizedCount >= 2;
 }
 
 class WasteEstimation {
   WasteEstimation._();
-
-  /// The capacity-equivalent of one truck (the same 5,000 kg the system counts per FULL event). Used only to express an
-  /// estimate as a share of a truck; it is not a measured weight.
-  static const double truckCapacityKg = 5000.0;
 
   static const double _earthRadiusM = 6371008.8;
 
@@ -337,137 +290,41 @@ class WasteEstimation {
     return out;
   }
 
-  /// Estimate for one area. Preference: a measured weight for exactly this area, then per-capita × verified population,
-  /// then per-hectare × usable size, then (with a [share] basis) the area's proportion of the barangay estimate by size.
-  /// Never a guessed fallback.
-  static AreaEstimate estimate(AreaConfig area, EstimationParams params, {AreaShareBasis? share}) {
-    final double m = params.multiplier;
-    final HolidayPeriod? holiday = params.seasonal.holidaysOnly ? HolidayCalendar.upliftOn(params.day) : null;
-    final List<String> seasonNote = m != 1.0
-        ? <String>['Seasonal multiplier ×${_n(m)}${holiday != null ? ' (${holiday.name})' : ''}, ${params.seasonal.source}${params.seasonal.validated ? '' : '; not validated for Lipa'}']
-        : const <String>['Seasonal multiplier ×1.0 (regular day)'];
-
-    if (area.measuredKg != null) {
-      final double k = area.measuredKg!;
-      if (!k.isFinite || k < 0) {
-        return AreaEstimate(name: area.name, status: EstimateStatus.invalidInput, method: EstimateMethod.none, size: area.size, limitations: const <String>['Measured weight is not a valid number.']);
-      }
+  /// Estimate for one area: size (ha) x waste rate (kg/ha/day) x holiday multiplier of the day. Without a usable size or a
+  /// sourced rate there is no number (never a guessed fallback).
+  static AreaEstimate estimate(AreaConfig area, EstimationParams params) {
+    if (area.size.usable && params.hasRate) {
+      final double m = params.multiplier;
       return AreaEstimate(
         name: area.name,
         status: EstimateStatus.ok,
-        method: EstimateMethod.measured,
-        kgPerDay: k,
+        kgPerDay: area.size.hectares * params.kgPerHectareDay! * m,
         size: area.size,
-        breakdown: <String>['Recorded measured weight: ${_n(k)} kg (no multiplier applied)'],
-        confidence: 'High',
-      );
-    }
-
-    if (area.hasPopulation && params.hasCapitaRate) {
-      final double kg = area.population! * params.kgPerCapitaDay! * m;
-      return AreaEstimate(
-        name: area.name,
-        status: EstimateStatus.ok,
-        method: EstimateMethod.perCapita,
-        kgPerDay: kg,
-        size: area.size,
+        rate: params.kgPerHectareDay,
         multiplierUsed: m,
-        breakdown: <String>[
-          'Population ${area.population} (${area.populationSource}${area.populationYear != null ? ', ${area.populationYear}' : ''})',
-          '× ${_n(params.kgPerCapitaDay!)} kg/person/day (${params.rateSource})',
-          ...seasonNote,
-          '= ${_n(kg)} kg/day',
-        ],
-        confidence: 'Medium',
-        limitations: const <String>['Estimate of waste generated, not verified collected weight.'],
       );
     }
-
-    if (area.size.usable && params.hasHectareRate) {
-      final double kg = area.size.hectares * params.kgPerHectareDay! * m;
-      return AreaEstimate(
-        name: area.name,
-        status: EstimateStatus.ok,
-        method: EstimateMethod.perHectare,
-        kgPerDay: kg,
-        size: area.size,
-        multiplierUsed: m,
-        breakdown: <String>[
-          'Area ${_n(area.size.hectares)} ha (${area.size.source.isEmpty ? 'source not recorded' : area.size.source}${area.size.verified ? ', verified' : ', unverified'})',
-          '× ${_n(params.kgPerHectareDay!)} kg/ha/day (${params.hectareRateSource})',
-          ...seasonNote,
-          '= ${_n(kg)} kg/day',
-        ],
-        confidence: area.size.verified ? 'Medium' : 'Low',
-        limitations: <String>[
-          'Estimate of waste generated, not verified collected weight.',
-          if (!area.size.verified) 'Area size not verified against the real collection area.',
-        ],
-      );
-    }
-
-    // No population of its own and no per-hectare rate: the area takes its proportion of the barangay estimate, by size.
-    // This assumes the same waste per hectare in every area and that the areas cover the barangay; it says so.
-    if (area.size.usable && share != null && share.usable) {
-      final double fraction = area.size.m2 / share.totalSizedM2;
-      final double kg = share.barangayKgPerDay * fraction;
-      return AreaEstimate(
-        name: area.name,
-        status: EstimateStatus.ok,
-        method: EstimateMethod.areaShare,
-        kgPerDay: kg,
-        size: area.size,
-        multiplierUsed: m,
-        breakdown: <String>[
-          'Barangay estimate ${_n(share.barangayKgPerDay)} kg/day (${share.barangayBasis})',
-          'Share = ${_n(area.size.hectares)} ha ÷ ${_n(share.totalSizedM2 / 10000.0)} ha (${share.sizedCount} sized areas) = ${(fraction * 100).toStringAsFixed(1)}%',
-          '= ${_n(kg)} kg/day',
-        ],
-        confidence: 'Low',
-        limitations: <String>[
-          'Estimate of waste generated, not verified collected weight.',
-          'Shares the barangay figure by area size: assumes the same waste per hectare in every area and that these areas cover the barangay. No population per area is available.',
-          if (!area.size.verified) 'Area size not verified against the real collection area.',
-        ],
-      );
-    }
-
     final List<String> missing = <String>[
-      if (!(area.hasPopulation && params.hasCapitaRate) && !(area.size.usable && params.hasHectareRate)) ...<String>[
-        if (!area.size.usable) 'No usable area size',
-        if (!area.hasPopulation) 'No sourced population',
-        if (!params.hasCapitaRate && !params.hasHectareRate) 'No sourced waste-generation rate',
-      ]
+      if (!area.size.usable) 'no usable area size',
+      if (!params.hasRate) 'no sourced waste rate',
     ];
-    return AreaEstimate(
-      name: area.name,
-      status: EstimateStatus.notConfigured,
-      method: EstimateMethod.none,
-      size: area.size,
-      breakdown: const <String>[],
-      limitations: <String>['Not configured: ${missing.join('; ')}.'],
-    );
+    return AreaEstimate(name: area.name, status: EstimateStatus.notConfigured, size: area.size, reason: 'Not configured: ${missing.join(' and ')}.');
   }
 
-  /// Totals over [estimates]. Separate from capacity and measured totals by design.
+  /// Totals over [estimates].
   static EstimateSummary summarize(List<AreaEstimate> estimates) {
-    double proxy = 0, measured = 0;
+    double kg = 0, ha = 0;
     int withNumber = 0;
     for (final AreaEstimate e in estimates) {
       if (!e.hasNumber) continue;
       withNumber++;
-      if (e.isMeasured) {
-        measured += e.kgPerDay!;
-      } else {
-        proxy += e.kgPerDay!;
-      }
+      kg += e.kgPerDay!;
+      ha += e.hectares;
     }
-    return EstimateSummary(areaCount: estimates.length, configuredCount: withNumber, estimatedKgPerDay: proxy, measuredKg: measured);
+    return EstimateSummary(areaCount: estimates.length, configuredCount: withNumber, estimatedKgPerDay: kg, hectares: ha);
   }
 
   static double _rad(double d) => d * math.pi / 180.0;
-
-  static String _n(double v) => v == v.roundToDouble() ? v.toStringAsFixed(0) : v.toStringAsFixed(2);
 
   static List<List<double>> _open(List<List<double>> ring) {
     if (ring.length > 1 && ring.first.length >= 2 && ring.last.length >= 2 && ring.first[0] == ring.last[0] && ring.first[1] == ring.last[1]) {
@@ -496,14 +353,14 @@ class WasteEstimation {
 }
 
 class EstimateSummary {
-  const EstimateSummary({required this.areaCount, required this.configuredCount, required this.estimatedKgPerDay, required this.measuredKg});
+  const EstimateSummary({required this.areaCount, required this.configuredCount, required this.estimatedKgPerDay, required this.hectares});
 
   final int areaCount;
   final int configuredCount;
 
-  /// Sum of proxy (per-capita / per-hectare) estimates only. Never added to the capacity-equivalent total.
+  /// Sum of the area estimates (kg/day of waste generated).
   final double estimatedKgPerDay;
 
-  /// Sum of areas that used a recorded measured weight; kept apart from the estimates.
-  final double measuredKg;
+  /// Sum of the sizes of the areas that have an estimate.
+  final double hectares;
 }

@@ -5,8 +5,8 @@ import 'waste_estimation_details.dart';
 
 export '../services/waste_estimation_service.dart' show WasteEstimationRaw;
 
-/// Objective 2.2: the compact "Waste Estimation by Area" card of the Analytics page. It shows the whole-barangay estimate
-/// from the same data and calculation as the details screen (lib/services/waste_estimation_service.dart ->
+/// Objective 2.2: the compact "Waste Estimation by Area" card of the Analytics page. It shows the total of the area
+/// estimates (size x waste rate x holiday multiplier) from the same data and calculation as the details screen (lib/services/waste_estimation_service.dart ->
 /// lib/utils/waste_estimation.dart) and opens the details (a dialog on wide screens, a full-screen page on phones).
 ///
 /// The figure is an estimate of waste GENERATED. It is kept apart from the recorded loads (capacity-equivalent 5,000 kg per
@@ -121,7 +121,7 @@ class _WasteEstimationCardState extends State<WasteEstimationCard> {
                       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
                         Text('Waste Estimation by Area', style: TextStyle(fontSize: mobile ? 17 : 20, fontWeight: FontWeight.w900, color: _ink, letterSpacing: -0.3)),
                         const SizedBox(height: 3),
-                        Text('Area-based estimated waste generation per collection area', style: TextStyle(fontSize: mobile ? 12 : 13, fontWeight: FontWeight.w500, color: _muted)),
+                        Text('Area size × waste rate × holiday multiplier', style: TextStyle(fontSize: mobile ? 12 : 13, fontWeight: FontWeight.w500, color: _muted)),
                       ]),
                     ),
                     if (openable) const Padding(padding: EdgeInsets.only(top: 8, left: 6), child: Icon(Icons.chevron_right_rounded, color: _muted, size: 26)),
@@ -151,20 +151,22 @@ class _WasteEstimationCardState extends State<WasteEstimationCard> {
     if (!d.available) {
       return const Text('Not set up on this server yet. The estimation tables have not been created, so no estimate can be shown.', style: TextStyle(fontSize: 13, height: 1.4, color: _muted, fontWeight: FontWeight.w600));
     }
-    if (!d.whole.hasNumber) {
+    if (d.totalKgPerDay == null) {
       return const Column(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
         Text('Not configured', style: TextStyle(fontSize: 26, fontWeight: FontWeight.w900, color: _ink)),
         SizedBox(height: 2),
-        Text('Add a sourced rate and population to estimate', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: _muted)),
+        Text('Enter the waste rate and its source to estimate', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: _muted)),
       ]);
     }
+    final double m = d.params.multiplier;
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
       Text.rich(TextSpan(children: <InlineSpan>[
-        TextSpan(text: WasteFormat.kg(d.whole.kgPerDay!), style: const TextStyle(fontSize: 30, fontWeight: FontWeight.w900, color: _ink, letterSpacing: -0.5)),
+        TextSpan(text: WasteFormat.kg(d.totalKgPerDay!), style: const TextStyle(fontSize: 30, fontWeight: FontWeight.w900, color: _ink, letterSpacing: -0.5)),
         const TextSpan(text: ' kg/day', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: _muted)),
       ])),
       const SizedBox(height: 2),
-      const Text('Barangay estimate', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: _muted)),
+      Text('${d.summary.configuredCount} collection areas · holiday multiplier ${WasteFormat.multiplier(m)} today',
+          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: _muted)),
     ]);
   }
 }

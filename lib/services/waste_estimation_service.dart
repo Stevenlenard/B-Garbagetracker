@@ -33,59 +33,52 @@ class WasteEstimationLoadException implements Exception {
 }
 
 /// Everything the compact card and the details screen show, computed ONCE by lib/utils/waste_estimation.dart from the
-/// same data. Estimates are for waste GENERATED; they are never added to recorded loads (capacity-equivalent 5,000 kg per
-/// FULL event) or to measured weights.
+/// same data: estimate of an area = its size (ha) x the waste rate (kg/ha/day) x the holiday multiplier of the day.
+/// Estimates are for waste GENERATED; they are never added to recorded loads (capacity-equivalent 5,000 kg per FULL
+/// event) or to measured weights.
 class WasteEstimationData {
   WasteEstimationData._({
     required this.available,
     required this.settings,
     required this.rows,
-    required this.barangay,
     required this.params,
     required this.estimates,
-    required this.whole,
     required this.summary,
     required this.configs,
   });
 
-  /// Row key of the whole-barangay (population x per-person rate) figure; kept apart from the areas.
-  static const String barangayKey = 'barangay_total';
-
   final bool available;
   final Map<String, dynamic>? settings;
   final List<WasteAreaRow> rows;
-  final WasteAreaRow barangay;
   final EstimationParams params;
 
   /// Same order as [rows].
   final List<AreaEstimate> estimates;
-  final AreaEstimate whole;
   final EstimateSummary summary;
   final Map<String, AreaConfig> configs;
 
-  /// The whole-barangay estimate on a regular day (the multiplier of the day taken out), or null.
-  double? get regularDayBarangayKg {
-    if (!whole.hasNumber) return null;
+  /// Sum of the area estimates for the day, or null when no area has a number.
+  double? get totalKgPerDay => summary.configuredCount > 0 ? summary.estimatedKgPerDay : null;
+
+  /// The same total on a regular day (the multiplier of the day taken out), or null.
+  double? get regularDayKg {
+    final double? t = totalKgPerDay;
     final double m = params.multiplier;
-    return m > 0 ? whole.kgPerDay! / m : null;
+    return (t == null || m <= 0) ? null : t / m;
   }
 
-  /// The whole-barangay estimate inside a period with a documented increase, or null when no multiplier is applied.
-  double? holidayBarangayKg(HolidayPeriod p) {
-    final double? base = regularDayBarangayKg;
+  /// The total inside a period with a documented increase, or null when no multiplier is applied.
+  double? holidayKg(HolidayPeriod p) {
+    final double? base = regularDayKg;
     final double v = params.seasonal.effective;
     return (base == null || !p.uplift || v == 1.0) ? null : base * v;
   }
 
-  /// Truckloads per day, as the capacity-equivalent of the estimate (not a measured weight).
-  double? get barangayTruckloads => whole.hasNumber ? whole.kgPerDay! / WasteEstimation.truckCapacityKg : null;
-
   AreaConfig configOf(WasteAreaRow r) => configs[r.key]!;
-  AreaEstimate estimateOf(WasteAreaRow r) => r.key == barangayKey ? whole : estimates[rows.indexOf(r)];
+  AreaEstimate estimateOf(WasteAreaRow r) => estimates[rows.indexOf(r)];
 
   static double? _d(Object? v) => v == null ? null : (v is num ? v.toDouble() : double.tryParse('$v'));
-  static int? _i(Object? v) => v == null ? null : (v is num ? v.toInt() : int.tryParse('$v'));
-  static bool flag(Object? v) => v == true || v == 1 || v == '1';
+    static bool flag(Object? v) => v == true || v == 1 || v == '1';
 
   static Future<WasteEstimationRaw> fetchRaw() async {
     final List<Object> r = await Future.wait<Object>(<Future<Object>>[
@@ -157,33 +150,15 @@ class WasteEstimationData {
       rows.add(WasteAreaRow(key: p.key, name: name, geometrySize: size, geometryNote: note)..saved = saved[p.key]);
     }
     rows.sort((WasteAreaRow a, WasteAreaRow b) => a.name.compareTo(b.name));
-    final WasteAreaRow barangay = WasteAreaRow(key: barangayKey, name: 'Barangay Balintawak (whole barangay)', geometrySize: const AreaSize.none())
-      ..saved = saved[barangayKey];
-
     final EstimationParams params = _params(settings, forDay);
-    final Map<String, AreaConfig> configs = <String, AreaConfig>{for (final WasteAreaRow r in <WasteAreaRow>[...rows, barangay]) r.key: _config(r)};
-    final AreaEstimate whole = WasteEstimation.estimate(configs[barangayKey]!, params);
-    // Areas without a population of their own share the barangay figure by size (see AreaShareBasis).
-    AreaShareBasis? share;
-    if (whole.hasNumber && whole.method == EstimateMethod.perCapita) {
-      final List<AreaConfig> sized = <AreaConfig>[for (final WasteAreaRow r in rows) if (configs[r.key]!.size.usable) configs[r.key]!];
-      final AreaConfig bc = configs[barangayKey]!;
-      share = AreaShareBasis(
-        barangayKgPerDay: whole.kgPerDay!,
-        totalSizedM2: sized.fold<double>(0, (double a, AreaConfig c) => a + c.size.m2),
-        sizedCount: sized.length,
-        barangayBasis: '${bc.population} people × ${params.kgPerCapitaDay} kg/person/day${params.multiplier != 1.0 ? ' × ${params.multiplier}' : ''}',
-      );
-    }
-    final List<AreaEstimate> estimates = <AreaEstimate>[for (final WasteAreaRow r in rows) WasteEstimation.estimate(configs[r.key]!, params, share: share)];
+    final Map<String, AreaConfig> configs = <String, AreaConfig>{for (final WasteAreaRow r in rows) r.key: _config(r)};
+    final List<AreaEstimate> estimates = <AreaEstimate>[for (final WasteAreaRow r in rows) WasteEstimation.estimate(configs[r.key]!, params)];
     return WasteEstimationData._(
       available: available,
       settings: settings,
       rows: rows,
-      barangay: barangay,
       params: params,
       estimates: estimates,
-      whole: whole,
       summary: WasteEstimation.summarize(estimates),
       configs: configs,
     );
@@ -193,8 +168,6 @@ class WasteEstimationData {
     if (s == null) return EstimationParams(day: day);
     return EstimationParams(
       day: day,
-      kgPerCapitaDay: _d(s['kg_per_capita_day']),
-      rateSource: '${s['rate_source'] ?? ''}',
       kgPerHectareDay: _d(s['kg_per_hectare_day']),
       hectareRateSource: '${s['hectare_rate_source'] ?? ''}',
       seasonal: SeasonalMultiplier(
@@ -219,13 +192,7 @@ class WasteEstimationData {
         verified: flag(s['size_verified']),
       );
     }
-    return AreaConfig(
-      name: r.name,
-      size: size,
-      population: _i(s?['population']),
-      populationSource: '${s?['population_source'] ?? ''}',
-      populationYear: _i(s?['population_year']),
-    );
+    return AreaConfig(name: r.name, size: size);
   }
 }
 
@@ -240,18 +207,9 @@ class WasteFormat {
 
   static String m2(double v) => _int.format(v.round());
 
-  static String methodLabel(EstimateMethod m) {
-    switch (m) {
-      case EstimateMethod.perCapita:
-        return 'Population × per-person rate';
-      case EstimateMethod.perHectare:
-        return 'Area (ha) × per-hectare rate';
-      case EstimateMethod.areaShare:
-        return 'Share of the barangay estimate by area size';
-      case EstimateMethod.measured:
-        return 'Recorded measured weight';
-      case EstimateMethod.none:
-        return 'Missing sourced data';
-    }
-  }
+  /// Hectares with two decimals (39.16).
+  static String ha(double v) => v.toStringAsFixed(2);
+
+  /// The multiplier as shown to people: x1.0, x1.15.
+  static String multiplier(double m) => '×${m == m.roundToDouble() ? m.toStringAsFixed(1) : m.toStringAsFixed(2)}';
 }

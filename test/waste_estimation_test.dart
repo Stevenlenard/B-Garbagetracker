@@ -85,12 +85,14 @@ void main() {
 
   group('estimates', () {
     const AreaSize ha10 = AreaSize(m2: 100000, kind: AreaSizeKind.manual, source: 'survey', verified: true);
+    const EstimationParams rate30 = EstimationParams(kgPerHectareDay: 30, hectareRateSource: 'doc');
 
     test('no rate, no number: nothing is invented', () {
       final AreaEstimate e = WasteEstimation.estimate(const AreaConfig(name: 'A', size: ha10), const EstimationParams());
       expect(e.status, EstimateStatus.notConfigured);
       expect(e.kgPerDay, isNull);
-      expect(e.limitations.single, contains('Not configured'));
+      expect(e.hasNumber, isFalse);
+      expect(e.reason, contains('no sourced waste rate'));
     });
 
     test('a rate without a source is not accepted', () {
@@ -98,70 +100,42 @@ void main() {
       expect(e.hasNumber, isFalse);
     });
 
-    test('per-hectare: hectares × sourced rate, neutral multiplier', () {
-      final AreaEstimate e = WasteEstimation.estimate(
-          const AreaConfig(name: 'A', size: ha10), const EstimationParams(kgPerHectareDay: 30, hectareRateSource: 'doc X'));
-      expect(e.method, EstimateMethod.perHectare);
-      expect(e.kgPerDay, 300);
-      expect(e.multiplierUsed, 1.0);
-      expect(e.confidence, 'Medium');
-      expect(e.breakdown.last, '= 300 kg/day');
-    });
-
-    test('unverified size lowers the confidence', () {
-      final AreaEstimate e = WasteEstimation.estimate(
-          const AreaConfig(name: 'A', size: AreaSize(m2: 100000, kind: AreaSizeKind.polygon)),
-          const EstimationParams(kgPerHectareDay: 30, hectareRateSource: 'doc X'));
-      expect(e.confidence, 'Low');
-      expect(e.limitations.join(' '), contains('not verified'));
-    });
-
-    test('per-capita is preferred over per-hectare when both are available', () {
-      final AreaEstimate e = WasteEstimation.estimate(
-          const AreaConfig(name: 'A', size: ha10, population: 1000, populationSource: 'PSA', populationYear: 2020),
-          const EstimationParams(kgPerCapitaDay: 0.5, rateSource: 'NSWMC', kgPerHectareDay: 30, hectareRateSource: 'doc X'));
-      expect(e.method, EstimateMethod.perCapita);
-      expect(e.kgPerDay, 500);
-    });
-
-    test('population without a source is ignored', () {
-      final AreaEstimate e = WasteEstimation.estimate(
-          const AreaConfig(name: 'A', population: 1000), const EstimationParams(kgPerCapitaDay: 0.5, rateSource: 'NSWMC'));
+    test('no usable size, no number', () {
+      final AreaEstimate e = WasteEstimation.estimate(const AreaConfig(name: 'A'), rate30);
       expect(e.hasNumber, isFalse);
+      expect(e.reason, contains('no usable area size'));
+    });
+
+    test('area size (ha) x rate (kg/ha/day) x multiplier of the day', () {
+      final AreaEstimate e = WasteEstimation.estimate(const AreaConfig(name: 'A', size: ha10), rate30);
+      expect(e.status, EstimateStatus.ok);
+      expect(e.hectares, closeTo(10, 1e-9));
+      expect(e.rate, 30);
+      expect(e.multiplierUsed, 1.0);
+      expect(e.kgPerDay, closeTo(300, 1e-9));
     });
 
     test('seasonal multiplier: default 1.0; applies only when active, positive and sourced', () {
-      const AreaConfig a = AreaConfig(name: 'A', size: ha10);
-      EstimationParams p(SeasonalMultiplier s) => EstimationParams(kgPerHectareDay: 30, hectareRateSource: 'doc X', seasonal: s);
-      expect(WasteEstimation.estimate(a, p(const SeasonalMultiplier())).kgPerDay, 300);
-      expect(WasteEstimation.estimate(a, p(const SeasonalMultiplier(value: 1.2, active: true))).kgPerDay, 300, reason: 'no source');
-      expect(WasteEstimation.estimate(a, p(const SeasonalMultiplier(value: 1.2, source: 'doc', active: false))).kgPerDay, 300);
-      expect(WasteEstimation.estimate(a, p(const SeasonalMultiplier(value: -1, source: 'doc', active: true))).kgPerDay, 300);
-      final AreaEstimate on = WasteEstimation.estimate(a, p(const SeasonalMultiplier(value: 1.2, source: 'doc', active: true)));
-      expect(on.kgPerDay, closeTo(360, 1e-9));
-      expect(on.breakdown.join(' '), contains('not validated'));
+      const SeasonalMultiplier off = SeasonalMultiplier(value: 1.15, source: 'doc');
+      const SeasonalMultiplier noSource = SeasonalMultiplier(value: 1.15, active: true);
+      const SeasonalMultiplier on = SeasonalMultiplier(value: 1.15, source: 'doc', active: true);
+      expect(const SeasonalMultiplier().effective, 1.0);
+      expect(off.effective, 1.0);
+      expect(noSource.effective, 1.0);
+      expect(on.effective, 1.15);
     });
 
-    test('a measured weight for exactly this area wins and is not multiplied', () {
-      final AreaEstimate e = WasteEstimation.estimate(
-          const AreaConfig(name: 'A', size: ha10, measuredKg: 1234),
-          const EstimationParams(kgPerHectareDay: 30, hectareRateSource: 'x', seasonal: SeasonalMultiplier(value: 2, source: 's', active: true)));
-      expect(e.isMeasured, isTrue);
-      expect(e.kgPerDay, 1234);
-      expect(WasteEstimation.estimate(const AreaConfig(name: 'A', measuredKg: -1), const EstimationParams()).status, EstimateStatus.invalidInput);
-    });
-
-    test('summary keeps proxy estimates and measured weights apart and counts unconfigured areas', () {
-      const EstimationParams params = EstimationParams(kgPerHectareDay: 30, hectareRateSource: 'x');
-      final EstimateSummary s = WasteEstimation.summarize(<AreaEstimate>[
-        WasteEstimation.estimate(const AreaConfig(name: 'A', size: ha10), params),
-        WasteEstimation.estimate(const AreaConfig(name: 'B', measuredKg: 800), params),
-        WasteEstimation.estimate(const AreaConfig(name: 'C'), params),
-      ]);
-      expect(s.areaCount, 3);
-      expect(s.configuredCount, 2);
-      expect(s.estimatedKgPerDay, 300);
-      expect(s.measuredKg, 800);
+    test('the summary adds up the areas with a number and their hectares, and counts the others', () {
+      final List<AreaEstimate> list = <AreaEstimate>[
+        WasteEstimation.estimate(const AreaConfig(name: 'A', size: ha10), rate30),
+        WasteEstimation.estimate(const AreaConfig(name: 'B', size: AreaSize(m2: 50000, kind: AreaSizeKind.manual, source: 's')), rate30),
+        WasteEstimation.estimate(const AreaConfig(name: 'C'), rate30),
+      ];
+      final EstimateSummary t = WasteEstimation.summarize(list);
+      expect(t.areaCount, 3);
+      expect(t.configuredCount, 2);
+      expect(t.estimatedKgPerDay, closeTo(450, 1e-9));
+      expect(t.hectares, closeTo(15, 1e-9));
     });
   });
 
@@ -201,17 +175,16 @@ void main() {
       final AreaEstimate christmas = WasteEstimation.estimate(a, on(DateTime(2026, 12, 25)));
       expect(regular.kgPerDay, closeTo(300, 1e-9));
       expect(christmas.kgPerDay, closeTo(345, 1e-9));
-      expect(christmas.breakdown.join(' '), contains('Christmas and New Year'));
-      expect(regular.breakdown.join(' '), contains('regular day'));
+      expect(regular.multiplierUsed, 1.0);
+      expect(christmas.multiplierUsed, 1.15);
     });
 
-    test('the barangay figure and the area shares follow the day, and the shares still add up to it', () {
+    test('the total follows the day, and the areas still add up to it', () {
       final Map<String, Object?> body = <String, Object?>{
         'success': true,
         'available': true,
-        'settings': <String, Object?>{'kg_per_capita_day': '0.5', 'rate_source': 'NSWMC', 'seasonal_value': '1.15', 'seasonal_source': 'cities', 'seasonal_active': 1},
+        'settings': <String, Object?>{'kg_per_hectare_day': '30', 'hectare_rate_source': 'doc', 'seasonal_value': '1.15', 'seasonal_source': 'cities', 'seasonal_active': 1},
         'areas': <Object>[
-          <String, Object?>{'area_key': 'barangay_total', 'population': 19278, 'population_source': 'PSA', 'population_year': 2020},
           <String, Object?>{'area_key': 'a', 'size_m2': '100000', 'size_kind': 'manual', 'size_source': 's', 'size_verified': 1},
           <String, Object?>{'area_key': 'b', 'size_m2': '300000', 'size_kind': 'manual', 'size_source': 's', 'size_verified': 1},
         ],
@@ -219,68 +192,13 @@ void main() {
       final Map<String, Object?> puroks = <String, Object?>{'a': <String, Object?>{'name': 'A'}, 'b': <String, Object?>{'name': 'B'}};
       final WasteEstimationData reg = WasteEstimationData.fromRaw((body: body, puroks: puroks), day: DateTime(2026, 11, 4));
       final WasteEstimationData xmas = WasteEstimationData.fromRaw((body: body, puroks: puroks), day: DateTime(2026, 12, 25));
-      expect(reg.whole.kgPerDay, closeTo(9639, 1e-6));
-      expect(xmas.whole.kgPerDay, closeTo(9639 * 1.15, 1e-6));
-      expect(xmas.regularDayBarangayKg, closeTo(9639, 1e-6));
-      expect(reg.barangayTruckloads, closeTo(9639 / 5000, 1e-9));
+      expect(reg.totalKgPerDay, closeTo(1200, 1e-6)); // 40 ha x 30
+      expect(xmas.totalKgPerDay, closeTo(1200 * 1.15, 1e-6));
+      expect(xmas.regularDayKg, closeTo(1200, 1e-6));
+      expect(xmas.holidayKg(HolidayCalendar.periods.first), closeTo(1380, 1e-6));
+      expect(xmas.holidayKg(HolidayCalendar.periods[1]), isNull); // Undas: no multiplier
       final double sum = xmas.estimates.map((AreaEstimate e) => e.kgPerDay!).reduce((double x, double y) => x + y);
-      expect(sum, closeTo(xmas.whole.kgPerDay!, 1e-6));
-      expect(xmas.holidayBarangayKg(HolidayCalendar.periods.first), closeTo(9639 * 1.15, 1e-6));
-      expect(xmas.holidayBarangayKg(HolidayCalendar.periods[1]), isNull); // Undas: no multiplier
-    });
-  });
-
-  group('area share of the barangay estimate', () {
-    const AreaShareBasis basis = AreaShareBasis(barangayKgPerDay: 4000, totalSizedM2: 400000, sizedCount: 2, barangayBasis: '8,000 people × 0.50 kg/person/day');
-    const EstimationParams noRates = EstimationParams();
-    AreaConfig sized(String n, double m2, {bool verified = true}) => AreaConfig(name: n, size: AreaSize(m2: m2, kind: AreaSizeKind.polygon, source: 'sketch', verified: verified));
-
-    test('each sized area takes its proportion of the barangay figure, and the shares add up to it', () {
-      final AreaEstimate a = WasteEstimation.estimate(sized('A', 100000), noRates, share: basis);
-      final AreaEstimate b = WasteEstimation.estimate(sized('B', 300000), noRates, share: basis);
-      expect(a.method, EstimateMethod.areaShare);
-      expect(a.kgPerDay, closeTo(1000, 1e-9));
-      expect(b.kgPerDay, closeTo(3000, 1e-9));
-      expect(a.kgPerDay! + b.kgPerDay!, closeTo(4000, 1e-9));
-      expect(a.confidence, 'Low');
-      expect(a.breakdown.join(' '), contains('25.0%'));
-      expect(a.limitations.join(' '), contains('same waste per hectare'));
-    });
-
-    test('an unverified size is said to be unverified', () {
-      final AreaEstimate a = WasteEstimation.estimate(sized('A', 100000, verified: false), noRates, share: basis);
-      expect(a.limitations.join(' '), contains('not verified'));
-    });
-
-    test('no size, no share; no barangay figure or fewer than two sized areas, no basis', () {
-      expect(WasteEstimation.estimate(const AreaConfig(name: 'X'), noRates, share: basis).hasNumber, isFalse);
-      expect(WasteEstimation.estimate(sized('A', 100000), noRates).hasNumber, isFalse);
-      const AreaShareBasis one = AreaShareBasis(barangayKgPerDay: 4000, totalSizedM2: 100000, sizedCount: 1, barangayBasis: 'x');
-      const AreaShareBasis zero = AreaShareBasis(barangayKgPerDay: 0, totalSizedM2: 400000, sizedCount: 2, barangayBasis: 'x');
-      expect(one.usable, isFalse);
-      expect(zero.usable, isFalse);
-      expect(WasteEstimation.estimate(sized('A', 100000), noRates, share: one).hasNumber, isFalse);
-    });
-
-    test('an area with its own sourced rate, population or a measured weight does not use the share', () {
-      final AreaEstimate perHa = WasteEstimation.estimate(sized('A', 100000), const EstimationParams(kgPerHectareDay: 30, hectareRateSource: 'doc'), share: basis);
-      expect(perHa.method, EstimateMethod.perHectare);
-      final AreaEstimate perCap = WasteEstimation.estimate(
-          const AreaConfig(name: 'A', population: 1000, populationSource: 'PSA'), const EstimationParams(kgPerCapitaDay: 0.5, rateSource: 'NSWMC'), share: basis);
-      expect(perCap.method, EstimateMethod.perCapita);
-      final AreaEstimate measured = WasteEstimation.estimate(
-          const AreaConfig(name: 'A', size: AreaSize(m2: 100000, kind: AreaSizeKind.polygon, source: 's'), measuredKg: 700), noRates, share: basis);
-      expect(measured.method, EstimateMethod.measured);
-      expect(measured.kgPerDay, 700);
-    });
-
-    test('shares are estimates: they go to the estimated total, not to the measured weights', () {
-      final EstimateSummary s = WasteEstimation.summarize(<AreaEstimate>[
-        WasteEstimation.estimate(sized('A', 100000), noRates, share: basis),
-        WasteEstimation.estimate(sized('B', 300000), noRates, share: basis),
-      ]);
-      expect(s.estimatedKgPerDay, closeTo(4000, 1e-9));
-      expect(s.measuredKg, 0);
+      expect(sum, closeTo(xmas.totalKgPerDay!, 1e-6));
     });
   });
 
