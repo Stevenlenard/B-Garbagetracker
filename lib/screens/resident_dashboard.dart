@@ -1,6 +1,8 @@
 import '../utils/rtdb_map.dart';
 import '../services/eta_model_sync.dart';
 import '../services/server_clock.dart';
+import '../services/usual_collection_time_service.dart';
+import '../utils/usual_collection_time.dart';
 import '../widgets/logout_choice_dialog.dart';
 import '../services/rtdb_port.dart';
 import '../services/notification_inbox.dart';
@@ -187,6 +189,7 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
     _userRealtimeSubscription?.cancel();
     _currentTime.dispose();
     _etaText.dispose();
+    _usual.dispose();
     _circleController.dispose();
     _refreshRotationController.dispose();
     _scrollController.dispose();
@@ -523,6 +526,7 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
             ? "--"
             : (_etaTargetMs != null ? _countdownLabel() : (other != null ? "Next: ${other.area}" : "ETA unavailable"));
         _etaText.value = etaDisplay;
+        if (_isNoLiveEta(etaDisplay)) _ensureUsualTimes();
         if (mounted) setState(() { _activeTrucks = activeCount; });
         if (telemetryClock != null) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -534,8 +538,45 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
       // No truck data at all: clear the count instead of leaving a stale value.
       _anchorEta(null);
       _etaText.value = "--";
+      _ensureUsualTimes();
       setState(() { _activeTrucks = 0; });
     }
+  }
+
+  // No live estimate for this area: the card shows the area's usual collection days and time range instead
+  // (verified visits of the last 28 days, utils/usual_collection_time.dart). Read once, only when it is needed.
+  final ValueNotifier<UsualCollectionTimes?> _usual = ValueNotifier<UsualCollectionTimes?>(null);
+  final UsualCollectionTimeService _usualService = UsualCollectionTimeService();
+  String? _usualFor;
+  int _usualTriedAtMs = 0;
+
+  static bool _isNoLiveEta(String text) => text == '--' || text == 'ETA unavailable';
+
+  void _ensureUsualTimes() {
+    final String? purok = _user?.purok;
+    if (purok == null || purok.trim().isEmpty) return;
+    final int now = ServerClock.instance.nowMs();
+    if (_usualFor == purok && (_usual.value != null || now - _usualTriedAtMs < 5 * 60 * 1000)) return;
+    _usualFor = purok;
+    _usualTriedAtMs = now;
+    _usualService.load(purok).then((UsualCollectionTimes? r) {
+      if (!mounted || _user?.purok != purok) return;
+      _usual.value = r;
+    });
+  }
+
+  Widget _buildEtaCard() {
+    return ListenableBuilder(
+      listenable: Listenable.merge(<Listenable>[_etaText, _usual]),
+      builder: (BuildContext _, Widget? __) {
+        final String eta = _etaText.value;
+        final UsualCollectionTimes? u = _usual.value;
+        if (_isNoLiveEta(eta) && u != null && u.hasPattern) {
+          return _buildStatCard('Usually ${u.daysLabel}', u.rangeLabel, Icons.access_time_filled_rounded, AppColors.statEtaBg, subtitle: u.basisLabel);
+        }
+        return _buildStatCard('Estimated Time', eta, Icons.access_time_filled_rounded, AppColors.statEtaBg);
+      },
+    );
   }
 
   Future<void> _fetchTotalDriversFromUserManagement() async {
@@ -1091,7 +1132,8 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
                                 flex: 3,
                                 child: Column(
                                   children: [
-                                    Row(
+                                    IntrinsicHeight(child: Row(
+                                      crossAxisAlignment: CrossAxisAlignment.stretch,
                                       children: [
                                         Expanded(
                                           child: _buildStatCard(
@@ -1103,19 +1145,9 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
                                           ),
                                         ),
                                         const SizedBox(width: 20),
-                                        Expanded(
-                                          child: ValueListenableBuilder<String>(
-                                            valueListenable: _etaText,
-                                            builder: (BuildContext _, String eta, Widget? __) => _buildStatCard(
-                                              "Estimated Time",
-                                              eta,
-                                              Icons.access_time_filled_rounded,
-                                              AppColors.statEtaBg,
-                                            ),
-                                          ),
-                                        ),
+                                        Expanded(child: _buildEtaCard()),
                                       ],
-                                    ),
+                                    )),
                                     const SizedBox(height: 24),
                                     _buildMapCard(),
                                   ],
@@ -1182,11 +1214,11 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
                   const SizedBox(height: 8),
                   Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 20),
-                      child: Row(children: [
+                      child: IntrinsicHeight(child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
                         Expanded(child: _buildStatCard("Active Trucks", "$_activeTrucks / $_totalTrucks", Icons.local_shipping_rounded, AppColors.statActiveBg, isLive: true)),
                         const SizedBox(width: 12),
-                        Expanded(child: ValueListenableBuilder<String>(valueListenable: _etaText, builder: (BuildContext _, String eta, Widget? __) => _buildStatCard("Estimated Time", eta, Icons.access_time_filled_rounded, AppColors.statEtaBg)))
-                      ])),
+                        Expanded(child: _buildEtaCard())
+                      ]))),
                   const SizedBox(height: 16),
                   _buildMapCard(),
                   _buildSectionHeader("Collection History", "See where garbage trucks have collected in your area."),
@@ -1808,7 +1840,7 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
     );
   }
 
-  Widget _buildStatCard(String title, String value, IconData icon, Color bgColor, {bool isLive = false}) {
+  Widget _buildStatCard(String title, String value, IconData icon, Color bgColor, {bool isLive = false, String? subtitle}) {
     final bool isDesktop = Responsive.isDesktop(context);
     final Color primaryColor = isLive ? const Color(0xFF00796B) : const Color(0xFFFBC02D);
     
@@ -1922,6 +1954,10 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
                     ),
                   ),
                 ),
+                if (subtitle != null) ...<Widget>[
+                  const SizedBox(height: 6),
+                  Text(subtitle, maxLines: 3, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 11, height: 1.3, color: Colors.grey.shade600, fontWeight: FontWeight.w600)),
+                ],
               ],
             ),
           ),
