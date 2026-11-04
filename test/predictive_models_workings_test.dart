@@ -72,7 +72,7 @@ void main() {
       expect(text('Time = Distance ÷ Speed × 60'), findsOneWidget);
       expect(find.text('2.0 ÷ 2', skipOffstage: false), findsOneWidget);
       expect(find.text('1.0 min', skipOffstage: false), findsWidgets);
-      expect(text('SSres = Σ(actual − predicted)²'), findsOneWidget);
+      expect(text('Total squared error (SSres)'), findsWidgets);
       expect(text('Fitted on the earliest 2 of 3 trips'), findsWidgets);
     });
 
@@ -83,7 +83,7 @@ void main() {
       // last 7 days of [0, 5000, 0, 10000, 5000, 0, 0, 5000, 5000, 0] = 0+10000+5000+0+0+5000+5000 = 25000 over 7 days
       expect(text('÷ 7'), findsWidgets);
       expect(text('The sum of the 7 days is 25,000 kg, so 25,000 ÷ 7 = 3,571 kg.'), findsOneWidget);
-      expect(text('Σ|actual − forecast| ÷ n'), findsOneWidget);
+      expect(text('MAE = sum of |actual − forecast| ÷ number of checked days'), findsOneWidget);
     });
   }
 
